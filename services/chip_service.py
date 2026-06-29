@@ -8,7 +8,10 @@ import pandas as pd
 import requests
 
 from config import FINMIND_TOKEN
-
+from services.supabase_service import (
+    get_large_holder_history_rows,
+    upsert_large_holder_history,
+)
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
