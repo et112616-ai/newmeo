@@ -16,7 +16,8 @@ from services.stock_service import (
     build_price_meta,
     get_history,
     get_stock_name,
-    normalize_stock_input,
+    normalize_stock_input
+    get_stock_futures_snapshot,
 )
 from utils.formatter import normalize_time_frame
 from utils.parser import BotRequest
@@ -426,6 +427,171 @@ def _build_margin_flex(
         },
     }
 
+def _fmt_price(value: float) -> str:
+    try:
+        return f"{float(value):,.2f}"
+    except Exception:
+        return "--"
+
+
+def _fmt_int(value: int) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return "--"
+
+
+def _fmt_signed(value: float) -> str:
+    try:
+        return f"{float(value):+,.2f}"
+    except Exception:
+        return "--"
+
+
+def _fmt_signed_pct(value: float) -> str:
+    try:
+        return f"{float(value):+.2f}%"
+    except Exception:
+        return "--"
+
+
+def _build_futures_flex(
+    stock_id: str,
+    stock_name: str,
+    snapshot,
+    current_tf: str,
+) -> dict[str, Any]:
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{stock_id} {stock_name}",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": "股票期貨近月",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    if not snapshot.available:
+        contents.append(
+            {
+                "type": "text",
+                "text": snapshot.message,
+                "size": "md",
+                "color": "#333333",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+
+        contents.extend(_mode_buttons(stock_id, "futures", current_tf))
+
+        return {
+            "type": "flex",
+            "altText": f"{stock_id} {stock_name} 期貨",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "contents": contents,
+                },
+            },
+        }
+
+    change_color = _price_color(snapshot.future_change)
+    basis_color = _price_color(snapshot.basis)
+
+    rows = [
+        ("商品", f"{snapshot.futures_name} ({snapshot.futures_id})", "#222222"),
+        ("契約", snapshot.contract_date, "#222222"),
+        ("時段", snapshot.trading_session, "#222222"),
+        ("日期", snapshot.trade_date, "#888888"),
+        (
+            "期貨",
+            f"{_fmt_price(snapshot.future_price)}  "
+            f"{_fmt_signed(snapshot.future_change)} "
+            f"({_fmt_signed_pct(snapshot.future_change_pct)})",
+            change_color,
+        ),
+        ("現貨", _fmt_price(snapshot.spot_price), "#222222"),
+        (
+            "期現價差",
+            f"{_fmt_signed(snapshot.basis)} ({_fmt_signed_pct(snapshot.basis_pct)})",
+            basis_color,
+        ),
+        ("成交量", _fmt_int(snapshot.volume), "#222222"),
+        ("未平倉", _fmt_int(snapshot.open_interest), "#222222"),
+    ]
+
+    for label, value, color in rows:
+        contents.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "margin": "sm",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": label,
+                        "size": "sm",
+                        "color": "#888888",
+                        "flex": 3,
+                    },
+                    {
+                        "type": "text",
+                        "text": str(value),
+                        "size": "sm",
+                        "color": color,
+                        "flex": 7,
+                        "wrap": True,
+                        "align": "end",
+                    },
+                ],
+            }
+        )
+
+    contents.append(
+        {
+            "type": "text",
+            "text": "規則：標準股票期貨、只抓近月；同近月有盤後資料則顯示盤後，否則顯示日盤。",
+            "size": "xs",
+            "color": "#999999",
+            "wrap": True,
+            "margin": "md",
+        }
+    )
+
+    contents.extend(_mode_buttons(stock_id, "futures", current_tf))
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 期貨",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "contents": contents,
+            },
+        },
+    }
 
 def _build_text_flex(
     stock_id: str,
@@ -587,14 +753,13 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             )
 
         if action == "futures":
-            return _build_text_flex(
-                stock_id=meta.stock_id,
-                stock_name=stock_name,
-                title="期貨功能",
-                message="期貨模式尚未接上。下一版可接台指期、期現貨價差、外資期貨未平倉。",
-                active_mode="futures",
-                current_tf=requested_tf,
-            )
+            snapshot = get_stock_futures_snapshot(meta.stock_id, stock_name)
+                return _build_futures_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    snapshot=snapshot,
+                    current_tf=requested_tf,
+                )
 
         return text_message(f"目前不支援的功能：{action}")
 
