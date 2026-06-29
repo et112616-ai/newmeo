@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, time
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -9,12 +11,21 @@ import yfinance as yf
 from utils.formatter import normalize_time_frame, signed_number, signed_percent
 
 
+STOCK_SERVICE_VERSION = "stock_service_v4_intraday_reference_price"
+
+TW_SUFFIX = ".TW"
+TWO_SUFFIX = ".TWO"
+
+REFERENCE_PRICE_COL = "_reference_price"
+DISPLAY_TIMESTAMP_COL = "_display_timestamp"
+
+
 @dataclass
 class StockMeta:
     input_text: str
-    stock_id: str          # 2330
-    yf_symbol: str         # 2330.TW
-    stock_name: str        # 台積電 / shortName / fallback
+    stock_id: str
+    yf_symbol: str
+    stock_name: str
 
 
 @dataclass
@@ -26,27 +37,17 @@ class PriceMeta:
     latest_price: float
 
 
-TW_SUFFIX = ".TW"
-TWO_SUFFIX = ".TWO"
-
-
 def _twstock_lookup(query: str) -> Optional[tuple[str, str]]:
-    """
-    用 twstock 的 codes 資料做台股名稱/代號查詢，不在專案內硬編股票清單。
-    找不到時回傳 None。
-    """
     try:
         import twstock
 
         q = query.strip()
         q_upper = q.upper().replace(TW_SUFFIX, "").replace(TWO_SUFFIX, "")
 
-        # 代號精準查詢
         if q_upper in twstock.codes:
             item = twstock.codes[q_upper]
             return q_upper, getattr(item, "name", q_upper) or q_upper
 
-        # 名稱精準 / 包含查詢
         exact = []
         partial = []
 
@@ -108,13 +109,7 @@ def _download_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
 
 def _normalize_to_taipei_time(df: pd.DataFrame) -> pd.DataFrame:
     """
-    將 yfinance 回傳的時間統一轉成台北時間，並移除 timezone。
-
-    如果 yfinance 回來是 UTC：
-    01:00 -> 09:00
-
-    如果 yfinance 回來已經是 Asia/Taipei：
-    09:00 -> 09:00
+    將 yfinance 回傳時間統一轉成台北時間，並移除 timezone。
     """
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return df
@@ -123,12 +118,10 @@ def _normalize_to_taipei_time(df: pd.DataFrame) -> pd.DataFrame:
 
     try:
         if df.index.tz is None:
-            # 你的圖出現 01:00，代表高機率是 UTC naive。
             df.index = df.index.tz_localize("UTC").tz_convert("Asia/Taipei")
         else:
             df.index = df.index.tz_convert("Asia/Taipei")
 
-        # Matplotlib 比較穩定：轉完台北時間後拿掉 timezone。
         df.index = df.index.tz_localize(None)
 
     except Exception as exc:
@@ -145,67 +138,200 @@ def _keep_latest_trading_day(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     last_date = df.index[-1].date()
-    return df[df.index.date == last_date]
+    return df[df.index.date == last_date].copy()
 
 
 def _filter_tw_stock_session(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
     """
-    台股現貨交易時間：
-    09:00 ~ 13:30
-
-    只對 1m / 5m 盤中資料做過濾。
+    台股現貨交易時間：09:00 ~ 13:30
     """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
 
     try:
-        return df.between_time("09:00", "13:30")
+        return df.between_time("09:00", "13:30").copy()
     except Exception as exc:
         print(f"_filter_tw_stock_session failed: {exc}")
         return df
 
-def _attach_intraday_reference_price(meta: StockMeta, df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
+
+def _set_reference_price(df: pd.DataFrame, reference_price: float) -> pd.DataFrame:
+    """
+    同時把平盤價存到 attrs 和欄位。
+    欄位是為了避免某些 pandas 操作後 attrs 遺失。
+    """
+    df = df.copy()
+
+    ref = float(reference_price)
+
+    df.attrs["reference_price"] = ref
+    df[REFERENCE_PRICE_COL] = ref
+
+    return df
+
+
+def _get_reference_price_from_df(df: pd.DataFrame) -> float:
+    """
+    從 df 取平盤價。
+
+    優先順序：
+    1. df.attrs["reference_price"]
+    2. df["_reference_price"]
+    3. 今日第一筆 Open
+    4. 今日第一筆 Close
+    """
+    try:
+        ref = df.attrs.get("reference_price")
+        if ref not in (None, ""):
+            ref_float = float(ref)
+            if ref_float > 0:
+                return ref_float
+    except Exception:
+        pass
+
+    try:
+        if REFERENCE_PRICE_COL in df.columns:
+            s = df[REFERENCE_PRICE_COL].dropna()
+            if not s.empty:
+                ref_float = float(s.iloc[-1])
+                if ref_float > 0:
+                    return ref_float
+    except Exception:
+        pass
+
+    try:
+        if "Open" in df.columns and not df["Open"].empty:
+            ref_float = float(df["Open"].iloc[0])
+            if ref_float > 0:
+                return ref_float
+    except Exception:
+        pass
+
+    try:
+        return float(df["Close"].iloc[0])
+    except Exception:
+        return 0.0
+
+
+def _get_previous_close(meta: StockMeta, trade_date) -> float:
+    """
+    取得前一交易日收盤價，作為平盤價。
+    """
+    try:
+        daily = _download_history(meta.yf_symbol, "15d", "1d")
+
+        if daily.empty and meta.yf_symbol.endswith(TW_SUFFIX):
+            two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
+            daily = _download_history(two_symbol, "15d", "1d")
+
+        if daily.empty:
+            return 0.0
+
+        daily = daily.dropna(subset=["Close"])
+        daily = _normalize_to_taipei_time(daily)
+
+        if daily.empty:
+            return 0.0
+
+        prev_daily = daily[daily.index.date < trade_date]
+
+        if prev_daily.empty:
+            return 0.0
+
+        return float(prev_daily["Close"].iloc[-1])
+
+    except Exception as exc:
+        print(f"_get_previous_close failed: {exc}")
+        return 0.0
+
+
+def _attach_intraday_reference_price(
+    meta: StockMeta,
+    df: pd.DataFrame,
+    time_frame: str,
+) -> pd.DataFrame:
     """
     幫 1m / 5m 盤中資料加上平盤價。
-    平盤價應該是前一交易日收盤價，不是今日開盤價。
+    平盤價 = 前一交易日收盤價，不是今日開盤價。
     """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
 
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+
     df = df.copy()
 
+    trade_date = df.index[-1].date()
+
+    ref_price = _get_previous_close(meta, trade_date)
+
+    if ref_price > 0:
+        return _set_reference_price(df, ref_price)
+
     try:
-        daily = _download_history(meta.yf_symbol, "10d", "1d")
+        fallback_ref = float(df["Open"].iloc[0])
+        return _set_reference_price(df, fallback_ref)
+    except Exception:
+        return df
 
-        if daily.empty and meta.yf_symbol.endswith(TW_SUFFIX):
-            two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
-            daily = _download_history(two_symbol, "10d", "1d")
 
-        if not daily.empty:
-            daily = daily.dropna(subset=["Close"])
-            daily = _normalize_to_taipei_time(daily)
+def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
+    """
+    yfinance 有時最後一筆停在 13:24、13:25。
+    收盤後補一筆 13:30，價格沿用最後一筆，讓畫面顯示完整收盤時間。
+    """
+    if df.empty or time_frame not in {"1m", "5m"}:
+        return df
 
-            trade_date = df.index[-1].date()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
 
-            # 只取今日以前的最後一個交易日收盤價
-            prev_daily = daily[daily.index.date < trade_date]
+    try:
+        df = df.copy()
+        attrs = dict(df.attrs)
 
-            if not prev_daily.empty:
-                ref_price = float(prev_daily["Close"].iloc[-1])
-                df.attrs["reference_price"] = ref_price
-                return df
+        last_ts = df.index[-1]
+        trade_date = last_ts.date()
+        close_ts = pd.Timestamp.combine(trade_date, time(13, 30))
+
+        if last_ts >= close_ts:
+            return df
+
+        if last_ts.time() < time(13, 20):
+            return df
+
+        now_tpe = datetime.now(ZoneInfo("Asia/Taipei"))
+
+        is_old_trade_day = trade_date < now_tpe.date()
+        is_after_close_today = (
+            trade_date == now_tpe.date()
+            and now_tpe.time() >= time(13, 35)
+        )
+
+        if not is_old_trade_day and not is_after_close_today:
+            return df
+
+        last_row = df.iloc[-1].copy()
+
+        append_df = pd.DataFrame([last_row], index=[close_ts])
+        append_df.columns = df.columns
+
+        df = pd.concat([df, append_df])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+
+        df.attrs.update(attrs)
+
+        display_stamp = f"{trade_date.strftime('%Y-%m-%d')} 13:30"
+        df.attrs["display_timestamp"] = display_stamp
+        df[DISPLAY_TIMESTAMP_COL] = display_stamp
+
+        return df
 
     except Exception as exc:
-        print(f"_attach_intraday_reference_price failed: {exc}")
+        print(f"_append_intraday_close_point failed: {exc}")
+        return df
 
-    # fallback：真的抓不到昨收，才用今日第一筆 Open
-    try:
-        if "Open" in df and not df["Open"].empty:
-            df.attrs["reference_price"] = float(df["Open"].iloc[0])
-    except Exception:
-        pass
-
-    return df
 
 def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, str]:
     tf = normalize_time_frame(time_frame)
@@ -222,7 +348,6 @@ def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, s
 
     df = _download_history(meta.yf_symbol, period, interval)
 
-    # 上櫃股票 fallback .TWO
     if df.empty and meta.yf_symbol.endswith(TW_SUFFIX):
         two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
         df = _download_history(two_symbol, period, interval)
@@ -230,25 +355,25 @@ def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, s
         if not df.empty:
             meta.yf_symbol = two_symbol
 
-    # yfinance 盤中 1m 在盤後 / 假日可能 period=1d 空掉，改抓 5d 再取最後交易日。
     if df.empty and tf == "1m":
         df = _download_history(meta.yf_symbol, "5d", "1m")
 
     if not df.empty:
         df = df.dropna(subset=["Close"])
 
-        # 關鍵：先轉台北時間
         df = _normalize_to_taipei_time(df)
 
-        # 1m / 5m 只取最新交易日
         if tf in {"1m", "5m"}:
             df = _keep_latest_trading_day(df)
 
-        # 1m / 5m 過濾台股現貨盤中時間
-        df = _filter_tw_stock_session(df, tf)
-        # 1m / 5m 加上平盤價，給圖表置中使用
+        if tf in {"1m", "5m"}:
+            df = _filter_tw_stock_session(df, tf)
+
         if tf in {"1m", "5m"}:
             df = _attach_intraday_reference_price(meta, df, tf)
+
+        if tf in {"1m", "5m"}:
+            df = _append_intraday_close_point(df, tf)
 
     return df, tf
 
@@ -259,7 +384,6 @@ def get_stock_name(meta: StockMeta) -> str:
 
     try:
         ticker = yf.Ticker(meta.yf_symbol)
-
         info = ticker.info or {}
 
         return (
@@ -273,19 +397,83 @@ def get_stock_name(meta: StockMeta) -> str:
 
 
 def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
+    """
+    價格資訊。
+
+    重要：
+    - 1m / 5m：漲跌幅 = 最新價 vs 平盤價
+    - D / W / M：漲跌幅 = 最新一根 vs 前一根
+    """
     if df.empty:
         return PriceMeta("--", "--", "--", 0.0, 0.0)
 
+    tf = normalize_time_frame(time_frame)
+
     latest = float(df["Close"].iloc[-1])
-    prev = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
+
+    if tf in {"1m", "5m"}:
+        prev = _get_reference_price_from_df(df)
+
+        if not prev:
+            prev = latest
+
+    else:
+        prev = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
 
     change = latest - prev
     pct = (change / prev * 100) if prev else 0.0
 
-    if time_frame in {"1m", "5m"}:
-        stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
+    if tf in {"1m", "5m"}:
+        display_stamp = df.attrs.get("display_timestamp")
+
+        if not display_stamp and DISPLAY_TIMESTAMP_COL in df.columns:
+            try:
+                s = df[DISPLAY_TIMESTAMP_COL].dropna()
+                if not s.empty:
+                    display_stamp = str(s.iloc[-1])
+            except Exception:
+                display_stamp = ""
+
+        if display_stamp:
+            stamp = str(display_stamp)
+        else:
+            last_ts = df.index[-1]
+
+            try:
+                now_tpe = datetime.now(ZoneInfo("Asia/Taipei"))
+                trade_date = last_ts.date()
+
+                if (
+                    last_ts.time() >= time(13, 20)
+                    and (
+                        trade_date < now_tpe.date()
+                        or (
+                            trade_date == now_tpe.date()
+                            and now_tpe.time() >= time(13, 35)
+                        )
+                    )
+                ):
+                    stamp = f"{trade_date.strftime('%Y-%m-%d')} 13:30"
+                else:
+                    stamp = last_ts.strftime("%Y-%m-%d %H:%M")
+
+            except Exception:
+                stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
+
     else:
         stamp = df.index[-1].strftime("%Y-%m-%d")
+
+    print(
+        STOCK_SERVICE_VERSION,
+        "| build_price_meta",
+        "| tf=", tf,
+        "| latest=", latest,
+        "| reference/prev=", prev,
+        "| change=", change,
+        "| pct=", pct,
+        "| stamp=", stamp,
+        "| attrs=", df.attrs,
+    )
 
     return PriceMeta(
         price_info=f"{latest:.2f}",
