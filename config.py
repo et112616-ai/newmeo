@@ -8,7 +8,7 @@ PORT = int(os.getenv("PORT", "5000"))
 # 第一版先使用固定圖床 URL，之後可替換成 Cloudinary / S3 / Render Static。
 IMAGE_URL = os.getenv(
     "IMAGE_URL",
-    "https://dummyimage.com/600x450/007aff/ffffff.png&text=Stock+Chart+Test",
+    "image_url = save_chart_and_get_url(fig, stock_id, mode, time_frame)",
 )
 
 # FinMind Token：第一版可不填，會使用 mock fallback。
