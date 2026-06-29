@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-import time
 import re
-from typing import Optional
+import time
 
 import matplotlib.pyplot as plt
 
@@ -16,21 +15,15 @@ def _safe_filename(value: str) -> str:
     return value[:80] or "chart"
 
 
-def save_chart_and_get_url(
-    fig,
-    stock_id: str,
-    mode: str,
-    time_frame: str,
-    fallback_url: Optional[str] = None
-) -> str:
+def publish_figure(fig, name: str) -> str:
     """
-    將 matplotlib figure 存到 static/charts，
-    並回傳 LINE 可讀取的公開圖片 URL。
+    將 Matplotlib figure 存到 static/charts，
+    並回傳 LINE 可以讀取的公開圖片網址。
     """
     os.makedirs(CHART_DIR, exist_ok=True)
 
     timestamp = int(time.time())
-    filename = f"{_safe_filename(stock_id)}_{_safe_filename(mode)}_{_safe_filename(time_frame)}_{timestamp}.png"
+    filename = f"{_safe_filename(name)}_{timestamp}.png"
     file_path = os.path.join(CHART_DIR, filename)
 
     try:
@@ -41,12 +34,11 @@ def save_chart_and_get_url(
             facecolor="white"
         )
 
-        public_url = f"{PUBLIC_BASE_URL}{CHART_URL_PREFIX}/{filename}"
-        return public_url
+        return f"{PUBLIC_BASE_URL}{CHART_URL_PREFIX}/{filename}"
 
     except Exception as exc:
-        print(f"save_chart_and_get_url failed: {exc}")
-        return fallback_url or IMAGE_URL
+        print(f"publish_figure failed: {exc}")
+        return IMAGE_URL
 
     finally:
         plt.close(fig)
