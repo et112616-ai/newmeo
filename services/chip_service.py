@@ -498,24 +498,209 @@ def _large_holder_unavailable(reason: str = "資料未取得") -> list[dict]:
         }
     ]
 
+def _normalize_date_for_db(date_str: str) -> str:
+    """
+    轉成 Supabase date 欄位需要的 YYYY-MM-DD。
+
+    支援：
+    20260626
+    2026-06-26
+    """
+    s = str(date_str or "").strip()
+
+    if not s:
+        return ""
+
+    try:
+        if len(s) >= 10 and "-" in s:
+            return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+
+        if len(s) >= 8 and s[:8].isdigit():
+            return datetime.strptime(s[:8], "%Y%m%d").strftime("%Y-%m-%d")
+
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _extract_tdcc_latest_large_holder_record(stock_id: str) -> dict | None:
+    """
+    從 TDCC 最新 CSV 抓出某檔股票的千張大戶比例。
+    回傳：
+    {
+        "stock_id": "2344",
+        "trade_date": "2026-06-26",
+        "ratio": 65.42
+    }
+    """
+    sid = _clean_stock_id(stock_id)
+    rows = _request_tdcc_latest_rows(sid)
+
+    if not rows:
+        return None
+
+    by_date: dict[str, float] = {}
+
+    for r in rows:
+        raw_date = str(r.get("資料日期", "")).strip()
+        trade_date = _normalize_date_for_db(raw_date)
+        level = r.get("持股分級", "")
+
+        if not trade_date:
+            continue
+
+        if not _is_large_holder_level(level):
+            continue
+
+        ratio = _to_float(r.get("占集保庫存數比例%"))
+
+        by_date[trade_date] = by_date.get(trade_date, 0.0) + ratio
+
+    if not by_date:
+        return None
+
+    trade_date, ratio = sorted(by_date.items())[-1]
+
+    return {
+        "stock_id": sid,
+        "trade_date": trade_date,
+        "ratio": ratio,
+    }
+
+
+def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
+    """
+    抓 TDCC 最新一週大戶資料，寫進 Supabase。
+    """
+    sid = _clean_stock_id(stock_id)
+    record = _extract_tdcc_latest_large_holder_record(sid)
+
+    if not record:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "message": "TDCC 最新資料未取得",
+        }
+
+    ok = upsert_large_holder_history(
+        stock_id=record["stock_id"],
+        trade_date=record["trade_date"],
+        large_holder_ratio=record["ratio"],
+        source="TDCC",
+    )
+
+    return {
+        "stock_id": sid,
+        "ok": ok,
+        "trade_date": record["trade_date"],
+        "ratio": record["ratio"],
+        "message": "synced" if ok else "Supabase 寫入失敗",
+    }
+
+
+def sync_tdcc_latest_large_holder_many(stock_ids: list[str]) -> list[dict]:
+    results = []
+
+    for stock_id in stock_ids:
+        stock_id = _clean_stock_id(stock_id)
+
+        if not stock_id:
+            continue
+
+        results.append(sync_tdcc_latest_large_holder(stock_id))
+
+    return results
+
+
+def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[dict]:
+    """
+    從 Supabase 撈最近 6 週大戶資料。
+    若資料庫目前只有 1 週，就只顯示 1 週。
+    """
+    sid = _clean_stock_id(stock_id)
+
+    # 多撈 1 筆，方便計算最舊一筆變化。
+    rows = get_large_holder_history_rows(sid, limit=limit + 1)
+
+    if not rows:
+        return []
+
+    normalized = []
+
+    for r in rows:
+        date = str(r.get("trade_date", "")).strip()
+        ratio = _to_float(r.get("large_holder_ratio"))
+
+        if not date:
+            continue
+
+        normalized.append(
+            {
+                "date": date,
+                "ratio": ratio,
+            }
+        )
+
+    if not normalized:
+        return []
+
+    # Supabase 撈出來是新到舊，這裡先轉成舊到新計算 diff。
+    normalized = sorted(normalized, key=lambda x: x["date"])
+
+    output_asc = []
+
+    for i, item in enumerate(normalized):
+        ratio = item["ratio"]
+
+        if i > 0:
+            prev_ratio = normalized[i - 1]["ratio"]
+            diff_text = f"{ratio - prev_ratio:+.2f}%"
+        else:
+            diff_text = "--"
+
+        output_asc.append(
+            {
+                "date": _fmt_md(item["date"]),
+                "ratio": f"{ratio:.2f}%",
+                "diff": diff_text,
+            }
+        )
+
+    # 回傳新到舊，最多 limit 筆。
+    return output_asc[-limit:][::-1]
 
 def get_large_holder_table(stock_id: str) -> list[dict]:
     """
     千張大戶持股比率。
 
-    目前 FinMind 帳號等級為 register，不能使用 TaiwanStockHoldingSharesPer。
-    所以暫時只使用 TDCC OpenData 最新一週資料。
+    現在流程：
+    1. 先嘗試抓 TDCC 最新資料並寫入 Supabase。
+    2. 再從 Supabase 撈最近 6 週歷史。
+    3. 若 Supabase 沒資料，才直接回 TDCC 最新一週。
     """
+    sid = _clean_stock_id(stock_id)
 
-    tdcc_rows = _request_tdcc_latest_rows(stock_id)
+    # 每次查詢時順手同步 TDCC 最新一週。
+    # 這樣就算忘了跑排程，也至少會補最新資料。
+    sync_result = sync_tdcc_latest_large_holder(sid)
 
-    if tdcc_rows:
-        output = _large_holder_from_tdcc_latest_rows(tdcc_rows)
+    history = _large_holder_from_supabase_history(sid, limit=6)
 
-        if output:
-            return output
+    if history:
+        return history
 
-    return _large_holder_unavailable("TDCC 最新資料未取得")
+    # 如果 Supabase 還沒成功，但 TDCC 有抓到，就至少顯示最新一週。
+    if sync_result.get("ok"):
+        return [
+            {
+                "date": _fmt_md(sync_result.get("trade_date", "")),
+                "ratio": f"{_to_float(sync_result.get('ratio')):.2f}%",
+                "diff": "--",
+            }
+        ]
+
+    return _large_holder_unavailable("Supabase/TDCC皆無資料")
     
 # ============================================================
 # 融資券
