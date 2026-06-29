@@ -139,12 +139,11 @@ def parse_make_payload(payload: Dict[str, Any]) -> BotRequest:
     # ============================================================
     # B. Make 簡化格式備援
     # ============================================================
-postback = payload.get("postback") or {}
-
-postback_data = (
-    _dict_get_first(postback, "data")
-    or _first_value(payload.get("postbackData"))
-)
+    postback = payload.get("postback") or {}
+    postback_data = (
+        _dict_get_first(postback, "data")
+        or _first_value(payload.get("postbackData"))
+    )
 
     if postback_data:
         parsed = parse_postback_data(postback_data)
