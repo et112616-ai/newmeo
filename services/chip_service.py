@@ -500,24 +500,9 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
     """
     千張大戶持股比率。
 
-    優先順序：
-    1. FinMind TaiwanStockHoldingSharesPer：若帳號有權限，可取得歷史多週。
-    2. TDCC OpenData CSV：免費官方資料，通常只有最新一週。
-    3. 都失敗則顯示資料未取得，不再回傳假日期。
+    目前 FinMind 帳號等級為 register，不能使用 TaiwanStockHoldingSharesPer。
+    所以暫時只使用 TDCC OpenData 最新一週資料。
     """
-    start_date = _start_date(120)
-
-    finmind_rows = _request_finmind(
-        dataset="TaiwanStockHoldingSharesPer",
-        stock_id=stock_id,
-        start_date=start_date,
-    )
-
-    if finmind_rows:
-        output = _large_holder_from_finmind_rows(finmind_rows)
-
-        if output:
-            return output
 
     tdcc_rows = _request_tdcc_latest_rows(stock_id)
 
@@ -527,9 +512,8 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
         if output:
             return output
 
-    return _large_holder_unavailable("TDCC/FinMind皆無資料")
-
-
+    return _large_holder_unavailable("TDCC 最新資料未取得")
+    
 # ============================================================
 # 融資券
 # ============================================================
