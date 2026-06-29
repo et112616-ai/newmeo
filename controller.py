@@ -12,23 +12,20 @@ from services.chip_service import (
     get_large_holder_table,
     get_margin_table,
 )
+from services.futures_service import get_stock_futures_snapshot
 from services.stock_service import (
     build_price_meta,
     get_history,
     get_stock_name,
-    normalize_stock_input
-    get_stock_futures_snapshot,
+    normalize_stock_input,
 )
 from utils.formatter import normalize_time_frame
 from utils.parser import BotRequest
-
-
 UP_COLOR = "#FF2D2D"
 DOWN_COLOR = "#00B050"
 FLAT_COLOR = "#666666"
 ACTIVE_COLOR = "#16C957"
 INACTIVE_COLOR = "#D9DDE3"
-
 
 def _normalize_action(action: str | None) -> str:
     action = str(action or "").strip()
