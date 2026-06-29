@@ -37,13 +37,18 @@ def get_chart():
         payload: Dict[str, Any] = request.get_json(force=True, silent=False) or {}
         bot_req = parse_make_payload(payload)
         msg = handle_request(bot_req)
-        return jsonify({"messages": [msg]}), 200
-    except Exception as exc:
+import json
+def make_reply_payload(message):
+    messages = [message]
+    return {
+        "messages": messages,
+        "messages_json": json.dumps(messages, ensure_ascii=False)
+    }
+except Exception as exc:
         # 回 200 是為了避免 Make module 直接變紅；錯誤交給 LINE 文字訊息顯示。
         print("ERROR in /get_chart:", str(exc))
         print(traceback.format_exc())
-        return jsonify({"messages": [text_message(f"❌ 系統執行錯誤：{str(exc)}")]}), 200
-
+return jsonify(make_reply_payload(build_error_response("錯誤訊息"))), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
