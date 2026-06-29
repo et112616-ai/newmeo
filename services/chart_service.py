@@ -9,6 +9,7 @@ import matplotlib.dates as mdates
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.ticker as mticker
 
 from services.upload_service import publish_figure
 from utils.formatter import normalize_time_frame
@@ -48,6 +49,78 @@ def _set_tw_stock_intraday_axis(ax, df: pd.DataFrame) -> None:
     ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
+def _get_reference_price(df: pd.DataFrame) -> float:
+    """
+    取得平盤價。
+    優先使用 stock_service.py 放進 df.attrs 的 reference_price。
+    """
+    ref = df.attrs.get("reference_price")
+
+    try:
+        if ref:
+            return float(ref)
+    except Exception:
+        pass
+
+    try:
+        if "Open" in df and not df["Open"].empty:
+            return float(df["Open"].iloc[0])
+    except Exception:
+        pass
+
+    return float(df["Close"].iloc[0])
+
+
+def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
+    """
+    讓平盤價置於 Y 軸中間，並在右側顯示漲跌幅百分比。
+    """
+    ref_price = _get_reference_price(df)
+
+    close = df["Close"].astype(float).dropna()
+
+    if close.empty:
+        return ref_price
+
+    max_delta = max(
+        abs(float(close.max()) - ref_price),
+        abs(float(close.min()) - ref_price),
+    )
+
+    if max_delta <= 0:
+        max_delta = max(ref_price * 0.005, 0.5)
+
+    max_delta *= 1.2
+
+    ymin = ref_price - max_delta
+    ymax = ref_price + max_delta
+
+    ax.set_ylim(ymin, ymax)
+
+    ax.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.0,
+        alpha=0.8,
+        label="平盤",
+    )
+
+    def price_to_pct(price):
+        return (price - ref_price) / ref_price * 100
+
+    def pct_to_price(pct):
+        return ref_price * (1 + pct / 100)
+
+    secax = ax.secondary_yaxis(
+        "right",
+        functions=(price_to_pct, pct_to_price),
+    )
+
+    secax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
+    )
+
+    return ref_price
 
 def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
     if df.empty:
@@ -56,24 +129,43 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
     ax.set_facecolor("#F8F9FA")
 
-    ax.plot(df.index, df["Close"], linewidth=2.2, label="即時價格")
+    close = df["Close"].astype(float)
+    ref_price = _get_reference_price(df)
 
-    if "Open" in df and not df["Open"].empty:
-        open_price = float(df["Open"].iloc[0])
-        ax.axhline(open_price, linestyle="--", linewidth=1.0, label="參考開盤")
+    ax.plot(df.index, close, linewidth=2.2, label="即時價格")
+
+    # 漲跌區塊，類似你參考圖的效果
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close >= ref_price,
+        alpha=0.18,
+        interpolate=True,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close < ref_price,
+        alpha=0.12,
+        interpolate=True,
+    )
 
     ax.set_title(f"{stock_id} {stock_name} 即時走勢", fontsize=13, fontweight="bold")
 
     _set_tw_stock_intraday_axis(ax, df)
+    _set_centered_price_axis(ax, df)
 
     ax.grid(True, linestyle=":", alpha=0.55)
     ax.legend(loc="best", fontsize=8)
+
     fig.autofmt_xdate()
     fig.tight_layout()
 
     return publish_figure(fig, f"{stock_id}_instant")
-
-
+    
 def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_frame: str) -> str:
     tf = normalize_time_frame(time_frame)
 
