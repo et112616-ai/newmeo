@@ -14,15 +14,32 @@ from utils.parser import parse_make_payload
 app = Flask(__name__)
 
 
-def make_reply_payload(message: Dict[str, Any]) -> Dict[str, Any]:
+def extract_reply_token(payload: Dict[str, Any]) -> str:
+    """
+    從 Make 傳來的 LINE events 裡抓第一筆 replyToken。
+    避免在 Make 最後一顆模組裡處理 events[] 陣列。
+    """
+    events = payload.get("events", [])
+
+    if isinstance(events, list) and len(events) > 0:
+        first_event = events[0]
+        if isinstance(first_event, dict):
+            return first_event.get("replyToken", "")
+
+    return ""
+
+
+def make_reply_payload(message: Dict[str, Any], reply_token: str = "") -> Dict[str, Any]:
     """
     同時回傳：
-    1. messages：給 Make / Debug 看
-    2. messages_json：給最後一顆 LINE Make an API Call 直接塞進 body
+    1. replyToken：給最後一顆 LINE API Call 用
+    2. messages：給 Make / Debug 看
+    3. messages_json：給 LINE API body 直接塞入
     """
     messages = [message]
 
     return {
+        "replyToken": reply_token,
         "messages": messages,
         "messages_json": json.dumps(messages, ensure_ascii=False)
     }
@@ -38,28 +55,16 @@ def health():
 
 @app.route("/get_chart", methods=["POST"])
 def get_chart():
-    """
-    Make 4 Module 專用入口。
-
-    Make HTTP Body 建議：
-    {
-      "events": [...]
-    }
-
-    回傳固定：
-    {
-      "messages": [...],
-      "messages_json": "[...]"
-    }
-    """
     try:
         payload: Dict[str, Any] = request.get_json(force=True, silent=False) or {}
+
+        reply_token = extract_reply_token(payload)
 
         bot_req = parse_make_payload(payload)
 
         msg = handle_request(bot_req)
 
-        return jsonify(make_reply_payload(msg)), 200
+        return jsonify(make_reply_payload(msg, reply_token)), 200
 
     except Exception as exc:
         print("ERROR in /get_chart:", str(exc))
@@ -67,7 +72,14 @@ def get_chart():
 
         error_msg = text_message(f"伺服器內部錯誤：{str(exc)}")
 
-        return jsonify(make_reply_payload(error_msg)), 200
+        reply_token = ""
+        try:
+            payload = request.get_json(force=True, silent=True) or {}
+            reply_token = extract_reply_token(payload)
+        except Exception:
+            pass
+
+        return jsonify(make_reply_payload(error_msg, reply_token)), 200
 
 
 if __name__ == "__main__":
