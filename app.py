@@ -6,8 +6,9 @@ from typing import Any, Dict
 
 from flask import Flask, jsonify, request
 
-from config import PORT
+from config import PORT, TDCC_SYNC_STOCKS, TDCC_SYNC_TOKEN
 from controller import handle_request
+from services.chip_service import sync_tdcc_latest_large_holder_many
 from flex.flex_builder import text_message
 from utils.parser import parse_make_payload
 
@@ -56,6 +57,45 @@ def health():
         "service": "stock-line-bot"
     }), 200
 
+@app.route("/sync_tdcc_large_holder", methods=["GET", "POST"])
+def sync_tdcc_large_holder_route():
+    token = request.args.get("token", "").strip()
+
+    if not token:
+        token = request.headers.get("X-Sync-Token", "").strip()
+
+    if not TDCC_SYNC_TOKEN or token != TDCC_SYNC_TOKEN:
+        return jsonify(
+            {
+                "status": "forbidden",
+                "message": "invalid token",
+            }
+        ), 403
+
+    stocks_param = request.args.get("stocks", "").strip()
+
+    if not stocks_param and request.method == "POST":
+        payload = request.get_json(force=True, silent=True) or {}
+        stocks_param = str(payload.get("stocks", "")).strip()
+
+    if not stocks_param:
+        stocks_param = TDCC_SYNC_STOCKS
+
+    stock_ids = [
+        s.strip()
+        for s in stocks_param.split(",")
+        if s.strip()
+    ]
+
+    results = sync_tdcc_latest_large_holder_many(stock_ids)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "count": len(results),
+            "results": results,
+        }
+    ), 200
 
 @app.route("/get_chart", methods=["POST"])
 def get_chart():
