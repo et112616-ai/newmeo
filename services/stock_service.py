@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -11,13 +11,14 @@ import yfinance as yf
 from utils.formatter import normalize_time_frame, signed_number, signed_percent
 
 
-STOCK_SERVICE_VERSION = "stock_service_v4_intraday_reference_price"
+STOCK_SERVICE_VERSION = "stock_service_v5_quote_reconcile"
 
 TW_SUFFIX = ".TW"
 TWO_SUFFIX = ".TWO"
 
 REFERENCE_PRICE_COL = "_reference_price"
 DISPLAY_TIMESTAMP_COL = "_display_timestamp"
+QUOTE_PRICE_COL = "_quote_price"
 
 
 @dataclass
@@ -101,6 +102,45 @@ def normalize_stock_input(stock_input: str) -> StockMeta:
     )
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("%", "").strip()
+
+            if not value:
+                return default
+
+        return float(value)
+
+    except Exception:
+        return default
+
+
+def _read_value(source: Any, keys: list[str]) -> Any:
+    for key in keys:
+        try:
+            if isinstance(source, dict) and key in source:
+                return source.get(key)
+
+            if hasattr(source, "get"):
+                value = source.get(key)
+                if value not in (None, ""):
+                    return value
+
+            if hasattr(source, key):
+                value = getattr(source, key)
+                if value not in (None, ""):
+                    return value
+
+        except Exception:
+            continue
+
+    return None
+
+
 def _download_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
     ticker = yf.Ticker(symbol)
     df = ticker.history(period=period, interval=interval, auto_adjust=False)
@@ -108,9 +148,6 @@ def _download_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
 
 
 def _normalize_to_taipei_time(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    將 yfinance 回傳時間統一轉成台北時間，並移除 timezone。
-    """
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return df
 
@@ -131,9 +168,6 @@ def _normalize_to_taipei_time(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _keep_latest_trading_day(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    盤中資料只保留最新交易日，避免 5d / 5m 把多天混在同一張圖。
-    """
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return df
 
@@ -142,9 +176,6 @@ def _keep_latest_trading_day(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_tw_stock_session(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
-    """
-    台股現貨交易時間：09:00 ~ 13:30
-    """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
 
@@ -156,10 +187,6 @@ def _filter_tw_stock_session(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
 
 
 def _set_reference_price(df: pd.DataFrame, reference_price: float) -> pd.DataFrame:
-    """
-    同時把平盤價存到 attrs 和欄位。
-    欄位是為了避免某些 pandas 操作後 attrs 遺失。
-    """
     df = df.copy()
 
     ref = float(reference_price)
@@ -171,39 +198,38 @@ def _set_reference_price(df: pd.DataFrame, reference_price: float) -> pd.DataFra
 
 
 def _get_reference_price_from_df(df: pd.DataFrame) -> float:
-    """
-    從 df 取平盤價。
-
-    優先順序：
-    1. df.attrs["reference_price"]
-    2. df["_reference_price"]
-    3. 今日第一筆 Open
-    4. 今日第一筆 Close
-    """
     try:
         ref = df.attrs.get("reference_price")
+
         if ref not in (None, ""):
             ref_float = float(ref)
+
             if ref_float > 0:
                 return ref_float
+
     except Exception:
         pass
 
     try:
         if REFERENCE_PRICE_COL in df.columns:
             s = df[REFERENCE_PRICE_COL].dropna()
+
             if not s.empty:
                 ref_float = float(s.iloc[-1])
+
                 if ref_float > 0:
                     return ref_float
+
     except Exception:
         pass
 
     try:
         if "Open" in df.columns and not df["Open"].empty:
             ref_float = float(df["Open"].iloc[0])
+
             if ref_float > 0:
                 return ref_float
+
     except Exception:
         pass
 
@@ -213,10 +239,42 @@ def _get_reference_price_from_df(df: pd.DataFrame) -> float:
         return 0.0
 
 
+def _get_latest_price_from_df(df: pd.DataFrame) -> float:
+    """
+    最新價優先順序：
+    1. quote 覆蓋價
+    2. quote 欄位
+    3. history 最後一筆 Close
+    """
+    try:
+        quote_price = df.attrs.get("quote_price")
+
+        if quote_price not in (None, ""):
+            price = float(quote_price)
+
+            if price > 0:
+                return price
+
+    except Exception:
+        pass
+
+    try:
+        if QUOTE_PRICE_COL in df.columns:
+            s = df[QUOTE_PRICE_COL].dropna()
+
+            if not s.empty:
+                price = float(s.iloc[-1])
+
+                if price > 0:
+                    return price
+
+    except Exception:
+        pass
+
+    return float(df["Close"].iloc[-1])
+
+
 def _get_previous_close(meta: StockMeta, trade_date) -> float:
-    """
-    取得前一交易日收盤價，作為平盤價。
-    """
     try:
         daily = _download_history(meta.yf_symbol, "15d", "1d")
 
@@ -250,10 +308,6 @@ def _attach_intraday_reference_price(
     df: pd.DataFrame,
     time_frame: str,
 ) -> pd.DataFrame:
-    """
-    幫 1m / 5m 盤中資料加上平盤價。
-    平盤價 = 前一交易日收盤價，不是今日開盤價。
-    """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
 
@@ -279,7 +333,8 @@ def _attach_intraday_reference_price(
 def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
     """
     yfinance 有時最後一筆停在 13:24、13:25。
-    收盤後補一筆 13:30，價格沿用最後一筆，讓畫面顯示完整收盤時間。
+    收盤後補一筆 13:30，價格先沿用最後一筆。
+    後面會再用 quote 最新價覆蓋。
     """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
@@ -333,6 +388,174 @@ def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFr
         return df
 
 
+def _get_yahoo_quote_snapshot(meta: StockMeta) -> dict[str, Any]:
+    """
+    用 yfinance quote / fast_info 抓即時報價。
+
+    目的：
+    history 1m 有時最後一筆不等於 Yahoo 報價頁收盤價。
+    例如 history 最後 Close=204，但 Yahoo 報價頁 13:30 是 203。
+    此時應以 quote 最新價為準。
+    """
+    try:
+        ticker = yf.Ticker(meta.yf_symbol)
+
+        latest = 0.0
+        previous_close = 0.0
+
+        try:
+            fast_info = ticker.fast_info
+
+            latest = _safe_float(
+                _read_value(
+                    fast_info,
+                    [
+                        "last_price",
+                        "lastPrice",
+                        "regularMarketPrice",
+                        "currentPrice",
+                    ],
+                )
+            )
+
+            previous_close = _safe_float(
+                _read_value(
+                    fast_info,
+                    [
+                        "previous_close",
+                        "previousClose",
+                        "regularMarketPreviousClose",
+                        "regular_market_previous_close",
+                    ],
+                )
+            )
+
+        except Exception as exc:
+            print(f"fast_info failed: {exc}")
+
+        # fast_info 抓不到才用 info fallback
+        if latest <= 0 or previous_close <= 0:
+            try:
+                info = ticker.info or {}
+
+                if latest <= 0:
+                    latest = _safe_float(
+                        _read_value(
+                            info,
+                            [
+                                "regularMarketPrice",
+                                "currentPrice",
+                                "regular_market_price",
+                                "lastPrice",
+                            ],
+                        )
+                    )
+
+                if previous_close <= 0:
+                    previous_close = _safe_float(
+                        _read_value(
+                            info,
+                            [
+                                "regularMarketPreviousClose",
+                                "previousClose",
+                                "regular_market_previous_close",
+                            ],
+                        )
+                    )
+
+            except Exception as exc:
+                print(f"ticker.info quote fallback failed: {exc}")
+
+        if latest <= 0:
+            return {}
+
+        return {
+            "latest_price": latest,
+            "previous_close": previous_close,
+        }
+
+    except Exception as exc:
+        print(f"_get_yahoo_quote_snapshot failed: {exc}")
+        return {}
+
+
+def _reconcile_intraday_with_quote(
+    meta: StockMeta,
+    df: pd.DataFrame,
+    time_frame: str,
+) -> pd.DataFrame:
+    """
+    用 quote 最新價覆蓋 intraday history 最後一筆。
+
+    這是修正：
+    - yfinance history 最後 Close 可能是 204
+    - Yahoo 報價頁 13:30 可能是 203
+    的問題。
+    """
+    if df.empty or time_frame not in {"1m", "5m"}:
+        return df
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+
+    quote = _get_yahoo_quote_snapshot(meta)
+
+    latest_price = _safe_float(quote.get("latest_price"))
+
+    if latest_price <= 0:
+        return df
+
+    df = df.copy()
+
+    display_stamp = df.attrs.get("display_timestamp")
+
+    previous_close = _safe_float(quote.get("previous_close"))
+
+    if previous_close > 0:
+        df = _set_reference_price(df, previous_close)
+
+    if display_stamp:
+        df.attrs["display_timestamp"] = display_stamp
+        df[DISPLAY_TIMESTAMP_COL] = display_stamp
+
+    last_idx = df.index[-1]
+
+    df.at[last_idx, "Close"] = latest_price
+
+    if "High" in df.columns:
+        df.at[last_idx, "High"] = max(_safe_float(df.at[last_idx, "High"]), latest_price)
+
+    if "Low" in df.columns:
+        old_low = _safe_float(df.at[last_idx, "Low"])
+
+        if old_low > 0:
+            df.at[last_idx, "Low"] = min(old_low, latest_price)
+        else:
+            df.at[last_idx, "Low"] = latest_price
+
+    if "Open" in df.columns:
+        old_open = _safe_float(df.at[last_idx, "Open"])
+
+        if old_open <= 0:
+            df.at[last_idx, "Open"] = latest_price
+
+    df.attrs["quote_price"] = latest_price
+    df.attrs["quote_source"] = "yfinance.fast_info"
+    df[QUOTE_PRICE_COL] = latest_price
+
+    print(
+        STOCK_SERVICE_VERSION,
+        "| reconcile_quote",
+        "| stock=", meta.stock_id,
+        "| yf_symbol=", meta.yf_symbol,
+        "| quote_latest=", latest_price,
+        "| quote_prev_close=", previous_close,
+        "| last_idx=", last_idx,
+    )
+
+    return df
+
+
 def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, str]:
     tf = normalize_time_frame(time_frame)
 
@@ -375,6 +598,9 @@ def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, s
         if tf in {"1m", "5m"}:
             df = _append_intraday_close_point(df, tf)
 
+        if tf in {"1m", "5m"}:
+            df = _reconcile_intraday_with_quote(meta, df, tf)
+
     return df, tf
 
 
@@ -397,19 +623,12 @@ def get_stock_name(meta: StockMeta) -> str:
 
 
 def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
-    """
-    價格資訊。
-
-    重要：
-    - 1m / 5m：漲跌幅 = 最新價 vs 平盤價
-    - D / W / M：漲跌幅 = 最新一根 vs 前一根
-    """
     if df.empty:
         return PriceMeta("--", "--", "--", 0.0, 0.0)
 
     tf = normalize_time_frame(time_frame)
 
-    latest = float(df["Close"].iloc[-1])
+    latest = _get_latest_price_from_df(df)
 
     if tf in {"1m", "5m"}:
         prev = _get_reference_price_from_df(df)
@@ -429,8 +648,10 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
         if not display_stamp and DISPLAY_TIMESTAMP_COL in df.columns:
             try:
                 s = df[DISPLAY_TIMESTAMP_COL].dropna()
+
                 if not s.empty:
                     display_stamp = str(s.iloc[-1])
+
             except Exception:
                 display_stamp = ""
 
