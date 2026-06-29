@@ -249,11 +249,12 @@ def _is_large_holder_level(level_raw: Any) -> bool:
     """
     判斷是否為千張以上。
 
-    TDCC 常見持股分級：
-    15 = 1,000,001 股以上
+    TDCC 股權分散表常見定義：
+    第 15 級 = 1,000,001 股以上
 
-    有些資料源可能用文字：
-    1,000,001以上 / 1000001以上
+    注意：
+    這裡只能抓 level == 15。
+    不可以用 >= 15，否則會把其他特殊級距也加總，造成比例超過 100%。
     """
     text = str(level_raw or "").replace(",", "").replace(" ", "").strip()
 
@@ -263,22 +264,16 @@ def _is_large_holder_level(level_raw: Any) -> bool:
     if "合計" in text or "total" in text.lower():
         return False
 
+    # 文字型級距：1,000,001以上 / 1000001以上
     if "1000001" in text and ("以上" in text or "up" in text.lower()):
         return True
 
-    if "1000000" in text and ("以上" in text or "up" in text.lower()):
-        return True
-
+    # 數字型級距：15 = 1,000,001 股以上
     try:
         level_num = int(float(text))
-
-        # TDCC 最新 CSV 通常用 15 代表 1,000,001 股以上。
-        return level_num >= 15
-
+        return level_num == 15
     except Exception:
         return False
-
-
 def _extract_holder_percent(row: dict) -> float:
     candidates = [
         "percentage",
@@ -296,7 +291,6 @@ def _extract_holder_percent(row: dict) -> float:
             return _to_float(row.get(key))
 
     return 0.0
-
 
 def _large_holder_from_finmind_rows(rows: list[dict]) -> list[dict]:
     by_date: dict[str, float] = {}
