@@ -164,6 +164,48 @@ def _filter_tw_stock_session(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
         print(f"_filter_tw_stock_session failed: {exc}")
         return df
 
+def _attach_intraday_reference_price(meta: StockMeta, df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
+    """
+    幫 1m / 5m 盤中資料加上平盤價。
+    平盤價應該是前一交易日收盤價，不是今日開盤價。
+    """
+    if df.empty or time_frame not in {"1m", "5m"}:
+        return df
+
+    df = df.copy()
+
+    try:
+        daily = _download_history(meta.yf_symbol, "10d", "1d")
+
+        if daily.empty and meta.yf_symbol.endswith(TW_SUFFIX):
+            two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
+            daily = _download_history(two_symbol, "10d", "1d")
+
+        if not daily.empty:
+            daily = daily.dropna(subset=["Close"])
+            daily = _normalize_to_taipei_time(daily)
+
+            trade_date = df.index[-1].date()
+
+            # 只取今日以前的最後一個交易日收盤價
+            prev_daily = daily[daily.index.date < trade_date]
+
+            if not prev_daily.empty:
+                ref_price = float(prev_daily["Close"].iloc[-1])
+                df.attrs["reference_price"] = ref_price
+                return df
+
+    except Exception as exc:
+        print(f"_attach_intraday_reference_price failed: {exc}")
+
+    # fallback：真的抓不到昨收，才用今日第一筆 Open
+    try:
+        if "Open" in df and not df["Open"].empty:
+            df.attrs["reference_price"] = float(df["Open"].iloc[0])
+    except Exception:
+        pass
+
+    return df
 
 def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, str]:
     tf = normalize_time_frame(time_frame)
@@ -204,6 +246,9 @@ def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, s
 
         # 1m / 5m 過濾台股現貨盤中時間
         df = _filter_tw_stock_session(df, tf)
+        # 1m / 5m 加上平盤價，給圖表置中使用
+        if tf in {"1m", "5m"}:
+            df = _attach_intraday_reference_price(meta, df, tf)
 
     return df, tf
 
