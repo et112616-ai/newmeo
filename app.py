@@ -15,10 +15,14 @@ app = Flask(__name__)
 
 
 def extract_reply_token(payload: Dict[str, Any]) -> str:
-    """
-    從 Make 傳來的 LINE events 裡抓第一筆 replyToken。
-    避免在 Make 最後一顆模組裡處理 events[] 陣列。
-    """
+    direct_token = payload.get("replyToken", "")
+
+    if isinstance(direct_token, str) and direct_token.strip():
+        return direct_token.strip()
+
+    if isinstance(direct_token, list) and len(direct_token) > 0:
+        return str(direct_token[0]).strip()
+
     events = payload.get("events", [])
 
     if isinstance(events, list) and len(events) > 0:
@@ -30,18 +34,18 @@ def extract_reply_token(payload: Dict[str, Any]) -> str:
 
 
 def make_reply_payload(message: Dict[str, Any], reply_token: str = "") -> Dict[str, Any]:
-    """
-    同時回傳：
-    1. replyToken：給最後一顆 LINE API Call 用
-    2. messages：給 Make / Debug 看
-    3. messages_json：給 LINE API body 直接塞入
-    """
     messages = [message]
+
+    reply_body = {
+        "replyToken": reply_token,
+        "messages": messages
+    }
 
     return {
         "replyToken": reply_token,
         "messages": messages,
-        "messages_json": json.dumps(messages, ensure_ascii=False)
+        "messages_json": json.dumps(messages, ensure_ascii=False),
+        "reply_body_json": json.dumps(reply_body, ensure_ascii=False)
     }
 
 
