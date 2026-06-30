@@ -1,24 +1,35 @@
 from __future__ import annotations
 
+import time as time_module
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from typing import Any
 
-import requests
-import yfinance as yf
 import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pandas as pd
+import requests
+import yfinance as yf
 
-from services.upload_service import publish_figure
 from config import FINMIND_TOKEN
+from services.upload_service import publish_figure
+
+
+try:
+    from services.futures_map_service import get_stock_futures_mapping
+except Exception:
+    def get_stock_futures_mapping(stock_id: str):
+        return None
 
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+
+SPOT_CACHE_TTL_SECONDS = 20
+_SPOT_CACHE: dict[str, tuple[float, float]] = {}
 
 
 @dataclass
@@ -49,8 +60,7 @@ class FuturesSnapshot:
     settlement_price: float = 0.0
 
 
-# 第一版只放標準股票期貨，不放小型股票期貨。
-# candidates 同時放完整股票期貨代號與可能的短代號，避免 FinMind 版本差異。
+# fallback 用：如果 Supabase 還沒同步到，才吃這裡
 STOCK_FUTURES_MAP: dict[str, dict[str, Any]] = {
     "2330": {
         "name": "台積電期貨",
@@ -65,6 +75,10 @@ STOCK_FUTURES_MAP: dict[str, dict[str, Any]] = {
         "candidates": ["FZF", "FZ"],
     },
 }
+
+
+def _debug(*args):
+    print("DEBUG futures |", *args, flush=True)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -95,19 +109,109 @@ def _clean_stock_id(stock_id: str) -> str:
     return str(stock_id or "").replace(".TW", "").replace(".TWO", "").strip()
 
 
-def _start_date(days: int = 60) -> str:
+def _start_date(days: int = 90) -> str:
     return (datetime.utcnow().date() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys([str(v).strip().upper() for v in values if str(v).strip()]))
+
+
+def _build_candidates_from_futures_code(futures_code: str) -> list[str]:
+    """
+    期交所標的表通常會給基礎代碼，例如：
+    2408 南亞科 = CY
+
+    FinMind / 行情資料可能吃：
+    CYF 或 CY
+
+    所以自動產生候選：
+    CY  -> CYF, CY
+    CYF -> CYF, CY
+    """
+    code = str(futures_code or "").strip().upper()
+
+    if not code:
+        return []
+
+    candidates: list[str] = []
+
+    if code.endswith("F"):
+        candidates.append(code)
+        candidates.append(code[:-1])
+    else:
+        candidates.append(f"{code}F")
+        candidates.append(code)
+
+    return _unique(candidates)
+
+
+def _resolve_stock_futures_candidates(stock_id: str, stock_name: str) -> tuple[str, list[str], str]:
+    """
+    優先查 Supabase stock_futures_map。
+    查不到才 fallback 到 STOCK_FUTURES_MAP。
+
+    回傳：
+    futures_name, candidates, source
+    """
+    sid = _clean_stock_id(stock_id)
+
+    # 1. Supabase mapping
+    try:
+        mapping = get_stock_futures_mapping(sid)
+    except Exception as exc:
+        _debug("supabase mapping failed:", sid, exc)
+        mapping = None
+
+    if mapping:
+        futures_name = (
+            mapping.get("futures_name")
+            or mapping.get("name")
+            or f"{mapping.get('stock_name') or stock_name}期貨"
+        )
+
+        candidates = list(mapping.get("candidates") or [])
+
+        if not candidates:
+            futures_code = (
+                mapping.get("futures_code")
+                or mapping.get("code")
+                or mapping.get("futures_id")
+                or ""
+            )
+            candidates = _build_candidates_from_futures_code(str(futures_code))
+
+        candidates = _unique(candidates)
+
+        if candidates:
+            _debug("mapping source=supabase", sid, futures_name, candidates)
+            return str(futures_name), candidates, "supabase"
+
+    # 2. fallback manual map
+    info = STOCK_FUTURES_MAP.get(sid)
+
+    if info:
+        futures_name = str(info.get("name") or f"{stock_name}期貨")
+        candidates = _unique(list(info.get("candidates") or []))
+
+        if candidates:
+            _debug("mapping source=fallback", sid, futures_name, candidates)
+            return futures_name, candidates, "fallback"
+
+    _debug("mapping not found", sid)
+
+    return "", [], "none"
 
 
 def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
     """
     抓期貨日成交資訊。
-    只印狀態，不印 token。
+    不印 token。
     """
     params = {
         "dataset": "TaiwanFuturesDaily",
         "data_id": futures_id,
-        "start_date": _start_date(60),
+        "start_date": _start_date(90),
     }
 
     if FINMIND_TOKEN:
@@ -118,8 +222,10 @@ def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
 
         if res.status_code >= 400:
             print(
-                f"_request_finmind_futures_daily failed: "
-                f"futures_id={futures_id}, status={res.status_code}, body={res.text[:200]}"
+                "_request_finmind_futures_daily failed: "
+                f"futures_id={futures_id}, status={res.status_code}, "
+                f"body={res.text[:200]}",
+                flush=True,
             )
             return []
 
@@ -129,7 +235,10 @@ def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
         return rows if isinstance(rows, list) else []
 
     except Exception as exc:
-        print(f"_request_finmind_futures_daily failed: futures_id={futures_id}, error={exc}")
+        print(
+            f"_request_finmind_futures_daily failed: futures_id={futures_id}, error={exc}",
+            flush=True,
+        )
         return []
 
 
@@ -143,7 +252,7 @@ def _normalize_contract_date(value: Any) -> str:
     2026-07
 
     排除：
-    202608/202609  # 跨月價差
+    202608/202609
     全月份
     所有契約
     空白
@@ -158,34 +267,35 @@ def _normalize_contract_date(value: Any) -> str:
     if "all" in lower or "全" in s or "所有" in s:
         return ""
 
-    # 很重要：202608/202609 是跨月價差，不是近月單一契約
-    # 但 2026/07 是日期格式，要保留。
     digits = "".join(ch for ch in s if ch.isdigit())
 
     if "/" in s:
         parts = s.split("/")
 
-        # 2026/07 這種可以接受
+        # 2026/07 可以接受
         if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 2:
             if len(digits) >= 6:
                 return digits[:6]
 
-        # 202608/202609 這種跨月價差要排除
+        # 202608/202609 是跨月價差，要排除
         return ""
 
     if "-" in s:
         parts = s.split("-")
 
-        # 2026-07 這種可以接受
+        # 2026-07 可以接受
         if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 2:
             if len(digits) >= 6:
                 return digits[:6]
+
+        return ""
 
     if len(digits) == 6:
         return digits
 
     return ""
-    
+
+
 def _format_contract_date(value: Any) -> str:
     s = _normalize_contract_date(value)
 
@@ -216,6 +326,21 @@ def _normalize_trade_date(value: Any) -> str:
     return s
 
 
+def _get_session_value(row: dict) -> str:
+    for key in [
+        "trading_session",
+        "TradingSession",
+        "session",
+        "tradingSession",
+        "交易時段",
+    ]:
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return ""
+
+
 def _is_afterhours_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
@@ -237,7 +362,8 @@ def _is_regular_session(value: Any) -> bool:
         or "日盤" in text
         or "position" in text
     )
-    
+
+
 def _display_session(value: Any) -> str:
     if _is_afterhours_session(value):
         return "盤後"
@@ -249,11 +375,11 @@ def _display_session(value: Any) -> str:
 
     return text or "--"
 
+
 def _current_tw_futures_session_preference() -> str:
     """
     依台灣時間決定目前應該優先顯示日盤或盤後。
 
-    第一版規則：
     - 08:45 ~ 13:45：優先日盤
     - 15:00 之後：優先盤後
     - 其他時間：優先日盤
@@ -269,15 +395,53 @@ def _current_tw_futures_session_preference() -> str:
 
     return "regular"
 
-def _is_position_session(value: Any) -> bool:
-    text = str(value or "").strip().lower()
 
-    return (
-        "position" in text
-        or "open_interest" in text
-        or "未沖銷" in text
-        or "部位" in text
-    )
+def _row_price(row: dict) -> float:
+    for key in [
+        "close",
+        "Close",
+        "close_price",
+        "last_price",
+        "成交價",
+        "最後成交價",
+        "收盤價",
+        "settlement_price",
+        "SettlementPrice",
+    ]:
+        price = _safe_float(row.get(key))
+
+        if price > 0:
+            return price
+
+    return 0.0
+
+
+def _row_change(row: dict) -> float:
+    for key in [
+        "spread",
+        "change",
+        "price_change",
+    ]:
+        value = _safe_float(row.get(key), default=0.0)
+
+        if value != 0:
+            return value
+
+    return 0.0
+
+
+def _row_change_pct(row: dict) -> float:
+    for key in [
+        "spread_per",
+        "change_percent",
+        "price_change_pct",
+    ]:
+        value = _safe_float(row.get(key), default=0.0)
+
+        if value != 0:
+            return value
+
+    return 0.0
 
 
 def _is_valid_trade_row(row: dict) -> bool:
@@ -288,7 +452,7 @@ def _is_valid_trade_row(row: dict) -> bool:
     - 價格為 0
 
     不排除 position。
-    因為 FinMind 的 position 通常是日盤資料列，會帶 close / settlement_price / open_interest。
+    因為 FinMind 的 position 通常會帶 close / settlement_price / open_interest。
     """
     contract = _normalize_contract_date(row.get("contract_date"))
 
@@ -301,7 +465,99 @@ def _is_valid_trade_row(row: dict) -> bool:
         return False
 
     return True
-    
+
+
+def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
+    """
+    選資料規則：
+
+    1. 排除跨月價差
+    2. 排除價格為 0
+    3. 找最新有效交易日
+    4. 最新交易日中，contract_date 最小者 = 近月
+    5. 現在是日盤時間，優先日盤 / position
+    6. 現在是盤後時間，優先 after_market
+    """
+    valid_rows: list[dict] = []
+
+    for r in rows:
+        if not _is_valid_trade_row(r):
+            continue
+
+        trade_date = _normalize_trade_date(r.get("date"))
+        contract = _normalize_contract_date(r.get("contract_date"))
+
+        if not trade_date or not contract:
+            continue
+
+        item = dict(r)
+        item["_trade_date_norm"] = trade_date
+        item["_contract_norm"] = contract
+
+        valid_rows.append(item)
+
+    _debug("valid_rows_count =", len(valid_rows))
+
+    if not valid_rows:
+        return None
+
+    latest_date = max(r["_trade_date_norm"] for r in valid_rows)
+
+    latest_rows = [
+        r for r in valid_rows
+        if r["_trade_date_norm"] == latest_date
+    ]
+
+    if not latest_rows:
+        return None
+
+    near_contract = min(r["_contract_norm"] for r in latest_rows)
+
+    near_rows = [
+        r for r in latest_rows
+        if r["_contract_norm"] == near_contract
+    ]
+
+    if not near_rows:
+        return None
+
+    afterhours_rows = [
+        r for r in near_rows
+        if _is_afterhours_session(_get_session_value(r))
+    ]
+
+    regular_rows = [
+        r for r in near_rows
+        if _is_regular_session(_get_session_value(r))
+    ]
+
+    preference = _current_tw_futures_session_preference()
+
+    _debug(
+        "latest_date =", latest_date,
+        "near_contract =", near_contract,
+        "preference =", preference,
+        "regular =", len(regular_rows),
+        "afterhours =", len(afterhours_rows),
+    )
+
+    if preference == "regular":
+        if regular_rows:
+            return regular_rows[-1]
+
+        if afterhours_rows:
+            return afterhours_rows[-1]
+
+    if preference == "afterhours":
+        if afterhours_rows:
+            return afterhours_rows[-1]
+
+        if regular_rows:
+            return regular_rows[-1]
+
+    return near_rows[-1]
+
+
 def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[dict]:
     """
     依照選到的近月契約，準備 K 線資料。
@@ -309,7 +565,7 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     規則：
     - 只取同一個近月 contract_date
     - 如果選到盤後，就畫盤後
-    - 如果選到日盤/position，就畫 position
+    - 如果選到日盤/position，就畫日盤/position
     - 排除跨月價差與價格 0
     """
     contract = selected_row.get("_contract_norm") or _normalize_contract_date(
@@ -319,9 +575,9 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     if not contract:
         return []
 
-    prefer_afterhours = _is_afterhours_session(selected_row.get("trading_session"))
+    prefer_afterhours = _is_afterhours_session(_get_session_value(selected_row))
 
-    same_contract_rows = []
+    same_contract_rows: list[dict] = []
 
     for r in rows:
         r_contract = _normalize_contract_date(r.get("contract_date"))
@@ -347,7 +603,7 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     if prefer_afterhours:
         preferred = [
             r for r in same_contract_rows
-            if _is_afterhours_session(r.get("trading_session"))
+            if _is_afterhours_session(_get_session_value(r))
         ]
 
         if preferred:
@@ -355,7 +611,7 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     else:
         preferred = [
             r for r in same_contract_rows
-            if _is_regular_session(r.get("trading_session"))
+            if _is_regular_session(_get_session_value(r))
         ]
 
         if preferred:
@@ -363,15 +619,17 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
 
     same_contract_rows = sorted(
         same_contract_rows,
-        key=lambda r: r["_trade_date_norm"]
+        key=lambda r: r["_trade_date_norm"],
     )
 
-    by_date = {}
+    by_date: dict[str, dict] = {}
 
     for r in same_contract_rows:
         by_date[r["_trade_date_norm"]] = r
 
     return list(by_date.values())[-30:]
+
+
 def _generate_futures_kline_chart(
     rows: list[dict],
     futures_id: str,
@@ -433,10 +691,12 @@ def _generate_futures_kline_chart(
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    x = range(len(df))
+    x = list(range(len(df)))
     width = 0.58
 
-    for i, row in df.iterrows():
+    for i in range(len(df)):
+        row = df.iloc[i]
+
         o = float(row["open"])
         h = float(row["high"])
         l = float(row["low"])
@@ -447,7 +707,10 @@ def _generate_futures_kline_chart(
         ax_k.vlines(i, l, h, linewidth=1, color=color)
 
         lower = min(o, c)
-        height = abs(c - o) or 0.01
+        height = abs(c - o)
+
+        if height <= 0:
+            height = 0.01
 
         ax_k.bar(
             i,
@@ -490,109 +753,21 @@ def _generate_futures_kline_chart(
 
     return publish_figure(fig, f"{futures_id}_futures_kline")
 
-def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
-    """
-    選資料規則：
 
-    1. 排除跨月價差，例如 202608/202609
-    2. 排除價格為 0 的資料
-    3. 找最新有效交易日
-    4. 最新交易日中，contract_date 最小者 = 近月
-    5. 若現在是日盤時間，優先日盤 / position
-    6. 若現在是盤後時間，優先 after_market
-    """
-    valid_rows: list[dict] = []
-
-    for r in rows:
-        if not _is_valid_trade_row(r):
-            continue
-
-        trade_date = _normalize_trade_date(r.get("date"))
-        contract = _normalize_contract_date(r.get("contract_date"))
-
-        if not trade_date or not contract:
-            continue
-
-        item = dict(r)
-        item["_trade_date_norm"] = trade_date
-        item["_contract_norm"] = contract
-
-        valid_rows.append(item)
-
-    print("DEBUG futures valid_rows_count =", len(valid_rows))
-
-    if valid_rows:
-        print("DEBUG futures valid_rows_last =", valid_rows[-1])
-
-    if not valid_rows:
-        return None
-
-    latest_date = max(r["_trade_date_norm"] for r in valid_rows)
-
-    latest_rows = [
-        r for r in valid_rows
-        if r["_trade_date_norm"] == latest_date
-    ]
-
-    print("DEBUG futures latest_date =", latest_date)
-    print("DEBUG futures latest_rows_count =", len(latest_rows))
-
-    if not latest_rows:
-        return None
-
-    near_contract = min(r["_contract_norm"] for r in latest_rows)
-
-    near_rows = [
-        r for r in latest_rows
-        if r["_contract_norm"] == near_contract
-    ]
-
-    print("DEBUG futures near_contract =", near_contract)
-    print("DEBUG futures near_rows_count =", len(near_rows))
-
-    if not near_rows:
-        return None
-
-    afterhours_rows = [
-        r for r in near_rows
-        if _is_afterhours_session(r.get("trading_session"))
-    ]
-
-    regular_rows = [
-        r for r in near_rows
-        if _is_regular_session(r.get("trading_session"))
-    ]
-
-    preference = _current_tw_futures_session_preference()
-
-    print("DEBUG futures session_preference =", preference)
-
-    if preference == "regular":
-        if regular_rows:
-            print("DEBUG futures choose regular/position =", regular_rows[-1])
-            return regular_rows[-1]
-
-        if afterhours_rows:
-            print("DEBUG futures fallback afterhours =", afterhours_rows[-1])
-            return afterhours_rows[-1]
-
-    if preference == "afterhours":
-        if afterhours_rows:
-            print("DEBUG futures choose afterhours =", afterhours_rows[-1])
-            return afterhours_rows[-1]
-
-        if regular_rows:
-            print("DEBUG futures fallback regular/position =", regular_rows[-1])
-            return regular_rows[-1]
-
-    print("DEBUG futures choose fallback =", near_rows[-1])
-    return near_rows[-1]
-    
 def _get_spot_price(stock_id: str) -> float:
     """
-    現貨價格用 Yahoo quote。
+    現貨價格用 Yahoo fast_info。
+    不使用 ticker.info，避免 timeout。
     """
     sid = _clean_stock_id(stock_id)
+    now = time_module.time()
+
+    cached = _SPOT_CACHE.get(sid)
+
+    if cached:
+        ts, price = cached
+        if now - ts <= SPOT_CACHE_TTL_SECONDS:
+            return price
 
     for symbol in [f"{sid}.TW", f"{sid}.TWO"]:
         try:
@@ -609,28 +784,26 @@ def _get_spot_price(stock_id: str) -> float:
                 ]:
                     try:
                         value = fast_info.get(key)
-                        price = _safe_float(value)
-
-                        if price > 0:
-                            return price
-
                     except Exception:
-                        pass
+                        value = None
+
+                    price = _safe_float(value)
+
+                    if price > 0:
+                        _SPOT_CACHE[sid] = (now, price)
+                        return price
 
             except Exception:
                 pass
 
             try:
-                info = ticker.info or {}
+                hist = ticker.history(period="5d", interval="1d")
 
-                for key in [
-                    "regularMarketPrice",
-                    "currentPrice",
-                    "lastPrice",
-                ]:
-                    price = _safe_float(info.get(key))
+                if hist is not None and not hist.empty:
+                    price = _safe_float(hist["Close"].dropna().iloc[-1])
 
                     if price > 0:
+                        _SPOT_CACHE[sid] = (now, price)
                         return price
 
             except Exception:
@@ -642,86 +815,56 @@ def _get_spot_price(stock_id: str) -> float:
     return 0.0
 
 
-def _row_price(row: dict) -> float:
-    for key in [
-        "close",
-        "Close",
-        "close_price",
-        "last_price",
-        "成交價",
-        "最後成交價",
-        "收盤價",
-        "settlement_price",
-        "SettlementPrice",
-    ]:
-        price = _safe_float(row.get(key))
+def _calc_change_from_kline_rows(kline_rows: list[dict], future_price: float) -> tuple[float, float]:
+    """
+    如果 FinMind row 沒有 spread / spread_per，
+    就用同契約同時段前一筆 close 算漲跌。
+    """
+    if not kline_rows or len(kline_rows) < 2 or future_price <= 0:
+        return 0.0, 0.0
 
-        if price > 0:
-            return price
+    prev_price = _row_price(kline_rows[-2])
 
-    return 0.0
+    if prev_price <= 0:
+        return 0.0, 0.0
 
-def _row_change(row: dict) -> float:
-    for key in [
-        "spread",
-        "change",
-        "price_change",
-    ]:
-        value = _safe_float(row.get(key), default=0.0)
+    change = future_price - prev_price
+    change_pct = change / prev_price * 100
 
-        if value != 0:
-            return value
-
-    return 0.0
-
-
-def _row_change_pct(row: dict) -> float:
-    for key in [
-        "spread_per",
-        "change_percent",
-        "price_change_pct",
-    ]:
-        value = _safe_float(row.get(key), default=0.0)
-
-        if value != 0:
-            return value
-
-    return 0.0
-
-
-def _resolve_stock_futures_candidates(stock_id: str) -> tuple[str, list[str]]:
-    sid = _clean_stock_id(stock_id)
-    info = STOCK_FUTURES_MAP.get(sid)
-
-    if not info:
-        return "", []
-
-    name = str(info.get("name") or "")
-    candidates = list(info.get("candidates") or [])
-
-    return name, candidates
+    return change, change_pct
 
 
 def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapshot:
     """
-    股票期貨第一版：
+    股票期貨：
 
+    - Supabase stock_futures_map 為主
+    - STOCK_FUTURES_MAP 為 fallback
     - 只抓標準股票期貨
     - 只抓近月
-    - 同近月盤後優先
-    - 沒盤後才用日盤
-    - 不抓小型期貨
+    - 日盤時間優先日盤
+    - 盤後時間優先盤後
     """
     sid = _clean_stock_id(stock_id)
 
-    futures_name, candidates = _resolve_stock_futures_candidates(sid)
+    futures_name, candidates, source = _resolve_stock_futures_candidates(sid, stock_name)
 
-    print("DEBUG futures start:", sid, stock_name, futures_name, candidates)
+    _debug(
+        "start",
+        sid,
+        stock_name,
+        "source =",
+        source,
+        "name =",
+        futures_name,
+        "candidates =",
+        candidates,
+    )
 
     if not candidates:
         return FuturesSnapshot(
             available=False,
-            message="這檔股票尚未建立標準股票期貨代號對照。",
+            message="這檔股票目前查不到標準股票期貨代號對照，請先同步期交所股票期貨對照表。",
             stock_id=sid,
             stock_name=stock_name,
         )
@@ -733,17 +876,17 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
     for futures_id in candidates:
         rows = _request_finmind_futures_daily(futures_id)
 
-        print(f"DEBUG futures candidate={futures_id}, rows_count={len(rows)}")
+        _debug("candidate =", futures_id, "rows_count =", len(rows))
 
         if rows:
-            print("DEBUG futures sample row:", rows[-1])
+            _debug("candidate sample last =", rows[-1])
 
         if not rows:
             continue
 
         row = _pick_near_month_prefer_afterhours(rows)
 
-        print(f"DEBUG selected row for {futures_id}:", row)
+        _debug("selected row for", futures_id, "=", row)
 
         if row:
             selected_row = row
@@ -752,7 +895,6 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
             break
 
     if not selected_row:
-        print("DEBUG futures result: no selected_row")
         return FuturesSnapshot(
             available=False,
             message="查無近月股票期貨資料，可能是 FinMind 尚未更新或期貨代號需調整。",
@@ -761,23 +903,10 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
             futures_name=futures_name,
         )
 
-    future_price = _row_price(selected_row)
-    future_change = _row_change(selected_row)
-    future_change_pct = _row_change_pct(selected_row)
-
-    spot_price = _get_spot_price(sid)
-
-    basis = future_price - spot_price if future_price and spot_price else 0.0
-    basis_pct = (basis / spot_price * 100) if spot_price else 0.0
-
     display_contract = _format_contract_date(selected_row.get("contract_date"))
-    display_session = _display_session(selected_row.get("trading_session"))
+    display_session = _display_session(_get_session_value(selected_row))
 
     kline_rows = _prepare_futures_kline_rows(selected_rows, selected_row)
-
-    print("DEBUG kline_rows_count =", len(kline_rows))
-    if kline_rows:
-        print("DEBUG kline_rows_last =", kline_rows[-1])
 
     chart_url = _generate_futures_kline_chart(
         rows=kline_rows,
@@ -786,9 +915,43 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         contract_date=display_contract,
         session=display_session,
     )
-    print("DEBUG futures chart_url =", chart_url)
-    print("DEBUG futures kline_rows_count =", len(kline_rows))
-    print("DEBUG chart_url =", chart_url)
+
+    future_price = _row_price(selected_row)
+    future_change = _row_change(selected_row)
+    future_change_pct = _row_change_pct(selected_row)
+
+    if future_change == 0 and future_change_pct == 0:
+        calc_change, calc_change_pct = _calc_change_from_kline_rows(
+            kline_rows,
+            future_price,
+        )
+
+        if calc_change != 0:
+            future_change = calc_change
+            future_change_pct = calc_change_pct
+
+    spot_price = _get_spot_price(sid)
+
+    basis = future_price - spot_price if future_price and spot_price else 0.0
+    basis_pct = (basis / spot_price * 100) if spot_price else 0.0
+
+    _debug(
+        "result",
+        "selected_futures_id =",
+        selected_futures_id,
+        "contract =",
+        display_contract,
+        "session =",
+        display_session,
+        "future_price =",
+        future_price,
+        "spot_price =",
+        spot_price,
+        "basis =",
+        basis,
+        "chart_url =",
+        chart_url,
+    )
 
     return FuturesSnapshot(
         available=True,
@@ -796,7 +959,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         stock_id=sid,
         stock_name=stock_name,
         futures_id=str(selected_row.get("futures_id") or selected_futures_id),
-        futures_name=futures_name,
+        futures_name=futures_name or f"{stock_name}期貨",
         contract_date=display_contract,
         trade_date=_normalize_trade_date(selected_row.get("date")),
         trading_session=display_session,
