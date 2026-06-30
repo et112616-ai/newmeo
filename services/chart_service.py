@@ -231,49 +231,98 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
     return publish_figure(fig, f"{stock_id}_{tf}_kline")
 
 
+def _fmt_chip_ratio(value) -> str:
+    try:
+        if value in (None, "", "--"):
+            return "--"
+        return f"{float(value):.2f}%"
+    except Exception:
+        return str(value)
+
+
 def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, list[dict]]) -> str:
-    fig, axes = plt.subplots(3, 1, figsize=(7, 8.5), dpi=120, facecolor="white")
+    """
+    法人圖新版版型：
+    - 三大區塊
+    - 每區第一行：日期 | 持股比 | 當日買賣超
+    - 每區第二行：10日買賣超柱狀圖
+    - X 軸日期隱藏
+    """
+    fig = plt.figure(figsize=(7.2, 10.8), dpi=130, facecolor="white")
+    gs = gridspec.GridSpec(
+        6, 1,
+        height_ratios=[0.45, 1.55, 0.45, 1.55, 0.45, 1.55],
+        hspace=0.42
+    )
+
     fig.suptitle(
-        f"{stock_id} Institutional 10D Net Buy/Sell",
+        f"{stock_id} Institutional Chips",
         fontsize=14,
         fontweight="bold",
-        y=0.98,
+        y=0.985
     )
 
     sections = [
-        ("Foreign", chip_rows.get("foreign", [])),
-        ("Investment Trust", chip_rows.get("trust", [])),
-        ("Dealer", chip_rows.get("dealer", [])),
+        ("Foreign", "foreign"),
+        ("Investment Trust", "trust"),
+        ("Dealer", "dealer"),
     ]
 
-    for ax, (title, rows) in zip(axes, sections):
-        ax.set_facecolor("#F8F9FA")
+    for idx, (title, key) in enumerate(sections):
+        rows = chip_rows.get(key, [])[-10:]
 
-        values = [float(r.get("buy_sell", 0) or 0) for r in rows][-10:]
-        date = rows[-1].get("date", "--") if rows else "--"
-        today = values[-1] if values else 0
+        ax_text = fig.add_subplot(gs[idx * 2])
+        ax_bar = fig.add_subplot(gs[idx * 2 + 1])
 
-        ax.text(
-            0.02,
-            1.08,
-            f"{date} | {title}: {today:,.0f} lots",
-            transform=ax.transAxes,
+        # 第一排文字摘要
+        ax_text.axis("off")
+
+        latest = rows[-1] if rows else {}
+        latest_date = latest.get("date", "--")
+        latest_ratio = _fmt_chip_ratio(latest.get("ratio", "--"))
+        latest_buy_sell = float(latest.get("buy_sell", 0) or 0)
+
+        summary = f"{latest_date} | {title} Holding {latest_ratio} | Net {latest_buy_sell:+,.0f} lots"
+        ax_text.text(
+            0.01, 0.52,
+            summary,
             fontsize=10,
             fontweight="bold",
+            ha="left",
+            va="center",
+            color="#1F2937",
         )
 
+        # 第二排柱狀圖
+        ax_bar.set_facecolor("#F8F9FA")
+
+        values = [float(r.get("buy_sell", 0) or 0) for r in rows]
+        x = list(range(len(values)))
         colors = ["#FF3B30" if v >= 0 else "#34C759" for v in values]
 
-        ax.bar(range(len(values)), values, color=colors, width=0.55)
-        ax.axhline(0, linewidth=1)
+        ax_bar.bar(x, values, color=colors, width=0.55)
+        ax_bar.axhline(0, color="#6B7280", linewidth=1)
 
-        ax.set_title(title, loc="left", fontsize=12, fontweight="bold")
-        ax.set_xticks([])
-        ax.grid(True, axis="y", linestyle=":", alpha=0.45)
+        ax_bar.set_title(title, loc="left", fontsize=11, fontweight="bold", pad=4)
+        ax_bar.set_xticks([])  # 完全隱藏日期
+        ax_bar.grid(True, axis="y", linestyle=":", alpha=0.35)
 
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+        ax_bar.spines["top"].set_visible(False)
+        ax_bar.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+        # 避免只有一兩筆時太擠
+        if values:
+            ax_bar.set_xlim(-0.6, len(values) - 0.4)
+        else:
+            ax_bar.text(
+                0.5, 0.5,
+                "No data",
+                ha="center", va="center",
+                transform=ax_bar.transAxes,
+                fontsize=10,
+                color="#6B7280"
+            )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     return publish_figure(fig, f"{stock_id}_chip")
