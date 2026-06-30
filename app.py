@@ -33,9 +33,14 @@ def extract_reply_token(payload: Dict[str, Any]) -> str:
 
     return ""
 
+def make_reply_payload(message: Any, reply_token: str = "") -> Dict[str, Any]:
+    if isinstance(message, list):
+        messages = message
+    else:
+        messages = [message]
 
-def make_reply_payload(message: Dict[str, Any], reply_token: str = "") -> Dict[str, Any]:
-    messages = [message]
+    # LINE Reply API 一次最多 5 則
+    messages = messages[:5]
 
     reply_body = {
         "replyToken": reply_token,
