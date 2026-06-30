@@ -83,6 +83,39 @@ def _normalize_action(action: str | None) -> str:
     }
 
     return aliases.get(action, action)
+
+def _get_history_df_tf(meta, requested_tf: str):
+    """
+    相容不同版本的 get_history()。
+
+    可能回傳：
+    1. df
+    2. df, tf
+    3. (df, tf), something   # 防止巢狀 tuple
+    """
+    result = get_history(meta, requested_tf)
+    tf = normalize_time_frame(requested_tf)
+
+    # 防止 get_history 回傳 tuple 或巢狀 tuple
+    while isinstance(result, tuple):
+        if len(result) >= 2 and result[1]:
+            try:
+                tf = normalize_time_frame(result[1])
+            except Exception:
+                pass
+
+        result = result[0] if len(result) >= 1 else result
+
+    df = result
+
+    print(
+        "_get_history_df_tf | "
+        f"requested_tf={requested_tf} | tf={tf} | "
+        f"df_type={type(df)}",
+        flush=True,
+    )
+
+    return df, tf
     
 def _price_color(change: float) -> str:
     if change > 0:
@@ -730,8 +763,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         # 即時 / K 線 / 法人圖都需要行情資料
         if action in {"instant", "k_line", "chip"}:
-            df = get_history(meta, requested_tf)
-            tf = normalize_time_frame(requested_tf)
+            df, tf = _get_history_df_tf(meta, requested_tf)
 
             # 關鍵：一定要用 get_history 回傳的 tf
             price_meta = build_price_meta(df, tf)
@@ -767,8 +799,8 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                         price_change=price_meta.price_change,
                         active_mode="k_line",
                         current_tf=tf,
-                ),
-            )
+                    ),
+                )
 
             if action == "chip":
                 chip_rows = get_institutional_chips(meta.stock_id)
