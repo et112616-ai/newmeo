@@ -206,6 +206,56 @@ def _resolve_stock_futures_candidates(stock_id: str, stock_name: str) -> tuple[s
 
     return "", [], "none"
 
+def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
+    """
+    抓 FinMind 期貨日成交資訊。
+    這個是 fallback 用：
+    即時報價抓不到時，仍然可以用 TaiwanFuturesDaily 顯示資料。
+    """
+    fid = str(futures_id or "").strip().upper()
+
+    if not fid:
+        return []
+
+    params = {
+        "dataset": "TaiwanFuturesDaily",
+        "data_id": fid,
+        "start_date": _start_date(90),
+    }
+
+    if FINMIND_TOKEN:
+        params["token"] = FINMIND_TOKEN
+
+    try:
+        res = requests.get(
+            FINMIND_URL,
+            params=params,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "_request_finmind_futures_daily failed: "
+                f"futures_id={fid}, status={res.status_code}, "
+                f"body={res.text[:200]}",
+                flush=True,
+            )
+            return []
+
+        payload = res.json()
+        rows = payload.get("data") or []
+
+        if not isinstance(rows, list):
+            return []
+
+        return rows
+
+    except Exception as exc:
+        print(
+            f"_request_finmind_futures_daily failed: futures_id={fid}, error={exc}",
+            flush=True,
+        )
+        return []
 
 def _request_finmind_futures_snapshot(futures_id: str) -> list[dict]:
     """
