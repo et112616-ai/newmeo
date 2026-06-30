@@ -28,35 +28,52 @@ ACTIVE_COLOR = "#16C957"
 INACTIVE_COLOR = "#D9DDE3"
 
 def _normalize_action(action: str | None) -> str:
-    action = str(action or "").strip()
+    action = str(action or "").strip().lower()
 
     aliases = {
         "": "instant",
+
+        # 即時
         "realtime": "instant",
         "real_time": "instant",
         "instant": "instant",
+
+        # K 線
         "k": "k_line",
         "kline": "k_line",
         "k_line": "k_line",
+
+        # 法人
         "chip": "chip",
         "chips": "chip",
         "institutional": "chip",
         "institution": "chip",
         "legal": "chip",
+        "legal_person": "chip",
+        "legalperson": "chip",
+        "法人": "chip",
+
+        # 大戶
         "large": "large_holder",
         "large_holder": "large_holder",
         "big": "large_holder",
         "holder": "large_holder",
+        "大戶": "large_holder",
+
+        # 融資券
         "margin": "margin",
         "margin_short": "margin",
         "short": "margin",
+        "融資券": "margin",
+
+        # 期貨
         "futures": "futures",
         "future": "futures",
+        "期貨": "futures",
     }
 
     return aliases.get(action, action)
-
-
+    
 def _price_color(change: float) -> str:
     if change > 0:
         return UP_COLOR
