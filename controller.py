@@ -783,6 +783,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                         price_change=price_meta.price_change,
                         active_mode="chip",
                         current_tf=tf,
+                        image_aspect_ratio="4:5",   # 🔥 法人圖改高一點
                     ),
                 )
 
