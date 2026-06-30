@@ -751,12 +751,12 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         if action == "futures":
             snapshot = get_stock_futures_snapshot(meta.stock_id, stock_name)
-                return _build_futures_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    snapshot=snapshot,
-                    current_tf=requested_tf,
-                )
+            return _build_futures_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                snapshot=snapshot,
+                current_tf=requested_tf,
+            )
 
         return text_message(f"目前不支援的功能：{action}")
 
