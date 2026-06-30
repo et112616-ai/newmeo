@@ -23,14 +23,12 @@ plt.rcParams["font.sans-serif"] = [
     "sans-serif",
 ]
 
-
 def _empty_chart(title: str, message: str) -> str:
     fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
     ax.axis("off")
-    ax.text(0.5, 0.55, title, ha="center", va="center", fontsize=16, fontweight="bold")
-    ax.text(0.5, 0.45, message, ha="center", va="center", fontsize=11)
+    ax.text(0.5, 0.55, "No Data", ha="center", va="center", fontsize=16, fontweight="bold")
+    ax.text(0.5, 0.45, "Data unavailable", ha="center", va="center", fontsize=11)
     return publish_figure(fig, "empty")
-
 
 def _set_tw_stock_intraday_axis(ax, df: pd.DataFrame) -> None:
     """
@@ -102,7 +100,7 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
         linestyle="--",
         linewidth=1.0,
         alpha=0.8,
-        label="平盤",
+        label="Prev Close",
     )
 
     def price_to_pct(price):
@@ -124,7 +122,7 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
 
 def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
     if df.empty:
-        return _empty_chart(f"{stock_id} {stock_name}", "暫無即時走勢資料")
+        return _empty_chart(f"{stock_id}", "No intraday data")
 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
     ax.set_facecolor("#F8F9FA")
@@ -132,9 +130,8 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     close = df["Close"].astype(float)
     ref_price = _get_reference_price(df)
 
-    ax.plot(df.index, close, linewidth=2.2, label="即時價格")
+    ax.plot(df.index, close, linewidth=2.2, label="Price")
 
-    # 漲跌區塊，類似你參考圖的效果
     ax.fill_between(
         df.index,
         close,
@@ -153,7 +150,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         interpolate=True,
     )
 
-    ax.set_title(f"{stock_id} {stock_name} 即時走勢", fontsize=13, fontweight="bold")
+    ax.set_title(f"{stock_id} Intraday", fontsize=13, fontweight="bold")
 
     _set_tw_stock_intraday_axis(ax, df)
     _set_centered_price_axis(ax, df)
@@ -208,7 +205,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
     ax_k.plot(list(x), df["MA5"], linewidth=1.1, label="MA5")
     ax_k.plot(list(x), df["MA20"], linewidth=1.1, label="MA20")
 
-    ax_k.set_title(f"{stock_id} {stock_name} {tf} K線", fontsize=13, fontweight="bold")
+    ax_k.set_title(f"{stock_id} {tf} K-Line", fontsize=13, fontweight="bold")
     ax_k.grid(True, linestyle=":", alpha=0.45)
     ax_v.grid(True, linestyle=":", alpha=0.45)
     ax_k.legend(loc="best", fontsize=8)
@@ -237,16 +234,16 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, list[dict]]) -> str:
     fig, axes = plt.subplots(3, 1, figsize=(7, 8.5), dpi=120, facecolor="white")
     fig.suptitle(
-        f"{stock_id} {stock_name} 三大法人 10日籌碼",
+        f"{stock_id} Institutional 10D Net Buy/Sell",
         fontsize=14,
         fontweight="bold",
-        y=0.98
+        y=0.98,
     )
 
     sections = [
-        ("外資", chip_rows.get("foreign", [])),
-        ("投信", chip_rows.get("trust", [])),
-        ("自營商", chip_rows.get("dealer", [])),
+        ("Foreign", chip_rows.get("foreign", [])),
+        ("Investment Trust", chip_rows.get("trust", [])),
+        ("Dealer", chip_rows.get("dealer", [])),
     ]
 
     for ax, (title, rows) in zip(axes, sections):
@@ -259,10 +256,10 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
         ax.text(
             0.02,
             1.08,
-            f"{date} │ {title}當日買賣超：{today:,.0f} 張",
+            f"{date} | {title}: {today:,.0f} lots",
             transform=ax.transAxes,
             fontsize=10,
-            fontweight="bold"
+            fontweight="bold",
         )
 
         colors = ["#FF3B30" if v >= 0 else "#34C759" for v in values]
