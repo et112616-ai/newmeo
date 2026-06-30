@@ -27,6 +27,8 @@ except Exception:
 
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+FUTURES_SNAPSHOT_CACHE_TTL_SECONDS = 15
+_FUTURES_SNAPSHOT_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
 SPOT_CACHE_TTL_SECONDS = 20
 _SPOT_CACHE: dict[str, tuple[float, float]] = {}
@@ -58,7 +60,9 @@ class FuturesSnapshot:
     volume: int = 0
     open_interest: int = 0
     settlement_price: float = 0.0
-
+    
+    quote_source: str = "日成交"
+    quote_time: str = ""
 
 # fallback 用：如果 Supabase 還沒同步到，才吃這裡
 STOCK_FUTURES_MAP: dict[str, dict[str, Any]] = {
@@ -203,45 +207,146 @@ def _resolve_stock_futures_candidates(stock_id: str, stock_name: str) -> tuple[s
     return "", [], "none"
 
 
-def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
+def _request_finmind_futures_snapshot(futures_id: str) -> list[dict]:
     """
-    抓期貨日成交資訊。
-    不印 token。
+    抓 FinMind 台股期貨即時資訊。
+
+    注意：
+    - 官方文件標示 taiwan_futures_snapshot 只限 sponsor 會員。
+    - 若權限不足或沒有資料，直接回傳 []，讓系統 fallback 日成交資料。
     """
-    params = {
-        "dataset": "TaiwanFuturesDaily",
-        "data_id": futures_id,
-        "start_date": _start_date(90),
-    }
+    fid = str(futures_id or "").strip().upper()
+
+    if not fid:
+        return []
+
+    now = time_module.time()
+    cached = _FUTURES_SNAPSHOT_CACHE.get(fid)
+
+    if cached:
+        ts, rows = cached
+        if now - ts <= FUTURES_SNAPSHOT_CACHE_TTL_SECONDS:
+            return rows
+
+    headers = {}
 
     if FINMIND_TOKEN:
-        params["token"] = FINMIND_TOKEN
+        headers["Authorization"] = f"Bearer {FINMIND_TOKEN}"
+
+    params = {
+        "data_id": fid,
+    }
 
     try:
-        res = requests.get(FINMIND_URL, params=params, timeout=15)
+        res = requests.get(
+            FUTURES_SNAPSHOT_URL,
+            headers=headers,
+            params=params,
+            timeout=8,
+        )
+
+        if res.status_code in {401, 403}:
+            _debug(
+                "realtime snapshot unavailable or permission denied",
+                "futures_id =",
+                fid,
+                "status =",
+                res.status_code,
+            )
+            return []
 
         if res.status_code >= 400:
-            print(
-                "_request_finmind_futures_daily failed: "
-                f"futures_id={futures_id}, status={res.status_code}, "
-                f"body={res.text[:200]}",
-                flush=True,
+            _debug(
+                "realtime snapshot failed",
+                "futures_id =",
+                fid,
+                "status =",
+                res.status_code,
+                "body =",
+                res.text[:200],
             )
             return []
 
         payload = res.json()
         rows = payload.get("data") or []
 
-        return rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            rows = []
+
+        _FUTURES_SNAPSHOT_CACHE[fid] = (now, rows)
+
+        return rows
 
     except Exception as exc:
-        print(
-            f"_request_finmind_futures_daily failed: futures_id={futures_id}, error={exc}",
-            flush=True,
-        )
+        _debug("realtime snapshot exception", fid, exc)
         return []
 
 
+def _pick_realtime_snapshot_row(rows: list[dict], base_futures_id: str) -> dict | None:
+    """
+    從 taiwan_futures_snapshot 回傳資料中挑出近月即時報價。
+
+    data_id=TXF / CDF / CYF 時，回傳 futures_id 可能像：
+    TXFR1、TXFF3、CDFR1、CYFR1 ...
+
+    優先順序：
+    1. futures_id 完全等於 base
+    2. futures_id 以 base 開頭且含 R1
+    3. futures_id 以 base 開頭
+    4. 其他有效最新資料
+    """
+    base = str(base_futures_id or "").strip().upper()
+
+    valid = []
+
+    for r in rows:
+        price = _safe_float(r.get("close"))
+
+        if price <= 0:
+            continue
+
+        item = dict(r)
+        item["_snapshot_date"] = str(r.get("date") or "")
+        item["_snapshot_futures_id"] = str(r.get("futures_id") or "").strip().upper()
+
+        valid.append(item)
+
+    if not valid:
+        return None
+
+    exact = [
+        r for r in valid
+        if r["_snapshot_futures_id"] == base
+    ]
+
+    if exact:
+        return sorted(exact, key=lambda r: r["_snapshot_date"])[-1]
+
+    front_month = [
+        r for r in valid
+        if r["_snapshot_futures_id"].startswith(base)
+        and "R1" in r["_snapshot_futures_id"]
+    ]
+
+    if front_month:
+        return sorted(front_month, key=lambda r: r["_snapshot_date"])[-1]
+
+    prefix = [
+        r for r in valid
+        if r["_snapshot_futures_id"].startswith(base)
+    ]
+
+    if prefix:
+        return sorted(
+            prefix,
+            key=lambda r: (
+                r["_snapshot_date"],
+                _safe_int(r.get("total_volume") or r.get("volume")),
+            ),
+        )[-1]
+
+    return sorted(valid, key=lambda r: r["_snapshot_date"])[-1]
+    
 def _normalize_contract_date(value: Any) -> str:
     """
     只接受單一契約月份。
@@ -1061,7 +1166,50 @@ def get_stock_futures_snapshot(
     future_change = _row_change(selected_row)
     future_change_pct = _row_change_pct(selected_row)
 
-    if future_change == 0 and future_change_pct == 0:
+    future_volume = _safe_int(selected_row.get("volume"))
+    quote_source = "日成交"
+    quote_time = ""
+    
+    # =========================
+    # 優先使用即時期貨報價
+    # =========================
+    snapshot_rows = _request_finmind_futures_snapshot(selected_futures_id)
+    snapshot_row = _pick_realtime_snapshot_row(snapshot_rows, selected_futures_id)
+
+    if snapshot_row:
+        rt_price = _safe_float(snapshot_row.get("close"))
+
+        if rt_price > 0:
+            future_price = rt_price
+            future_change = _safe_float(snapshot_row.get("change_price"), future_change)
+            future_change_pct = _safe_float(snapshot_row.get("change_rate"), future_change_pct)
+
+            future_volume = _safe_int(
+                snapshot_row.get("total_volume")
+                or snapshot_row.get("volume"),
+                future_volume,
+            )
+
+            quote_source = "即時報價"
+            quote_time = str(snapshot_row.get("date") or "")
+
+            _debug(
+                "use realtime snapshot",
+                "selected_futures_id =",
+                selected_futures_id,
+                "snapshot_futures_id =",
+                snapshot_row.get("futures_id"),
+                "price =",
+                future_price,
+                "change =",
+                future_change,
+                "change_pct =",
+                future_change_pct,
+                "time =",
+                quote_time,
+            )
+
+    if quote_source != "即時報價" and future_change == 0 and future_change_pct == 0:
         calc_change, calc_change_pct = _calc_change_from_kline_rows(
             kline_rows,
             future_price,
@@ -1111,7 +1259,9 @@ def get_stock_futures_snapshot(
         spot_price=spot_price,
         basis=basis,
         basis_pct=basis_pct,
-        volume=_safe_int(selected_row.get("volume")),
+        volume=future_volume,
+        quote_source=quote_source,
+        quote_time=quote_time,
         open_interest=_safe_int(selected_row.get("open_interest")),
         settlement_price=_safe_float(selected_row.get("settlement_price")),
     )
