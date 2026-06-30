@@ -183,30 +183,130 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     fig.tight_layout()
 
     return publish_figure(fig, f"{stock_id}_instant")
-    
+def _fmt_ma_value(value) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "--"
+        return f"{float(value):.2f}"
+    except Exception:
+        return "--"
+
+
+def _get_font_kwargs_safe() -> dict:
+    try:
+        return _font_kwargs()
+    except Exception:
+        return {}
+
 def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_frame: str) -> str:
     tf = normalize_time_frame(time_frame)
+    font_kwargs = _get_font_kwargs_safe()
 
     if df.empty:
         return _empty_chart(f"{stock_id} {stock_name}", "暫無 K 線資料")
 
     df = df.copy()
-    df["MA5"] = df["Close"].rolling(5).mean()
-    df["MA20"] = df["Close"].rolling(20).mean()
 
-    fig = plt.figure(figsize=(7, 5.5), dpi=120, facecolor="white")
-    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+    # D / W / M 顯示 5T、12T、22T、60T、120T
+    show_ma_summary = tf in {"D", "W", "M"}
 
-    ax_k = fig.add_subplot(gs[0])
-    ax_v = fig.add_subplot(gs[1], sharex=ax_k)
+    if show_ma_summary:
+        ma_periods = [5, 12, 22, 60, 120]
+    else:
+        ma_periods = [5, 20]
+
+    # 先用完整資料計算均線，再裁切顯示範圍
+    for p in ma_periods:
+        df[f"MA{p}"] = df["Close"].astype(float).rolling(p, min_periods=1).mean()
+
+    latest = df.iloc[-1]
+
+    if show_ma_summary:
+        ma_text_1 = (
+            f"5T {_fmt_ma_value(latest.get('MA5'))}    "
+            f"12T {_fmt_ma_value(latest.get('MA12'))}    "
+            f"22T {_fmt_ma_value(latest.get('MA22'))}"
+        )
+        ma_text_2 = (
+            f"60T {_fmt_ma_value(latest.get('MA60'))}    "
+            f"120T {_fmt_ma_value(latest.get('MA120'))}"
+        )
+
+        # 顯示最近 120 根，避免太擠
+        plot_df = df.tail(120).copy()
+
+        fig = plt.figure(figsize=(8.6, 6.9), dpi=140, facecolor="white")
+        gs = gridspec.GridSpec(
+            3,
+            1,
+            height_ratios=[0.72, 3.2, 1],
+            hspace=0.06,
+        )
+
+        ax_info = fig.add_subplot(gs[0])
+        ax_k = fig.add_subplot(gs[1])
+        ax_v = fig.add_subplot(gs[2], sharex=ax_k)
+
+        ax_info.axis("off")
+
+        ax_info.text(
+            0.01,
+            0.76,
+            f"{stock_id} {stock_name} {tf} K線",
+            fontsize=17,
+            fontweight="bold",
+            color="#111111",
+            ha="left",
+            va="center",
+            **font_kwargs,
+        )
+
+        ax_info.text(
+            0.01,
+            0.30,
+            ma_text_1,
+            fontsize=14.5,
+            fontweight="bold",
+            color="#222222",
+            ha="left",
+            va="center",
+            **font_kwargs,
+        )
+
+        ax_info.text(
+            0.01,
+            0.02,
+            ma_text_2,
+            fontsize=14.5,
+            fontweight="bold",
+            color="#222222",
+            ha="left",
+            va="center",
+            **font_kwargs,
+        )
+
+    else:
+        plot_df = df.copy()
+
+        fig = plt.figure(figsize=(7, 5.5), dpi=120, facecolor="white")
+        gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+
+        ax_k = fig.add_subplot(gs[0])
+        ax_v = fig.add_subplot(gs[1], sharex=ax_k)
+
+        ax_k.set_title(
+            f"{stock_id} {tf} K-Line",
+            fontsize=13,
+            fontweight="bold",
+        )
 
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    x = range(len(df))
+    x = range(len(plot_df))
     width = 0.58
 
-    for i, (_, row) in enumerate(df.iterrows()):
+    for i, (_, row) in enumerate(plot_df.iterrows()):
         o = float(row["Open"])
         h = float(row["High"])
         l = float(row["Low"])
@@ -218,24 +318,43 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
         lower = min(o, c)
         height = abs(c - o) or 0.01
-        ax_k.bar(i, height, bottom=lower, width=width, color=color, align="center")
+        ax_k.bar(
+            i,
+            height,
+            bottom=lower,
+            width=width,
+            color=color,
+            align="center",
+        )
 
         vol = float(row.get("Volume", 0) or 0)
         ax_v.bar(i, vol, width=width, color=color)
 
-    ax_k.plot(list(x), df["MA5"], linewidth=1.1, label="MA5")
-    ax_k.plot(list(x), df["MA20"], linewidth=1.1, label="MA20")
+    # 畫均線
+    for p in ma_periods:
+        col = f"MA{p}"
+        if col in plot_df.columns:
+            label = f"{p}T" if show_ma_summary else f"MA{p}"
+            ax_k.plot(
+                list(x),
+                plot_df[col],
+                linewidth=1.2,
+                label=label,
+            )
 
-    ax_k.set_title(f"{stock_id} {tf} K-Line", fontsize=13, fontweight="bold")
     ax_k.grid(True, linestyle=":", alpha=0.45)
     ax_v.grid(True, linestyle=":", alpha=0.45)
-    ax_k.legend(loc="best", fontsize=8)
-    ax_v.set_ylabel("Volume", fontsize=8)
+
+    ax_k.legend(loc="best", fontsize=9)
+    ax_v.set_ylabel("Volume", fontsize=9)
 
     labels = []
-    for idx in df.index:
+
+    for idx in plot_df.index:
         if tf in {"1m", "5m"}:
             labels.append(idx.strftime("%H:%M"))
+        elif tf == "M":
+            labels.append(idx.strftime("%Y/%m"))
         else:
             labels.append(idx.strftime("%m/%d"))
 
@@ -243,15 +362,18 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
     ticks = list(range(0, len(labels), step))
 
     ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=8)
+    ax_v.set_xticklabels(
+        [labels[i] for i in ticks],
+        rotation=0,
+        fontsize=9,
+    )
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
     fig.tight_layout()
 
     return publish_figure(fig, f"{stock_id}_{tf}_kline")
-
-
+    
 def _fmt_chip_ratio(value) -> str:
     try:
         if value in (None, "", "--"):
