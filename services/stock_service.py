@@ -22,6 +22,8 @@ DISPLAY_TIMESTAMP_COL = "_display_timestamp"
 QUOTE_PRICE_COL = "_quote_price"
 QUOTE_CACHE_TTL_SECONDS = 20
 _QUOTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+DWM_CACHE_TTL_SECONDS = 60
+_DWM_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
 
 @dataclass
 class StockMeta:
@@ -543,9 +545,171 @@ def _reconcile_intraday_with_quote(
 
     return df
 
+def _normalize_yf_daily_df(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    df = raw.copy()
+
+    # yfinance 有時會回 MultiIndex 欄位
+    if isinstance(df.columns, pd.MultiIndex):
+        for level in range(df.columns.nlevels):
+            level_values = set(str(x) for x in df.columns.get_level_values(level))
+            if {"Open", "High", "Low", "Close"}.issubset(level_values):
+                df.columns = df.columns.get_level_values(level)
+                break
+
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    required = ["Open", "High", "Low", "Close"]
+
+    for col in required:
+        if col not in df.columns:
+            return pd.DataFrame()
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+
+    return df
+
+
+def _resample_ohlcv_keep_latest_date(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    latest_trade_ts = df.index[-1]
+
+    out = df.resample(rule).agg(
+        {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+    )
+
+    out = out.dropna(subset=["Open", "High", "Low", "Close"])
+
+    if out.empty:
+        return out
+
+    # 重點：
+    # 週線、月線最後一根 K 的 index 改成實際最新交易日
+    # 避免月線顯示 2026-06-01 或週線顯示未來週五
+    idx = list(out.index)
+    idx[-1] = latest_trade_ts
+    out.index = pd.DatetimeIndex(idx)
+
+    out = out[~out.index.duplicated(keep="last")]
+
+    return out
+
+
+def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
+    tf = normalize_time_frame(time_frame)
+    cache_key = (meta.yf_symbol, tf)
+    now = time_module.time()
+
+    cached = _DWM_CACHE.get(cache_key)
+
+    if cached:
+        ts, cached_df = cached
+        if now - ts <= DWM_CACHE_TTL_SECONDS:
+            return cached_df.copy()
+
+    # 為了計算 120T：
+    # D 至少要 120 日
+    # W 至少要 120 週
+    # M 至少要 120 月，所以月線抓 15 年日 K 再轉月 K
+    period_map = {
+        "D": "2y",
+        "W": "5y",
+        "M": "15y",
+    }
+
+    period = period_map.get(tf, "2y")
+
+    try:
+        raw = yf.download(
+            meta.yf_symbol,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+    except Exception as exc:
+        print(f"_get_dwm_history_from_daily download failed: {meta.yf_symbol}, tf={tf}, error={exc}")
+        return pd.DataFrame()
+
+    daily = _normalize_yf_daily_df(raw)
+
+    if daily.empty:
+        print(f"_get_dwm_history_from_daily empty daily: {meta.yf_symbol}, tf={tf}")
+        return pd.DataFrame()
+
+    if tf == "D":
+        out = daily.copy()
+    elif tf == "W":
+        out = _resample_ohlcv_keep_latest_date(daily, "W-FRI")
+    elif tf == "M":
+        try:
+            out = _resample_ohlcv_keep_latest_date(daily, "ME")
+        except Exception:
+            out = _resample_ohlcv_keep_latest_date(daily, "M")
+    else:
+        out = daily.copy()
+
+    if out.empty:
+        return pd.DataFrame()
+
+    # 保留足夠資料給 120T，但不要讓圖太重
+    tail_map = {
+        "D": 180,
+        "W": 180,
+        "M": 140,
+    }
+
+    out = out.tail(tail_map.get(tf, 180)).copy()
+
+    display_stamp = daily.index[-1].strftime("%Y-%m-%d")
+    out.attrs["display_timestamp"] = display_stamp
+
+    try:
+        out[DISPLAY_TIMESTAMP_COL] = display_stamp
+    except Exception:
+        pass
+
+    _DWM_CACHE[cache_key] = (now, out.copy())
+
+    print(
+        "stock_service_v5_quote_reconcile | dwm_history | "
+        f"stock={meta.stock_id} | tf={tf} | rows={len(out)} | latest={out.index[-1]}"
+    )
+
+    return out
 
 def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, str]:
     tf = normalize_time_frame(time_frame)
+    
+    if tf in {"D", "W", "M"}:
+        dwm_df = _get_dwm_history_from_daily(meta, tf)
+
+        if not dwm_df.empty:
+            return dwm_df
 
     mapping = {
         "1m": ("1d", "1m"),
