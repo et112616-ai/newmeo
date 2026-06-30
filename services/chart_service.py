@@ -522,11 +522,11 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             **font_kwargs,
         )
 
-        if latest_ratio == "--":
+        if latest_ratio in {"--", "", "None", "nan"}:
             info_text = f"{latest_date} │ {action_text} {latest_lots:,} 張"
         else:
             info_text = f"{latest_date} │ 持股比 {latest_ratio} │ {action_text} {latest_lots:,} 張"
-
+        
         ax_text.text(
             0.01,
             0.24,
