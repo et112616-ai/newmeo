@@ -6,7 +6,14 @@ from typing import Any
 
 import requests
 import yfinance as yf
+import matplotlib
+matplotlib.use("Agg")
 
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from services.upload_service import publish_figure
 from config import FINMIND_TOKEN
 
 
@@ -26,6 +33,7 @@ class FuturesSnapshot:
     contract_date: str = ""
     trade_date: str = ""
     trading_session: str = ""
+    chart_url: str = ""
 
     future_price: float = 0.0
     future_change: float = 0.0
@@ -214,6 +222,216 @@ def _display_session(value: Any) -> str:
 
     return text or "--"
 
+def _is_position_session(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        "position" in text
+        or "open_interest" in text
+        or "未沖銷" in text
+        or "部位" in text
+    )
+
+
+def _is_valid_trade_row(row: dict) -> bool:
+    """
+    排除 position / 部位資料。
+    只保留真的有期貨價格的交易資料。
+    """
+    if _is_position_session(row.get("trading_session")):
+        return False
+
+    return _row_price(row) > 0
+
+
+def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[dict]:
+    """
+    依照選到的近月契約，準備 K 線資料。
+
+    規則：
+    - 只取同一個近月 contract_date
+    - 如果選到的是盤後，優先畫盤後
+    - 如果沒有盤後，就畫日盤
+    - 排除 position 資料
+    """
+    contract = selected_row.get("_contract_norm") or _normalize_contract_date(
+        selected_row.get("contract_date")
+    )
+
+    if not contract:
+        return []
+
+    prefer_afterhours = _is_afterhours_session(selected_row.get("trading_session"))
+
+    same_contract_rows = []
+
+    for r in rows:
+        r_contract = _normalize_contract_date(r.get("contract_date"))
+
+        if r_contract != contract:
+            continue
+
+        if not _is_valid_trade_row(r):
+            continue
+
+        item = dict(r)
+        item["_trade_date_norm"] = _normalize_trade_date(r.get("date"))
+        item["_contract_norm"] = r_contract
+
+        if not item["_trade_date_norm"]:
+            continue
+
+        same_contract_rows.append(item)
+
+    if not same_contract_rows:
+        return []
+
+    if prefer_afterhours:
+        preferred = [
+            r for r in same_contract_rows
+            if _is_afterhours_session(r.get("trading_session"))
+        ]
+
+        if preferred:
+            same_contract_rows = preferred
+    else:
+        preferred = [
+            r for r in same_contract_rows
+            if _is_regular_session(r.get("trading_session"))
+        ]
+
+        if preferred:
+            same_contract_rows = preferred
+
+    same_contract_rows = sorted(
+        same_contract_rows,
+        key=lambda r: r["_trade_date_norm"]
+    )
+
+    # 同一天若有重複，保留最後一筆
+    by_date = {}
+
+    for r in same_contract_rows:
+        by_date[r["_trade_date_norm"]] = r
+
+    return list(by_date.values())[-30:]
+
+
+def _generate_futures_kline_chart(
+    rows: list[dict],
+    futures_id: str,
+    futures_name: str,
+    contract_date: str,
+    session: str,
+) -> str:
+    """
+    產生股票期貨 K 線圖。
+    """
+    if not rows:
+        return ""
+
+    chart_rows = []
+
+    for r in rows:
+        date = _normalize_trade_date(r.get("date"))
+        close = _row_price(r)
+
+        if not date or close <= 0:
+            continue
+
+        open_price = _safe_float(r.get("open") or r.get("Open") or close)
+        high_price = _safe_float(r.get("max") or r.get("high") or r.get("High") or close)
+        low_price = _safe_float(r.get("min") or r.get("low") or r.get("Low") or close)
+        volume = _safe_int(r.get("volume"))
+
+        if open_price <= 0:
+            open_price = close
+
+        if high_price <= 0:
+            high_price = max(open_price, close)
+
+        if low_price <= 0:
+            low_price = min(open_price, close)
+
+        chart_rows.append(
+            {
+                "date": date,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close,
+                "volume": volume,
+            }
+        )
+
+    if not chart_rows:
+        return ""
+
+    df = pd.DataFrame(chart_rows)
+
+    fig = plt.figure(figsize=(7, 5.5), dpi=120, facecolor="white")
+    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+
+    ax_k = fig.add_subplot(gs[0])
+    ax_v = fig.add_subplot(gs[1], sharex=ax_k)
+
+    ax_k.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
+
+    x = range(len(df))
+    width = 0.58
+
+    for i, row in df.iterrows():
+        o = float(row["open"])
+        h = float(row["high"])
+        l = float(row["low"])
+        c = float(row["close"])
+
+        color = "#FF3B30" if c >= o else "#34C759"
+
+        ax_k.vlines(i, l, h, linewidth=1, color=color)
+
+        lower = min(o, c)
+        height = abs(c - o) or 0.01
+
+        ax_k.bar(
+            i,
+            height,
+            bottom=lower,
+            width=width,
+            color=color,
+            align="center",
+        )
+
+        ax_v.bar(
+            i,
+            int(row["volume"]),
+            width=width,
+            color=color,
+        )
+
+    ax_k.set_title(
+        f"{futures_name} {futures_id} {contract_date} {session} K線",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    ax_k.grid(True, linestyle=":", alpha=0.45)
+    ax_v.grid(True, linestyle=":", alpha=0.45)
+    ax_v.set_ylabel("Volume", fontsize=8)
+
+    labels = [str(d)[5:] for d in df["date"].tolist()]
+    step = max(1, len(labels) // 6)
+    ticks = list(range(0, len(labels), step))
+
+    ax_v.set_xticks(ticks)
+    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=8)
+
+    plt.setp(ax_k.get_xticklabels(), visible=False)
+
+    fig.tight_layout()
+
+    return publish_figure(fig, f"{futures_id}_futures_kline")
 
 def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     """
@@ -232,6 +450,9 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
         contract = _normalize_contract_date(r.get("contract_date"))
 
         if not trade_date or not contract:
+            continue
+            
+        if not _is_valid_trade_row(r):
             continue
 
         item = dict(r)
@@ -416,6 +637,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
 
     selected_row: dict | None = None
     selected_futures_id = ""
+    selected_rows: list[dict] = []
 
     for futures_id in candidates:
         rows = _request_finmind_futures_daily(futures_id)
@@ -428,6 +650,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         if row:
             selected_row = row
             selected_futures_id = futures_id
+            selected_rows = rows
             break
 
     if not selected_row:
@@ -447,6 +670,18 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
 
     basis = future_price - spot_price if future_price and spot_price else 0.0
     basis_pct = (basis / spot_price * 100) if spot_price else 0.0
+    display_contract = _format_contract_date(selected_row.get("contract_date"))
+    display_session = _display_session(selected_row.get("trading_session"))
+
+    kline_rows = _prepare_futures_kline_rows(selected_rows, selected_row)
+
+    chart_url = _generate_futures_kline_chart(
+        rows=kline_rows,
+        futures_id=selected_futures_id,
+        futures_name=futures_name,
+        contract_date=display_contract,
+        session=display_session,
+    )
 
     print(
         "futures_service_v1",
@@ -468,7 +703,8 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         futures_name=futures_name,
         contract_date=_format_contract_date(selected_row.get("contract_date")),
         trade_date=_normalize_trade_date(selected_row.get("date")),
-        trading_session=_display_session(selected_row.get("trading_session")),
+        trading_session=display_session,
+        chart_url=chart_url,
         future_price=future_price,
         future_change=future_change,
         future_change_pct=future_change_pct,
