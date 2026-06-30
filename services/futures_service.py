@@ -256,6 +256,9 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     """
     contract = selected_row.get("_contract_norm") or _normalize_contract_date(
         selected_row.get("contract_date")
+        or selected_row.get("delivery_month")
+        or selected_row.get("due_month")
+        or selected_row.get("settlement_month")
     )
 
     if not contract:
@@ -266,7 +269,12 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     same_contract_rows = []
 
     for r in rows:
-        r_contract = _normalize_contract_date(r.get("contract_date"))
+        r_contract = _normalize_contract_date(
+            r.get("contract_date")
+            or r.get("delivery_month")
+            or r.get("due_month")
+            or r.get("settlement_month")
+        )
 
         if r_contract != contract:
             continue
@@ -447,7 +455,12 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
 
     for r in rows:
         trade_date = _normalize_trade_date(r.get("date"))
-        contract = _normalize_contract_date(r.get("contract_date"))
+        contract = _normalize_contract_date(
+            r.get("contract_date")
+            or r.get("delivery_month")
+            or r.get("due_month")
+            or r.get("settlement_month")
+        )
 
         if not trade_date or not contract:
             continue
@@ -561,6 +574,11 @@ def _row_price(row: dict) -> float:
     for key in [
         "close",
         "Close",
+        "close_price",
+        "last_price",
+        "成交價",
+        "最後成交價",
+        "收盤價",
         "settlement_price",
         "SettlementPrice",
     ]:
@@ -570,7 +588,6 @@ def _row_price(row: dict) -> float:
             return price
 
     return 0.0
-
 
 def _row_change(row: dict) -> float:
     for key in [
@@ -627,6 +644,8 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
 
     futures_name, candidates = _resolve_stock_futures_candidates(sid)
 
+    print("DEBUG futures start:", sid, stock_name, futures_name, candidates)
+
     if not candidates:
         return FuturesSnapshot(
             available=False,
@@ -642,10 +661,17 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
     for futures_id in candidates:
         rows = _request_finmind_futures_daily(futures_id)
 
+        print(f"DEBUG futures candidate={futures_id}, rows_count={len(rows)}")
+
+        if rows:
+            print("DEBUG futures sample row:", rows[-1])
+
         if not rows:
             continue
 
         row = _pick_near_month_prefer_afterhours(rows)
+
+        print(f"DEBUG selected row for {futures_id}:", row)
 
         if row:
             selected_row = row
@@ -654,6 +680,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
             break
 
     if not selected_row:
+        print("DEBUG futures result: no selected_row")
         return FuturesSnapshot(
             available=False,
             message="查無近月股票期貨資料，可能是 FinMind 尚未更新或期貨代號需調整。",
@@ -670,10 +697,15 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
 
     basis = future_price - spot_price if future_price and spot_price else 0.0
     basis_pct = (basis / spot_price * 100) if spot_price else 0.0
+
     display_contract = _format_contract_date(selected_row.get("contract_date"))
     display_session = _display_session(selected_row.get("trading_session"))
 
     kline_rows = _prepare_futures_kline_rows(selected_rows, selected_row)
+
+    print("DEBUG kline_rows_count =", len(kline_rows))
+    if kline_rows:
+        print("DEBUG kline_rows_last =", kline_rows[-1])
 
     chart_url = _generate_futures_kline_chart(
         rows=kline_rows,
@@ -683,16 +715,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         session=display_session,
     )
 
-    print(
-        "futures_service_v1",
-        "| stock=", sid,
-        "| futures_id=", selected_futures_id,
-        "| contract=", selected_row.get("contract_date"),
-        "| session=", selected_row.get("trading_session"),
-        "| date=", selected_row.get("date"),
-        "| future_price=", future_price,
-        "| spot_price=", spot_price,
-    )
+    print("DEBUG chart_url =", chart_url)
 
     return FuturesSnapshot(
         available=True,
@@ -701,7 +724,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         stock_name=stock_name,
         futures_id=str(selected_row.get("futures_id") or selected_futures_id),
         futures_name=futures_name,
-        contract_date=_format_contract_date(selected_row.get("contract_date")),
+        contract_date=display_contract,
         trade_date=_normalize_trade_date(selected_row.get("date")),
         trading_session=display_session,
         chart_url=chart_url,
