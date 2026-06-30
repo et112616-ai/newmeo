@@ -20,7 +20,7 @@ from utils.formatter import normalize_time_frame
 plt.rcParams["axes.unicode_minus"] = False
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.otf"
+FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 
 CHART_FONT_PROP = None
 
