@@ -1,152 +1,214 @@
 from __future__ import annotations
 
+import csv
+from io import StringIO
 from typing import Any
 
-import pandas as pd
 import requests
 
 from services.supabase_service import get_supabase_client
 
 
-TAIFEX_STOCK_LIST_URL = "https://www.taifex.com.tw/enl/eng2/stockLists"
+# 政府資料開放平臺「股票期貨交易標的」CSV
+# data.gov.tw dataset: 22644
+TAIFEX_STOCK_FUTURES_CSV_URL = (
+    "https://www.taifex.com.tw/data_gov/taifex_open_data.asp?data_name=SSFLists"
+)
 
 
-def _norm_col(col) -> str:
-    if isinstance(col, tuple):
-        return " ".join(str(x).strip() for x in col if str(x).strip())
-    return str(col).strip()
+def _debug(*args):
+    print("DEBUG futures_map |", *args, flush=True)
 
 
-def _find_col(columns: list[str], candidates: list[str]) -> str | None:
-    for c in candidates:
-        for col in columns:
-            if c.lower() == col.lower():
-                return col
+def _decode_response_content(content: bytes) -> str:
+    """
+    期交所 / data.gov CSV 可能是 utf-8-sig、big5、cp950。
+    這裡逐一嘗試，避免 Render 上編碼錯誤。
+    """
+    for enc in ["utf-8-sig", "utf-8", "cp950", "big5"]:
+        try:
+            return content.decode(enc)
+        except Exception:
+            continue
 
-    for c in candidates:
-        for col in columns:
-            if c.lower() in col.lower():
-                return col
-
-    return None
+    return content.decode("utf-8", errors="ignore")
 
 
-def _to_int(value) -> int | None:
-    try:
-        text = str(value).replace(",", "").strip()
-        if not text or text.lower() == "nan":
-            return None
-        return int(float(text))
-    except Exception:
-        return None
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _clean_stock_id(value: Any) -> str:
+    return _clean_text(value).replace(".TW", "").replace(".TWO", "").strip()
 
 
 def _build_candidate_ids(futures_code: str) -> list[str]:
     """
-    期交所標的表通常是基礎代碼，例如：
+    期交所資料通常是基礎代碼，例如：
     2408 南亞科 = CY
 
-    FinMind / 行情資料可能用：
+    FinMind 可能吃：
     CYF 或 CY
 
-    所以自動產生兩種候選。
+    所以自動產生：
+    CY  -> CYF, CY
+    CYF -> CYF, CY
     """
-    code = str(futures_code or "").strip().upper()
+    code = _clean_text(futures_code).upper()
 
     if not code:
         return []
 
-    candidates = []
+    candidates: list[str] = []
 
-    if not code.endswith("F"):
+    if code.endswith("F"):
+        candidates.append(code)
+        candidates.append(code[:-1])
+    else:
         candidates.append(f"{code}F")
+        candidates.append(code)
 
-    candidates.append(code)
-
-    # 去重
     return list(dict.fromkeys(candidates))
 
 
-def sync_stock_futures_map_from_taifex() -> dict[str, Any]:
+def _is_standard_stock_future(stock_id: str, security_type: str) -> bool:
     """
-    從期交所股票期貨/股票選擇權標的頁面同步標準股票期貨對照表到 Supabase。
+    只保留普通股票期貨，排除 ETF 期貨。
 
-    目前只保留：
-    - Stock Futures
-    - 普通股票期貨
-    - 契約乘數 2,000 股
-
-    排除：
-    - 小型股票期貨 100 股
-    - ETF 期貨
+    股票通常是 4 碼，例如 2330、2408。
+    ETF 常見是 00 開頭，例如 0050、006208。
     """
-    resp = requests.get(TAIFEX_STOCK_LIST_URL, timeout=20)
-    resp.raise_for_status()
+    sid = _clean_stock_id(stock_id)
+    stype = _clean_text(security_type)
 
-    tables = pd.read_html(resp.text)
+    if not sid.isdigit():
+        return False
 
-    if not tables:
-        return {
-            "ok": False,
-            "message": "no table found",
-            "count": 0,
-        }
+    # 排除 ETF / 受益憑證 / 指數股票型基金
+    if (
+        "ETF" in stype.upper()
+        or "受益憑證" in stype
+        or "指數股票型基金" in stype
+        or sid.startswith("00")
+    ):
+        return False
 
-    df = tables[0].copy()
-    df.columns = [_norm_col(c) for c in df.columns]
+    # 普通股多為 4 碼
+    if len(sid) != 4:
+        return False
 
-    columns = list(df.columns)
+    return True
 
-    col_futures_code = _find_col(columns, ["Ticker Symbol", "股票期貨商品代碼", "商品代碼"])
-    col_stock_name = _find_col(columns, ["Underlying Stock", "標的證券", "標的證券簡稱"])
-    col_stock_id = _find_col(columns, ["Stock Code", "證券代號"])
-    col_stock_futures = _find_col(columns, ["Stock Futures", "股票期貨"])
-    col_contract_size = _find_col(
-        columns,
-        [
-            "Shares or beneficial units of underlying security",
-            "標的證券股數",
-            "契約乘數",
-        ],
-    )
 
-    required = {
-        "futures_code": col_futures_code,
-        "stock_name": col_stock_name,
-        "stock_id": col_stock_id,
-        "stock_futures": col_stock_futures,
-        "contract_size": col_contract_size,
+def _find_value(row: dict[str, Any], possible_keys: list[str]) -> str:
+    """
+    欄位名稱可能有空白或 BOM，這裡做寬鬆比對。
+    """
+    normalized = {
+        str(k).replace("\ufeff", "").strip(): v
+        for k, v in row.items()
     }
 
-    missing = [k for k, v in required.items() if not v]
+    for key in possible_keys:
+        if key in normalized:
+            return _clean_text(normalized.get(key))
 
-    if missing:
-        return {
-            "ok": False,
-            "message": f"missing columns: {missing}",
-            "columns": columns,
-            "count": 0,
-        }
+    # fallback：用包含關係找欄位
+    for key in possible_keys:
+        for col, value in normalized.items():
+            if key in col:
+                return _clean_text(value)
+
+    return ""
+
+
+def fetch_stock_futures_map_from_csv() -> list[dict[str, Any]]:
+    """
+    從期交所 open data CSV 取得股票期貨標的對照表。
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    resp = requests.get(
+        TAIFEX_STOCK_FUTURES_CSV_URL,
+        headers=headers,
+        timeout=20,
+    )
+
+    resp.raise_for_status()
+
+    text = _decode_response_content(resp.content)
+
+    # 去掉空行
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return []
+
+    reader = csv.DictReader(StringIO("\n".join(lines)))
 
     records: list[dict[str, Any]] = []
 
-    for _, row in df.iterrows():
-        stock_id = str(row.get(col_stock_id, "")).strip()
-        futures_code = str(row.get(col_futures_code, "")).strip().upper()
-        stock_name = str(row.get(col_stock_name, "")).strip()
-        stock_futures_flag = str(row.get(col_stock_futures, "")).strip()
-        contract_size = _to_int(row.get(col_contract_size))
+    for row in reader:
+        futures_code = _find_value(
+            row,
+            [
+                "股票期貨商品代碼",
+                "商品代碼",
+                "期貨商品代碼",
+            ],
+        )
+
+        stock_full_name = _find_value(
+            row,
+            [
+                "標的證券",
+                "標的證券名稱",
+            ],
+        )
+
+        stock_id = _find_value(
+            row,
+            [
+                "證券代號",
+                "股票代號",
+            ],
+        )
+
+        stock_short_name = _find_value(
+            row,
+            [
+                "標的證券簡稱",
+                "證券簡稱",
+                "簡稱",
+            ],
+        )
+
+        security_type = _find_value(
+            row,
+            [
+                "標的證券種類",
+                "證券種類",
+            ],
+        )
+
+        stock_id = _clean_stock_id(stock_id)
+        futures_code = _clean_text(futures_code).upper()
+        stock_short_name = _clean_text(stock_short_name)
+        stock_full_name = _clean_text(stock_full_name)
 
         if not stock_id or not futures_code:
             continue
 
-        # 只抓有股票期貨的項目
-        if "Stock Futures" not in stock_futures_flag and "●" not in stock_futures_flag:
+        if not _is_standard_stock_future(stock_id, security_type):
             continue
 
-        # 只抓標準股票期貨：2,000 股
-        if contract_size != 2000:
-            continue
+        stock_name = stock_short_name or stock_full_name or stock_id
 
         records.append(
             {
@@ -154,57 +216,105 @@ def sync_stock_futures_map_from_taifex() -> dict[str, Any]:
                 "stock_name": stock_name,
                 "futures_code": futures_code,
                 "futures_name": f"{stock_name}期貨",
-                "contract_size": contract_size,
-                "source": "TAIFEX",
+                "contract_size": 2000,
+                "source": "TAIFEX_OPEN_DATA",
             }
         )
+
+    # 去重，以 stock_id 為主
+    dedup: dict[str, dict[str, Any]] = {}
+
+    for r in records:
+        dedup[r["stock_id"]] = r
+
+    return list(dedup.values())
+
+
+def sync_stock_futures_map_from_taifex() -> dict[str, Any]:
+    """
+    同步股票期貨對照表到 Supabase。
+    """
+    try:
+        records = fetch_stock_futures_map_from_csv()
+    except Exception as exc:
+        _debug("fetch csv failed:", exc)
+
+        return {
+            "ok": False,
+            "message": f"fetch csv failed: {exc}",
+            "count": 0,
+        }
 
     if not records:
         return {
             "ok": False,
-            "message": "no records parsed",
-            "columns": columns,
+            "message": "no records parsed from csv",
             "count": 0,
         }
 
-    supabase = get_supabase_client()
+    try:
+        supabase = get_supabase_client()
 
-    supabase.table("stock_futures_map").upsert(
-        records,
-        on_conflict="stock_id",
-    ).execute()
+        supabase.table("stock_futures_map").upsert(
+            records,
+            on_conflict="stock_id",
+        ).execute()
+
+    except Exception as exc:
+        _debug("supabase upsert failed:", exc)
+
+        return {
+            "ok": False,
+            "message": f"supabase upsert failed: {exc}",
+            "count": 0,
+            "sample": records[:3],
+        }
+
+    sample_2408 = [
+        r for r in records
+        if r.get("stock_id") == "2408"
+    ]
 
     return {
         "ok": True,
         "message": "synced",
         "count": len(records),
+        "sample_2408": sample_2408,
     }
 
 
 def get_stock_futures_mapping(stock_id: str) -> dict[str, Any] | None:
-    stock_id = str(stock_id or "").strip()
+    """
+    從 Supabase 查股票代號對應的股票期貨代號。
+    """
+    sid = _clean_stock_id(stock_id)
 
-    if not stock_id:
+    if not sid:
         return None
 
-    supabase = get_supabase_client()
+    try:
+        supabase = get_supabase_client()
 
-    resp = (
-        supabase.table("stock_futures_map")
-        .select("*")
-        .eq("stock_id", stock_id)
-        .limit(1)
-        .execute()
-    )
+        resp = (
+            supabase.table("stock_futures_map")
+            .select("*")
+            .eq("stock_id", sid)
+            .limit(1)
+            .execute()
+        )
 
-    data = resp.data or []
+        data = resp.data or []
+
+    except Exception as exc:
+        _debug("get mapping failed:", sid, exc)
+        return None
 
     if not data:
         return None
 
     row = data[0]
 
-    futures_code = str(row.get("futures_code", "")).strip().upper()
+    futures_code = _clean_text(row.get("futures_code")).upper()
 
     row["candidates"] = _build_candidate_ids(futures_code)
 
