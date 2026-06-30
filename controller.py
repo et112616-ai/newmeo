@@ -26,6 +26,7 @@ DOWN_COLOR = "#00B050"
 FLAT_COLOR = "#666666"
 ACTIVE_COLOR = "#16C957"
 INACTIVE_COLOR = "#D9DDE3"
+import traceback
 
 def _normalize_action(action: str | None) -> str:
     action = str(action or "").strip().lower()
@@ -830,5 +831,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         return text_message(f"目前不支援的功能：{action}")
 
     except Exception as exc:
-        print(f"handle_request failed: {exc}")
-        return text_message(f"查詢失敗：{str(exc)}")
+        print("controller.handle_request failed traceback:", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return text_message(f"查詢失敗：{type(exc).__name__}: {exc}")
