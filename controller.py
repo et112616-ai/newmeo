@@ -730,7 +730,8 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         # 即時 / K 線 / 法人圖都需要行情資料
         if action in {"instant", "k_line", "chip"}:
-            df, tf = get_history(meta, requested_tf)
+            df = get_history(meta, requested_tf)
+            tf = normalize_time_frame(requested_tf)
 
             # 關鍵：一定要用 get_history 回傳的 tf
             price_meta = build_price_meta(df, tf)
