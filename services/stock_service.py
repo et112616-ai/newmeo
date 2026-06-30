@@ -5,6 +5,7 @@ from datetime import datetime, time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+import time as time_module
 import pandas as pd
 import yfinance as yf
 
@@ -19,7 +20,8 @@ TWO_SUFFIX = ".TWO"
 REFERENCE_PRICE_COL = "_reference_price"
 DISPLAY_TIMESTAMP_COL = "_display_timestamp"
 QUOTE_PRICE_COL = "_quote_price"
-
+QUOTE_CACHE_TTL_SECONDS = 20
+_QUOTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 @dataclass
 class StockMeta:
@@ -308,6 +310,12 @@ def _attach_intraday_reference_price(
     df: pd.DataFrame,
     time_frame: str,
 ) -> pd.DataFrame:
+    """
+    幫 1m / 5m 盤中資料加上平盤價。
+    平盤價 = 前一交易日收盤價。
+
+    優先使用 fast_info.previous_close，避免多打一個日 K 造成 timeout。
+    """
     if df.empty or time_frame not in {"1m", "5m"}:
         return df
 
@@ -315,6 +323,16 @@ def _attach_intraday_reference_price(
         return df
 
     df = df.copy()
+
+    try:
+        quote = _get_yahoo_quote_snapshot(meta)
+        ref_price = _safe_float(quote.get("previous_close"))
+
+        if ref_price > 0:
+            return _set_reference_price(df, ref_price)
+
+    except Exception as exc:
+        print(f"_attach_intraday_reference_price quote failed: {exc}")
 
     trade_date = df.index[-1].date()
 
@@ -328,8 +346,6 @@ def _attach_intraday_reference_price(
         return _set_reference_price(df, fallback_ref)
     except Exception:
         return df
-
-
 def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
     """
     yfinance 有時最後一筆停在 13:24、13:25。
@@ -390,95 +406,67 @@ def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFr
 
 def _get_yahoo_quote_snapshot(meta: StockMeta) -> dict[str, Any]:
     """
-    用 yfinance quote / fast_info 抓即時報價。
+    用 yfinance fast_info 抓最新報價。
 
-    目的：
-    history 1m 有時最後一筆不等於 Yahoo 報價頁收盤價。
-    例如 history 最後 Close=204，但 Yahoo 報價頁 13:30 是 203。
-    此時應以 quote 最新價為準。
+    重要：
+    - 不使用 ticker.info，因為它常常很慢，容易造成 Make HTTP timeout。
+    - 加 20 秒快取，避免同一請求流程重複打 Yahoo。
     """
+    cache_key = meta.yf_symbol
+    now = time_module.time()
+
+    cached = _QUOTE_CACHE.get(cache_key)
+
+    if cached:
+        ts, data = cached
+        if now - ts <= QUOTE_CACHE_TTL_SECONDS:
+            return dict(data)
+
     try:
         ticker = yf.Ticker(meta.yf_symbol)
+        fast_info = ticker.fast_info
 
-        latest = 0.0
-        previous_close = 0.0
-
-        try:
-            fast_info = ticker.fast_info
-
-            latest = _safe_float(
-                _read_value(
-                    fast_info,
-                    [
-                        "last_price",
-                        "lastPrice",
-                        "regularMarketPrice",
-                        "currentPrice",
-                    ],
-                )
+        latest = _safe_float(
+            _read_value(
+                fast_info,
+                [
+                    "last_price",
+                    "lastPrice",
+                    "regularMarketPrice",
+                    "currentPrice",
+                ],
             )
+        )
 
-            previous_close = _safe_float(
-                _read_value(
-                    fast_info,
-                    [
-                        "previous_close",
-                        "previousClose",
-                        "regularMarketPreviousClose",
-                        "regular_market_previous_close",
-                    ],
-                )
+        previous_close = _safe_float(
+            _read_value(
+                fast_info,
+                [
+                    "previous_close",
+                    "previousClose",
+                    "regularMarketPreviousClose",
+                    "regular_market_previous_close",
+                ],
             )
+        )
 
-        except Exception as exc:
-            print(f"fast_info failed: {exc}")
+        result: dict[str, Any] = {}
 
-        # fast_info 抓不到才用 info fallback
-        if latest <= 0 or previous_close <= 0:
-            try:
-                info = ticker.info or {}
+        if latest > 0:
+            result["latest_price"] = latest
 
-                if latest <= 0:
-                    latest = _safe_float(
-                        _read_value(
-                            info,
-                            [
-                                "regularMarketPrice",
-                                "currentPrice",
-                                "regular_market_price",
-                                "lastPrice",
-                            ],
-                        )
-                    )
+        if previous_close > 0:
+            result["previous_close"] = previous_close
 
-                if previous_close <= 0:
-                    previous_close = _safe_float(
-                        _read_value(
-                            info,
-                            [
-                                "regularMarketPreviousClose",
-                                "previousClose",
-                                "regular_market_previous_close",
-                            ],
-                        )
-                    )
+        if result:
+            _QUOTE_CACHE[cache_key] = (now, result)
 
-            except Exception as exc:
-                print(f"ticker.info quote fallback failed: {exc}")
-
-        if latest <= 0:
-            return {}
-
-        return {
-            "latest_price": latest,
-            "previous_close": previous_close,
-        }
+        return result
 
     except Exception as exc:
-        print(f"_get_yahoo_quote_snapshot failed: {exc}")
+        print(f"_get_yahoo_quote_snapshot fast_info failed: {exc}")
         return {}
-
-
+        
 def _reconcile_intraday_with_quote(
     meta: StockMeta,
     df: pd.DataFrame,
@@ -605,23 +593,15 @@ def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, s
 
 
 def get_stock_name(meta: StockMeta) -> str:
+    """
+    股票名稱優先使用 twstock 查到的名稱。
+    不再呼叫 yfinance ticker.info，避免查詢 timeout。
+    """
     if meta.stock_name and meta.stock_name != meta.stock_id:
         return meta.stock_name
 
-    try:
-        ticker = yf.Ticker(meta.yf_symbol)
-        info = ticker.info or {}
-
-        return (
-            info.get("shortName")
-            or info.get("longName")
-            or meta.stock_id
-        )
-
-    except Exception:
-        return meta.stock_id
-
-
+    return meta.stock_id
+    
 def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
     if df.empty:
         return PriceMeta("--", "--", "--", 0.0, 0.0)
