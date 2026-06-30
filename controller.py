@@ -418,6 +418,62 @@ def _build_large_holder_flex(
         },
     }
 
+def _margin_table_row(
+    date_text: str,
+    margin_text: str,
+    short_text: str,
+    ratio_text: str,
+    is_header: bool = False,
+) -> dict[str, Any]:
+    text_color = "#666666" if is_header else "#222222"
+    weight = "bold" if is_header else "regular"
+    bg_color = "#F7F8FA" if is_header else "#FFFFFF"
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "paddingAll": "6px",
+        "backgroundColor": bg_color,
+        "cornerRadius": "6px" if is_header else "0px",
+        "contents": [
+            {
+                "type": "text",
+                "text": date_text,
+                "size": "sm",
+                "color": text_color,
+                "weight": weight,
+                "flex": 2,
+                "align": "start",
+            },
+            {
+                "type": "text",
+                "text": margin_text,
+                "size": "sm",
+                "color": text_color,
+                "weight": weight,
+                "flex": 3,
+                "align": "end",
+            },
+            {
+                "type": "text",
+                "text": short_text,
+                "size": "sm",
+                "color": text_color,
+                "weight": weight,
+                "flex": 2,
+                "align": "end",
+            },
+            {
+                "type": "text",
+                "text": ratio_text,
+                "size": "sm",
+                "color": text_color,
+                "weight": weight,
+                "flex": 2,
+                "align": "end",
+            },
+        ],
+    }
 
 def _build_margin_flex(
     stock_id: str,
@@ -425,18 +481,6 @@ def _build_margin_flex(
     rows: list[dict],
     current_tf: str,
 ) -> dict[str, Any]:
-    lines = [
-        "日期　｜ 融資　｜ 融券　｜ 資券比",
-    ]
-
-    for r in rows[:10]:
-        lines.append(
-            f"{r.get('date', '--')}　｜ "
-            f"{int(r.get('margin', 0) or 0):,}　｜ "
-            f"{int(r.get('short', 0) or 0):,}　｜ "
-            f"{r.get('ratio', '--')}"
-        )
-
     contents: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -459,12 +503,22 @@ def _build_margin_flex(
             "margin": "md",
         },
         {
-            "type": "text",
-            "text": "\n".join(lines),
-            "size": "sm",
-            "color": "#222222",
-            "wrap": True,
+            "type": "box",
+            "layout": "vertical",
             "margin": "md",
+            "spacing": "xs",
+            "contents": [
+                _margin_table_row("日期", "融資", "融券", "資券比", is_header=True),
+                *[
+                    _margin_table_row(
+                        str(r.get("date", "--")),
+                        f"{int(r.get('margin', 0) or 0):,}",
+                        f"{int(r.get('short', 0) or 0):,}",
+                        str(r.get("ratio", "--")),
+                    )
+                    for r in rows[:10]
+                ],
+            ],
         },
     ]
 
