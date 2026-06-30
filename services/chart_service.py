@@ -240,96 +240,127 @@ def _fmt_chip_ratio(value) -> str:
         return str(value)
 
 
+def _fmt_chip_ratio(value) -> str:
+    try:
+        if value in (None, "", "--"):
+            return "--"
+        if isinstance(value, str) and value.endswith("%"):
+            return value
+        return f"{float(value):.2f}%"
+    except Exception:
+        return str(value)
+
+
 def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, list[dict]]) -> str:
     """
-    法人籌碼圖（手機可讀版）
-    規格：
-    - 三大區塊：外資 / 投信 / 自營商
-    - 每區塊第一排：日期 │ 持股比 │ 當日買賣超
-    - 第二排：10日買賣超柱狀圖
-    - 文字放大，避免 LINE 手機版看不清楚
+    法人籌碼圖：手機可讀版
+
+    每區：
+    第一排：日期 │ 持股比 │ 當日買賣超張數
+    第二排：10日買賣超柱狀圖
     """
-    fig, axes = plt.subplots(3, 1, figsize=(8.2, 9.6), dpi=150, facecolor="white")
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(8.5, 11.5),
+        dpi=150,
+        facecolor="white",
+    )
+
     fig.suptitle(
-        f"{stock_id} {stock_name} 三大法人籌碼",
+        f"{stock_id} Institutional Chips",
         fontsize=18,
         fontweight="bold",
         y=0.985,
     )
 
     sections = [
-        ("外資", chip_rows.get("foreign", [])),
-        ("投信", chip_rows.get("trust", [])),
-        ("自營商", chip_rows.get("dealer", [])),
+        ("Foreign", "外資", chip_rows.get("foreign", [])),
+        ("Investment Trust", "投信", chip_rows.get("trust", [])),
+        ("Dealer", "自營商", chip_rows.get("dealer", [])),
     ]
 
-    for ax, (title, rows) in zip(axes, sections):
+    for ax, (title_en, title_zh, rows) in zip(axes, sections):
         ax.set_facecolor("#F8F9FA")
 
-        # 最近 10 筆
         rows = rows[-10:] if rows else []
 
-        dates = [str(r.get("date", ""))[5:].replace("-", "/") for r in rows]
-        values = [float(r.get("buy_sell", 0) or 0) for r in rows]
+        values = [float(r.get("buy_sell", 0) or 0) for r in rows]  # 單位：張
+        dates = [str(r.get("date", "--")).replace("-", "/") for r in rows]
 
-        # ratio 若資料沒有，就顯示 --
-        latest_ratio = "--"
-        if rows:
-            ratio_raw = rows[-1].get("ratio")
-            if ratio_raw not in (None, "", "--"):
-                try:
-                    latest_ratio = f"{float(ratio_raw):.2f}%"
-                except Exception:
-                    latest_ratio = str(ratio_raw)
+        latest = rows[-1] if rows else {}
+        latest_date = str(latest.get("date", "--")).replace("-", "/")
+        latest_ratio = _fmt_chip_ratio(latest.get("ratio", "--"))
+        latest_value = float(latest.get("buy_sell", 0) or 0)
 
-        latest_date = dates[-1] if dates else "--"
-        latest_buy_sell = values[-1] if values else 0.0
+        direction = "Buy" if latest_value >= 0 else "Sell"
+        latest_lots = abs(int(round(latest_value)))
 
-        # 第一排資訊文字
-        info_text = f"{latest_date} │ {title}持股比 {latest_ratio} │ 買賣超 {latest_buy_sell:,.0f} 張"
+        info_text = (
+            f"{latest_date} | {title_zh}持股比 {latest_ratio} | "
+            f"{'買超' if latest_value >= 0 else '賣超'} {latest_lots:,} 張"
+        )
+
         ax.text(
             0.01,
-            1.10,
+            1.16,
             info_text,
             transform=ax.transAxes,
-            fontsize=13.5,
+            fontsize=15,
             fontweight="bold",
-            color="#333333",
+            color="#222222",
             va="bottom",
         )
 
-        # 第二排：10日柱狀圖
         if values:
-            colors = ["#FF3B30" if v > 0 else "#34C759" for v in values]
+            colors = ["#FF3B30" if v >= 0 else "#34C759" for v in values]
             x = list(range(len(values)))
-            ax.bar(x, values, color=colors, width=0.58, edgecolor="none")
-            ax.axhline(0, color="#666666", linewidth=1.0)
+
+            ax.bar(
+                x,
+                values,
+                color=colors,
+                width=0.60,
+                edgecolor="none",
+            )
+
+            ax.axhline(
+                0,
+                linewidth=1.2,
+                color="#666666",
+            )
 
             ax.set_xticks(x)
-            ax.set_xticklabels(dates, fontsize=10)
+            ax.set_xticklabels(dates, fontsize=12)
         else:
             ax.text(
                 0.5,
                 0.5,
-                "暫無資料",
+                "No data",
                 transform=ax.transAxes,
                 ha="center",
                 va="center",
-                fontsize=12,
+                fontsize=14,
                 color="#888888",
             )
             ax.set_xticks([])
 
-        # 標題
-        ax.set_title(title, loc="left", fontsize=14, fontweight="bold", pad=18)
+        ax.set_title(
+            title_en,
+            loc="left",
+            fontsize=16,
+            fontweight="bold",
+            pad=26,
+        )
 
-        # Y 軸字放大
-        ax.tick_params(axis="y", labelsize=10)
+        ax.tick_params(axis="y", labelsize=12)
         ax.grid(True, axis="y", linestyle=":", alpha=0.35)
 
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.965], h_pad=2.0)
+        ax.margins(y=0.22)
+
+    fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.96], h_pad=3.2)
 
     return publish_figure(fig, f"{stock_id}_chip")
