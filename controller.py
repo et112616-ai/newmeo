@@ -480,7 +480,19 @@ def _build_futures_flex(
             "margin": "md",
         },
     ]
-
+    if snapshot.available and snapshot.chart_url:
+        contents.append(
+            {
+                "type": "image",
+                "url": snapshot.chart_url,
+                "size": "full",
+                "aspectRatio": "4:3",
+                "aspectMode": "fit",
+                "margin": "md",
+                "backgroundColor": "#FFFFFF",
+            }
+        )
+    
     if not snapshot.available:
         contents.append(
             {
