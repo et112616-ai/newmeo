@@ -234,9 +234,9 @@ def _is_regular_session(value: Any) -> bool:
         or "day" in text
         or "一般" in text
         or "日盤" in text
+        or "position" in text
     )
-
-
+    
 def _display_session(value: Any) -> str:
     if _is_afterhours_session(value):
         return "盤後"
@@ -247,7 +247,7 @@ def _display_session(value: Any) -> str:
     text = str(value or "").strip()
 
     return text or "--"
-
+    
 def _is_position_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
@@ -261,12 +261,14 @@ def _is_position_session(value: Any) -> bool:
 
 def _is_valid_trade_row(row: dict) -> bool:
     """
-    排除 position / 跨月價差 / 無價格資料。
-    只保留真的可以拿來當 K 線的單一近月期貨交易資料。
-    """
-    if _is_position_session(row.get("trading_session")):
-        return False
+    只排除：
+    - 跨月價差，例如 202608/202609
+    - contract_date 空白 / 全月份
+    - 價格為 0
 
+    不排除 position。
+    因為 FinMind 的 position 通常是日盤資料列，會帶 close / settlement_price / open_interest。
+    """
     contract = _normalize_contract_date(row.get("contract_date"))
 
     if not contract:
@@ -285,15 +287,12 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
 
     規則：
     - 只取同一個近月 contract_date
-    - 如果選到的是盤後，優先畫盤後
-    - 如果沒有盤後，就畫日盤
-    - 排除 position 資料
+    - 如果選到盤後，就畫盤後
+    - 如果選到日盤/position，就畫 position
+    - 排除跨月價差與價格 0
     """
     contract = selected_row.get("_contract_norm") or _normalize_contract_date(
         selected_row.get("contract_date")
-        or selected_row.get("delivery_month")
-        or selected_row.get("due_month")
-        or selected_row.get("settlement_month")
     )
 
     if not contract:
@@ -304,12 +303,7 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     same_contract_rows = []
 
     for r in rows:
-        r_contract = _normalize_contract_date(
-            r.get("contract_date")
-            or r.get("delivery_month")
-            or r.get("due_month")
-            or r.get("settlement_month")
-        )
+        r_contract = _normalize_contract_date(r.get("contract_date"))
 
         if r_contract != contract:
             continue
@@ -351,15 +345,12 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
         key=lambda r: r["_trade_date_norm"]
     )
 
-    # 同一天若有重複，保留最後一筆
     by_date = {}
 
     for r in same_contract_rows:
         by_date[r["_trade_date_norm"]] = r
 
     return list(by_date.values())[-30:]
-
-
 def _generate_futures_kline_chart(
     rows: list[dict],
     futures_id: str,
@@ -480,13 +471,12 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     """
     選資料規則：
 
-    1. 排除 position
-    2. 排除跨月價差，例如 202608/202609
-    3. 排除價格為 0 的資料
-    4. 找最新有效交易日
-    5. 最新交易日中，contract_date 最小者 = 近月
-    6. 同一近月中，盤後優先
-    7. 沒盤後，用日盤
+    1. 排除跨月價差，例如 202608/202609
+    2. 排除價格為 0 的資料
+    3. 找最新有效交易日
+    4. 最新交易日中，contract_date 最小者 = 近月
+    5. 同一近月中，after_market / 盤後優先
+    6. 沒盤後，用 position 當日盤
     """
     valid_rows: list[dict] = []
 
@@ -555,7 +545,7 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     ]
 
     if regular_rows:
-        print("DEBUG futures choose regular =", regular_rows[-1])
+        print("DEBUG futures choose regular/position =", regular_rows[-1])
         return regular_rows[-1]
 
     print("DEBUG futures choose fallback =", near_rows[-1])
