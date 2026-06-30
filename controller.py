@@ -37,11 +37,14 @@ def _normalize_action(action: str | None) -> str:
         "realtime": "instant",
         "real_time": "instant",
         "instant": "instant",
+        "即時": "instant",
 
         # K 線
         "k": "k_line",
         "kline": "k_line",
         "k_line": "k_line",
+        "k線": "k_line",
+        "k線圖": "k_line",
 
         # 法人
         "chip": "chip",
@@ -51,19 +54,25 @@ def _normalize_action(action: str | None) -> str:
         "legal": "chip",
         "legal_person": "chip",
         "legalperson": "chip",
+        "legal-person": "chip",
         "法人": "chip",
 
         # 大戶
         "large": "large_holder",
         "large_holder": "large_holder",
+        "largeholder": "large_holder",
         "big": "large_holder",
+        "big_holder": "large_holder",
+        "major_holder": "large_holder",
         "holder": "large_holder",
         "大戶": "large_holder",
 
         # 融資券
         "margin": "margin",
         "margin_short": "margin",
+        "margin-short": "margin",
         "short": "margin",
+        "credit": "margin",
         "融資券": "margin",
 
         # 期貨
@@ -681,6 +690,14 @@ def text_message(message: str) -> dict[str, Any]:
         "text": message,
     }
 
+def _reply_with_title(title: str, message: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    讓每個按鈕都先跳一則文字，再跳 Flex。
+    """
+    return [
+        text_message(title),
+        message,
+    ]
 
 def handle_request(req: BotRequest) -> dict[str, Any]:
     """
@@ -718,80 +735,95 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             if action == "instant":
                 image_url = generate_instant_chart(df, meta.stock_id, stock_name)
-                return _build_chart_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    image_url=image_url,
-                    price_info=price_meta.price_info,
-                    change_info=price_meta.change_info,
-                    update_time=price_meta.time_stamp,
-                    price_change=price_meta.price_change,
-                    active_mode="instant",
-                    current_tf=tf,
+                return _reply_with_title(
+                    f"{stock_name} 即時走勢",
+                    _build_chart_flex(
+                        stock_id=meta.stock_id,
+                        stock_name=stock_name,
+                        image_url=image_url,
+                        price_info=price_meta.price_info,
+                        change_info=price_meta.change_info,
+                        update_time=price_meta.time_stamp,
+                        price_change=price_meta.price_change,
+                        active_mode="instant",
+                        current_tf=tf,
+                    ),
                 )
 
             if action == "k_line":
                 image_url = generate_kline_chart(df, meta.stock_id, stock_name, tf)
-                return _build_chart_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    image_url=image_url,
-                    price_info=price_meta.price_info,
-                    change_info=price_meta.change_info,
-                    update_time=price_meta.time_stamp,
-                    price_change=price_meta.price_change,
-                    active_mode="k_line",
-                    current_tf=tf,
-                )
+                return _reply_with_title(
+                    f"{stock_name} K線",
+                    _build_chart_flex(
+                        stock_id=meta.stock_id,
+                        stock_name=stock_name,
+                        image_url=image_url,
+                        price_info=price_meta.price_info,
+                        change_info=price_meta.change_info,
+                        update_time=price_meta.time_stamp,
+                        price_change=price_meta.price_change,
+                        active_mode="k_line",
+                        current_tf=tf,
+                ),
+            )
 
             if action == "chip":
                 chip_rows = get_institutional_chips(meta.stock_id)
                 image_url = generate_chip_chart(meta.stock_id, stock_name, chip_rows)
 
-                return _build_chart_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    image_url=image_url,
-                    price_info=price_meta.price_info,
-                    change_info=price_meta.change_info,
-                    update_time=price_meta.time_stamp,
-                    price_change=price_meta.price_change,
-                    active_mode="chip",
-                    current_tf=tf,
+                return _reply_with_title(
+                    f"{stock_name} 法人籌碼",
+                    _build_chart_flex(
+                        stock_id=meta.stock_id,
+                        stock_name=stock_name,
+                        image_url=image_url,
+                        price_info=price_meta.price_info,
+                        change_info=price_meta.change_info,
+                        update_time=price_meta.time_stamp,
+                        price_change=price_meta.price_change,
+                        active_mode="chip",
+                        current_tf=tf,
+                    ),
                 )
 
         if action == "large_holder":
             rows = get_large_holder_table(meta.stock_id)
-            return _build_large_holder_flex(
-                stock_id=meta.stock_id,
-                stock_name=stock_name,
-                rows=rows,
-                current_tf=requested_tf,
+            return _reply_with_title(
+                f"{stock_name} 大戶持股",
+                _build_large_holder_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    rows=rows,
+                    current_tf=requested_tf,
+                ),
             )
-
+                
         if action == "margin":
             rows = get_margin_table(meta.stock_id)
-            return _build_margin_flex(
-                stock_id=meta.stock_id,
-                stock_name=stock_name,
-                rows=rows,
-                current_tf=requested_tf,
+            return _reply_with_title(
+                f"{stock_name} 融資券",
+                _build_margin_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    rows=rows,
+                    current_tf=requested_tf,
+                ),
             )
-
+                
         if action == "futures":
             snapshot = get_stock_futures_snapshot(meta.stock_id, stock_name)
 
             title = snapshot.futures_name or f"{stock_name}期貨"
 
-            return [
-                text_message(title),
+            return _reply_with_title(
+                title,
                 _build_futures_flex(
                     stock_id=meta.stock_id,
                     stock_name=stock_name,
                     snapshot=snapshot,
                     current_tf=requested_tf,
                 ),
-            ]
+            )
 
         return text_message(f"目前不支援的功能：{action}")
 
