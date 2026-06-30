@@ -207,7 +207,35 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
     df = df.copy()
 
+    # =========================
+    # 基本欄位整理
+    # =========================
+    required_cols = ["Open", "High", "Low", "Close"]
+
+    for col in required_cols:
+        if col not in df.columns:
+            return _empty_chart(f"{stock_id} {stock_name}", f"Missing column: {col}")
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    if df.empty:
+        return _empty_chart(f"{stock_id} {stock_name}", "K 線資料為空")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            pass
+
+    # =========================
     # D / W / M 顯示 5T、12T、22T、60T、120T
+    # =========================
     show_ma_summary = tf in {"D", "W", "M"}
 
     if show_ma_summary:
@@ -216,30 +244,37 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
         ma_periods = [5, 20]
 
     # 先用完整資料計算均線，再裁切顯示範圍
+    close_series = df["Close"].astype(float)
+
     for p in ma_periods:
-        df[f"MA{p}"] = df["Close"].astype(float).rolling(p, min_periods=1).mean()
+        df[f"MA{p}"] = close_series.rolling(p, min_periods=1).mean()
 
     latest = df.iloc[-1]
 
+    # =========================
+    # 建圖
+    # =========================
     if show_ma_summary:
         ma_text_1 = (
             f"5T {_fmt_ma_value(latest.get('MA5'))}    "
             f"12T {_fmt_ma_value(latest.get('MA12'))}    "
             f"22T {_fmt_ma_value(latest.get('MA22'))}"
         )
+
         ma_text_2 = (
             f"60T {_fmt_ma_value(latest.get('MA60'))}    "
             f"120T {_fmt_ma_value(latest.get('MA120'))}"
         )
 
-        # 顯示最近 120 根，避免太擠
+        # 顯示最近 120 根
         plot_df = df.tail(120).copy()
 
-        fig = plt.figure(figsize=(8.6, 6.9), dpi=140, facecolor="white")
+        fig = plt.figure(figsize=(8.8, 7.2), dpi=140, facecolor="white")
+
         gs = gridspec.GridSpec(
             3,
             1,
-            height_ratios=[0.72, 3.2, 1],
+            height_ratios=[0.90, 3.2, 1],
             hspace=0.06,
         )
 
@@ -251,7 +286,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
         ax_info.text(
             0.01,
-            0.76,
+            0.78,
             f"{stock_id} {stock_name} {tf} K線",
             fontsize=17,
             fontweight="bold",
@@ -263,9 +298,9 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
         ax_info.text(
             0.01,
-            0.30,
+            0.38,
             ma_text_1,
-            fontsize=14.5,
+            fontsize=15,
             fontweight="bold",
             color="#222222",
             ha="left",
@@ -275,9 +310,9 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
         ax_info.text(
             0.01,
-            0.02,
+            0.08,
             ma_text_2,
-            fontsize=14.5,
+            fontsize=15,
             fontweight="bold",
             color="#222222",
             ha="left",
@@ -303,10 +338,16 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    x = range(len(plot_df))
+    x = list(range(len(plot_df)))
     width = 0.58
 
-    for i, (_, row) in enumerate(plot_df.iterrows()):
+    # =========================
+    # 畫 K 棒與成交量
+    # 重點：不用 iterrows 拆包，避免 too many values to unpack
+    # =========================
+    for i in range(len(plot_df)):
+        row = plot_df.iloc[i]
+
         o = float(row["Open"])
         h = float(row["High"])
         l = float(row["Low"])
@@ -317,7 +358,11 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
         ax_k.vlines(i, l, h, linewidth=1, color=color)
 
         lower = min(o, c)
-        height = abs(c - o) or 0.01
+        height = abs(c - o)
+
+        if height <= 0:
+            height = 0.01
+
         ax_k.bar(
             i,
             height,
@@ -328,19 +373,31 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
         )
 
         vol = float(row.get("Volume", 0) or 0)
-        ax_v.bar(i, vol, width=width, color=color)
 
+        ax_v.bar(
+            i,
+            vol,
+            width=width,
+            color=color,
+        )
+
+    # =========================
     # 畫均線
+    # =========================
     for p in ma_periods:
         col = f"MA{p}"
-        if col in plot_df.columns:
-            label = f"{p}T" if show_ma_summary else f"MA{p}"
-            ax_k.plot(
-                list(x),
-                plot_df[col],
-                linewidth=1.2,
-                label=label,
-            )
+
+        if col not in plot_df.columns:
+            continue
+
+        label = f"{p}T" if show_ma_summary else f"MA{p}"
+
+        ax_k.plot(
+            x,
+            plot_df[col].astype(float).values,
+            linewidth=1.25,
+            label=label,
+        )
 
     ax_k.grid(True, linestyle=":", alpha=0.45)
     ax_v.grid(True, linestyle=":", alpha=0.45)
@@ -348,15 +405,24 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
     ax_k.legend(loc="best", fontsize=9)
     ax_v.set_ylabel("Volume", fontsize=9)
 
+    # =========================
+    # X 軸日期
+    # =========================
     labels = []
 
     for idx in plot_df.index:
-        if tf in {"1m", "5m"}:
-            labels.append(idx.strftime("%H:%M"))
-        elif tf == "M":
-            labels.append(idx.strftime("%Y/%m"))
-        else:
-            labels.append(idx.strftime("%m/%d"))
+        try:
+            ts = pd.to_datetime(idx)
+
+            if tf in {"1m", "5m"}:
+                labels.append(ts.strftime("%H:%M"))
+            elif tf == "M":
+                labels.append(ts.strftime("%Y/%m"))
+            else:
+                labels.append(ts.strftime("%m/%d"))
+
+        except Exception:
+            labels.append(str(idx))
 
     step = max(1, len(labels) // 6)
     ticks = list(range(0, len(labels), step))
