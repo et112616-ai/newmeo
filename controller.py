@@ -80,8 +80,10 @@ def _normalize_action(action: str | None) -> str:
         "futures": "futures",
         "future": "futures",
         "期貨": "futures",
+        
         "futures_day": "futures_day",
         "期貨日盤": "futures_day",
+        
         "futures_all": "futures_all",
         "期貨全盤": "futures_all",
     }
@@ -262,6 +264,37 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
 
     return [row1, row2]
 
+def _futures_session_buttons(
+    stock_id: str,
+    active_session: str,
+    current_tf: str,
+) -> dict[str, Any]:
+    """
+    期貨專用：日盤 / 全盤切換按鈕
+    active_session:
+    - day
+    - all
+    """
+    active_session = str(active_session or "day").strip().lower()
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label="日盤",
+                data=f"{stock_id},futures_day,futures,{current_tf}",
+                active=active_session == "day",
+            ),
+            _postback_button(
+                label="全盤",
+                data=f"{stock_id},futures_all,futures,{current_tf}",
+                active=active_session == "all",
+            ),
+        ],
+    }
 
 def _build_chart_flex(
     stock_id: str,
@@ -607,6 +640,7 @@ def _build_futures_flex(
     stock_name: str,
     snapshot,
     current_tf: str,
+    active_session: str = "day",
 ) -> dict[str, Any]:
     contents: list[dict[str, Any]] = [
         {
@@ -630,6 +664,14 @@ def _build_futures_flex(
             "margin": "md",
         },
     ]
+    contents.append(
+        _futures_session_buttons(
+            stock_id=stock_id,
+            active_session=active_session,
+            current_tf=current_tf,
+        )
+    )
+    
     if snapshot.available and snapshot.chart_url:
         contents.append(
             {
