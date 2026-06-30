@@ -134,12 +134,18 @@ def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
 
 def _normalize_contract_date(value: Any) -> str:
     """
-    支援：
+    只接受單一契約月份。
+
+    接受：
     202607
     2026/07
     2026-07
 
-    空白、全月份、所有契約都排除。
+    排除：
+    202608/202609  # 跨月價差
+    全月份
+    所有契約
+    空白
     """
     s = str(value or "").strip()
 
@@ -151,14 +157,34 @@ def _normalize_contract_date(value: Any) -> str:
     if "all" in lower or "全" in s or "所有" in s:
         return ""
 
+    # 很重要：202608/202609 是跨月價差，不是近月單一契約
+    # 但 2026/07 是日期格式，要保留。
     digits = "".join(ch for ch in s if ch.isdigit())
 
-    if len(digits) >= 6:
-        return digits[:6]
+    if "/" in s:
+        parts = s.split("/")
+
+        # 2026/07 這種可以接受
+        if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 2:
+            if len(digits) >= 6:
+                return digits[:6]
+
+        # 202608/202609 這種跨月價差要排除
+        return ""
+
+    if "-" in s:
+        parts = s.split("-")
+
+        # 2026-07 這種可以接受
+        if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 2:
+            if len(digits) >= 6:
+                return digits[:6]
+
+    if len(digits) == 6:
+        return digits
 
     return ""
-
-
+    
 def _format_contract_date(value: Any) -> str:
     s = _normalize_contract_date(value)
 
@@ -235,15 +261,24 @@ def _is_position_session(value: Any) -> bool:
 
 def _is_valid_trade_row(row: dict) -> bool:
     """
-    排除 position / 部位資料。
-    只保留真的有期貨價格的交易資料。
+    排除 position / 跨月價差 / 無價格資料。
+    只保留真的可以拿來當 K 線的單一近月期貨交易資料。
     """
     if _is_position_session(row.get("trading_session")):
         return False
 
-    return _row_price(row) > 0
+    contract = _normalize_contract_date(row.get("contract_date"))
 
+    if not contract:
+        return False
 
+    price = _row_price(row)
+
+    if price <= 0:
+        return False
+
+    return True
+    
 def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[dict]:
     """
     依照選到的近月契約，準備 K 線資料。
@@ -445,27 +480,24 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     """
     選資料規則：
 
-    1. 找最新資料日期
-    2. 最新日期中，找 contract_date 最小者，也就是近月
-    3. 同一近月內，盤後優先
-    4. 沒盤後，用日盤
-    5. session 欄位不明時，用近月最後一筆
+    1. 排除 position
+    2. 排除跨月價差，例如 202608/202609
+    3. 排除價格為 0 的資料
+    4. 找最新有效交易日
+    5. 最新交易日中，contract_date 最小者 = 近月
+    6. 同一近月中，盤後優先
+    7. 沒盤後，用日盤
     """
     valid_rows: list[dict] = []
 
     for r in rows:
+        if not _is_valid_trade_row(r):
+            continue
+
         trade_date = _normalize_trade_date(r.get("date"))
-        contract = _normalize_contract_date(
-            r.get("contract_date")
-            or r.get("delivery_month")
-            or r.get("due_month")
-            or r.get("settlement_month")
-        )
+        contract = _normalize_contract_date(r.get("contract_date"))
 
         if not trade_date or not contract:
-            continue
-            
-        if not _is_valid_trade_row(r):
             continue
 
         item = dict(r)
@@ -473,6 +505,11 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
         item["_contract_norm"] = contract
 
         valid_rows.append(item)
+
+    print("DEBUG futures valid_rows_count =", len(valid_rows))
+
+    if valid_rows:
+        print("DEBUG futures valid_rows_last =", valid_rows[-1])
 
     if not valid_rows:
         return None
@@ -484,6 +521,9 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
         if r["_trade_date_norm"] == latest_date
     ]
 
+    print("DEBUG futures latest_date =", latest_date)
+    print("DEBUG futures latest_rows_count =", len(latest_rows))
+
     if not latest_rows:
         return None
 
@@ -494,6 +534,9 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
         if r["_contract_norm"] == near_contract
     ]
 
+    print("DEBUG futures near_contract =", near_contract)
+    print("DEBUG futures near_rows_count =", len(near_rows))
+
     if not near_rows:
         return None
 
@@ -503,6 +546,7 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     ]
 
     if afterhours_rows:
+        print("DEBUG futures choose afterhours =", afterhours_rows[-1])
         return afterhours_rows[-1]
 
     regular_rows = [
@@ -511,11 +555,12 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     ]
 
     if regular_rows:
+        print("DEBUG futures choose regular =", regular_rows[-1])
         return regular_rows[-1]
 
+    print("DEBUG futures choose fallback =", near_rows[-1])
     return near_rows[-1]
-
-
+    
 def _get_spot_price(stock_id: str) -> float:
     """
     現貨價格用 Yahoo quote。
