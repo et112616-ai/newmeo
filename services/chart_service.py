@@ -292,7 +292,7 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             1.10,
             info_text,
             transform=ax.transAxes,
-            fontsize=12.5,
+            fontsize=13.5,
             fontweight="bold",
             color="#333333",
             va="bottom",
