@@ -87,7 +87,35 @@ def _request_finmind(
         print(f"_request_finmind failed: dataset={dataset}, stock_id={stock_id}, error={exc}")
         return []
 
+def _extract_ratio(row: dict):
+    """
+    嘗試從 FinMind row 裡抓持股比率。
+    若資料源沒有提供，回傳 None，圖上會顯示 --。
+    """
+    for key in [
+        "holding_ratio",
+        "shareholding_ratio",
+        "foreign_investor_ratio",
+        "foreign_ratio",
+        "ratio",
+        "持股比率",
+        "持股比",
+        "percentage",
+        "percent",
+    ]:
+        if key in row and row.get(key) not in (None, "", "--"):
+            try:
+                return float(
+                    str(row.get(key))
+                    .replace("%", "")
+                    .replace(",", "")
+                    .strip()
+                )
+            except Exception:
+                pass
 
+    return None
+    
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -144,16 +172,107 @@ def _mock_institutional() -> Dict[str, List[dict]]:
     base = [1200, -850, 430, 2100, -1500, 600, -300, 900, -450, 2300]
 
     return {
-        "foreign": [{"date": d, "buy_sell": v} for d, v in zip(dates, base)],
-        "trust": [{"date": d, "buy_sell": int(v * 0.25)} for d, v in zip(dates, base)],
-        "dealer": [{"date": d, "buy_sell": int(v * -0.15)} for d, v in zip(dates, base)],
+        "foreign": [
+            {
+                "date": _fmt_md(d),
+                "buy_sell": v,
+                "ratio": 23.15 + i * 0.03,
+            }
+            for i, (d, v) in enumerate(zip(dates, base))
+        ],
+        "trust": [
+            {
+                "date": _fmt_md(d),
+                "buy_sell": int(v * 0.25),
+                "ratio": 2.35 + i * 0.01,
+            }
+            for i, (d, v) in enumerate(zip(dates, base))
+        ],
+        "dealer": [
+            {
+                "date": _fmt_md(d),
+                "buy_sell": int(v * -0.15),
+                "ratio": 1.12 + i * 0.005,
+            }
+            for i, (d, v) in enumerate(zip(dates, base))
+        ],
     }
+
+
+def _normalize_institution_name(name: str) -> str | None:
+    """
+    將 FinMind 的法人類別名稱轉成本系統三大類。
+    """
+    text = str(name or "").strip()
+
+    key_map = {
+        # 外資
+        "Foreign_Investor": "foreign",
+        "Foreign_Investor_Self": "foreign",
+        "Foreign_Dealer_Self": "foreign",
+        "Foreign_Investor_Dealer": "foreign",
+        "外資": "foreign",
+        "外資及陸資": "foreign",
+        "外資及陸資不含外資自營商": "foreign",
+
+        # 投信
+        "Investment_Trust": "trust",
+        "投信": "trust",
+
+        # 自營商
+        "Dealer": "dealer",
+        "Dealer_self": "dealer",
+        "Dealer_Hedging": "dealer",
+        "自營商": "dealer",
+        "自營商自行買賣": "dealer",
+        "自營商避險": "dealer",
+    }
+
+    return key_map.get(text)
+
+
+def _extract_buy_sell_value(row: dict) -> float:
+    """
+    抓法人買賣超。
+
+    優先順序：
+    1. buy - sell
+    2. buy_sell
+    3. buy_sell_amount
+    4. net_buy_sell
+    """
+    if "buy" in row and "sell" in row:
+        return _to_float(row.get("buy")) - _to_float(row.get("sell"))
+
+    for key in [
+        "buy_sell",
+        "buy_sell_amount",
+        "net_buy_sell",
+        "買賣超",
+        "買賣超股數",
+    ]:
+        if key in row:
+            return _to_float(row.get(key))
+
+    return 0.0
 
 
 def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
     """
     三大法人買賣超。
-    優先嘗試 FinMind，失敗才 mock fallback。
+
+    回傳格式：
+    {
+      "foreign": [
+        {"date": "06/30", "buy_sell": 1234, "ratio": 12.34}
+      ],
+      "trust": [...],
+      "dealer": [...]
+    }
+
+    注意：
+    FinMind 的法人買賣超資料不一定提供「持股比」。
+    若沒有 ratio 欄位，會回傳 "--"。
     """
     start_date = _start_date(45)
 
@@ -179,23 +298,15 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         "dealer": [],
     }
 
-    key_map = {
-        "Foreign_Investor": "foreign",
-        "Foreign_Investor_Self": "foreign",
-        "Foreign_Dealer_Self": "foreign",
-        "外資": "foreign",
-        "外資及陸資": "foreign",
-        "Investment_Trust": "trust",
-        "投信": "trust",
-        "Dealer_self": "dealer",
-        "Dealer_Hedging": "dealer",
-        "Dealer": "dealer",
-        "自營商": "dealer",
-        "自營商自行買賣": "dealer",
-        "自營商避險": "dealer",
+    # temp 用來依日期彙總買賣超
+    temp: dict[str, dict[str, float]] = {
+        "foreign": {},
+        "trust": {},
+        "dealer": {},
     }
 
-    temp = {
+    # temp_ratio 用來依日期存持股比
+    temp_ratio: dict[str, dict[str, Any]] = {
         "foreign": {},
         "trust": {},
         "dealer": {},
@@ -210,7 +321,7 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
             or ""
         )
 
-        section = key_map.get(str(name).strip())
+        section = _normalize_institution_name(str(name))
 
         if not section:
             continue
@@ -220,27 +331,33 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         if not date:
             continue
 
-        if "buy" in r and "sell" in r:
-            value = _to_float(r.get("buy")) - _to_float(r.get("sell"))
-        else:
-            value = (
-                _to_float(r.get("buy_sell"))
-                or _to_float(r.get("buy_sell_amount"))
-                or _to_float(r.get("net_buy_sell"))
-            )
+        value = _extract_buy_sell_value(r)
 
+        # 同一日期、同一法人類別可能有多筆，這裡彙總
         temp[section][date] = temp[section].get(date, 0.0) + value
+
+        ratio = _extract_ratio(r)
+
+        if ratio is not None:
+            temp_ratio[section][date] = ratio
 
     for section in result:
         items = sorted(temp[section].items())[-10:]
-        result[section] = [{"date": d, "buy_sell": v} for d, v in items]
+
+        result[section] = [
+            {
+                "date": _fmt_md(d),
+                "buy_sell": v,
+                "ratio": temp_ratio[section].get(d, "--"),
+            }
+            for d, v in items
+        ]
 
     if all(not result[k] for k in result):
         return _mock_institutional()
 
     return result
-
-
+    
 # ============================================================
 # 大戶：FinMind + TDCC OpenData
 # ============================================================
