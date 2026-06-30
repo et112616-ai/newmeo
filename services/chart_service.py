@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import time
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -10,18 +11,38 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pandas as pd
 import matplotlib.ticker as mticker
+from matplotlib import font_manager
 
 from services.upload_service import publish_figure
 from utils.formatter import normalize_time_frame
 
+
 plt.rcParams["axes.unicode_minus"] = False
-plt.rcParams["font.sans-serif"] = [
-    "Noto Sans CJK TC",
-    "Microsoft JhengHei",
-    "Arial Unicode MS",
-    "DejaVu Sans",
-    "sans-serif",
-]
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.otf"
+
+CHART_FONT_PROP = None
+
+if FONT_PATH.exists():
+    font_manager.fontManager.addfont(str(FONT_PATH))
+    CHART_FONT_PROP = font_manager.FontProperties(fname=str(FONT_PATH))
+    plt.rcParams["font.family"] = CHART_FONT_PROP.get_name()
+else:
+    print(f"Chart font not found: {FONT_PATH}")
+    plt.rcParams["font.sans-serif"] = [
+        "Noto Sans CJK TC",
+        "Microsoft JhengHei",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+        "sans-serif",
+    ]
+
+
+def _font_kwargs() -> dict:
+    if CHART_FONT_PROP is not None:
+        return {"fontproperties": CHART_FONT_PROP}
+    return {}
 
 def _empty_chart(title: str, message: str) -> str:
     fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
@@ -235,88 +256,111 @@ def _fmt_chip_ratio(value) -> str:
     try:
         if value in (None, "", "--"):
             return "--"
-        return f"{float(value):.2f}%"
-    except Exception:
-        return str(value)
-
-
-def _fmt_chip_ratio(value) -> str:
-    try:
-        if value in (None, "", "--"):
-            return "--"
         if isinstance(value, str) and value.endswith("%"):
             return value
         return f"{float(value):.2f}%"
     except Exception:
         return str(value)
 
+def _fmt_chip_date(value) -> str:
+    s = str(value or "--").strip()
+
+    if len(s) >= 10 and "-" in s:
+        return s[5:10].replace("-", "/")
+
+    return s.replace("-", "/")
 
 def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, list[dict]]) -> str:
     """
-    法人籌碼圖：手機可讀版
+    三大法人籌碼圖：中文大字版
 
-    每區：
-    第一排：日期 │ 持股比 │ 當日買賣超張數
-    第二排：10日買賣超柱狀圖
+    每區分成兩塊：
+    1. 文字資訊列：法人名稱、日期、持股比、買賣超張數
+    2. 10日買賣超柱狀圖
     """
-    fig, axes = plt.subplots(
-        3,
+    font_kwargs = _font_kwargs()
+
+    fig = plt.figure(figsize=(8.8, 12.2), dpi=150, facecolor="white")
+
+    gs = gridspec.GridSpec(
+        6,
         1,
-        figsize=(8.5, 11.5),
-        dpi=150,
-        facecolor="white",
+        height_ratios=[0.50, 1.55, 0.50, 1.55, 0.50, 1.55],
+        hspace=0.36,
     )
 
     fig.suptitle(
-        f"{stock_id} Institutional Chips",
-        fontsize=18,
+        f"{stock_id} {stock_name} 三大法人籌碼",
+        fontsize=21,
         fontweight="bold",
-        y=0.985,
+        y=0.992,
+        **font_kwargs,
     )
 
     sections = [
-        ("Foreign", "外資", chip_rows.get("foreign", [])),
-        ("Investment Trust", "投信", chip_rows.get("trust", [])),
-        ("Dealer", "自營商", chip_rows.get("dealer", [])),
+        ("外資", chip_rows.get("foreign", [])),
+        ("投信", chip_rows.get("trust", [])),
+        ("自營商", chip_rows.get("dealer", [])),
     ]
 
-    for ax, (title_en, title_zh, rows) in zip(axes, sections):
-        ax.set_facecolor("#F8F9FA")
-
+    for idx, (section_name, rows) in enumerate(sections):
         rows = rows[-10:] if rows else []
 
-        values = [float(r.get("buy_sell", 0) or 0) for r in rows]  # 單位：張
-        dates = [str(r.get("date", "--")).replace("-", "/") for r in rows]
+        ax_text = fig.add_subplot(gs[idx * 2])
+        ax_bar = fig.add_subplot(gs[idx * 2 + 1])
+
+        # =========================
+        # 文字資訊區
+        # =========================
+        ax_text.axis("off")
 
         latest = rows[-1] if rows else {}
-        latest_date = str(latest.get("date", "--")).replace("-", "/")
+        latest_date = _fmt_chip_date(latest.get("date", "--"))
         latest_ratio = _fmt_chip_ratio(latest.get("ratio", "--"))
         latest_value = float(latest.get("buy_sell", 0) or 0)
 
-        direction = "Buy" if latest_value >= 0 else "Sell"
         latest_lots = abs(int(round(latest_value)))
+        action_text = "買超" if latest_value >= 0 else "賣超"
 
-        info_text = (
-            f"{latest_date} | {title_zh}持股比 {latest_ratio} | "
-            f"{'買超' if latest_value >= 0 else '賣超'} {latest_lots:,} 張"
+        ax_text.text(
+            0.01,
+            0.72,
+            section_name,
+            fontsize=18,
+            fontweight="bold",
+            color="#111111",
+            ha="left",
+            va="center",
+            **font_kwargs,
         )
 
-        ax.text(
+        info_text = f"{latest_date} │ 持股比 {latest_ratio} │ {action_text} {latest_lots:,} 張"
+
+        ax_text.text(
             0.01,
-            1.16,
+            0.24,
             info_text,
-            transform=ax.transAxes,
             fontsize=15,
             fontweight="bold",
-            color="#222222",
-            va="bottom",
+            color="#333333",
+            ha="left",
+            va="center",
+            **font_kwargs,
         )
+
+        # =========================
+        # 10日柱狀圖
+        # =========================
+        ax_bar.set_facecolor("#F8F9FA")
+
+        values = [float(r.get("buy_sell", 0) or 0) for r in rows]
+        dates = [_fmt_chip_date(r.get("date", "--")) for r in rows]
 
         if values:
             colors = ["#FF3B30" if v >= 0 else "#34C759" for v in values]
             x = list(range(len(values)))
 
-            ax.bar(
+            ax_bar.bar(
                 x,
                 values,
                 color=colors,
@@ -324,43 +368,40 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
                 edgecolor="none",
             )
 
-            ax.axhline(
+            ax_bar.axhline(
                 0,
                 linewidth=1.2,
                 color="#666666",
             )
 
-            ax.set_xticks(x)
-            ax.set_xticklabels(dates, fontsize=12)
+            ax_bar.set_xticks(x)
+            ax_bar.set_xticklabels(
+                dates,
+                fontsize=12,
+                rotation=0,
+            )
         else:
-            ax.text(
+            ax_bar.text(
                 0.5,
                 0.5,
-                "No data",
-                transform=ax.transAxes,
+                "暫無資料",
+                transform=ax_bar.transAxes,
                 ha="center",
                 va="center",
-                fontsize=14,
+                fontsize=15,
                 color="#888888",
+                **font_kwargs,
             )
-            ax.set_xticks([])
+            ax_bar.set_xticks([])
 
-        ax.set_title(
-            title_en,
-            loc="left",
-            fontsize=16,
-            fontweight="bold",
-            pad=26,
-        )
+        ax_bar.tick_params(axis="y", labelsize=12)
+        ax_bar.grid(True, axis="y", linestyle=":", alpha=0.35)
 
-        ax.tick_params(axis="y", labelsize=12)
-        ax.grid(True, axis="y", linestyle=":", alpha=0.35)
+        ax_bar.spines["top"].set_visible(False)
+        ax_bar.spines["right"].set_visible(False)
 
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+        ax_bar.margins(y=0.22)
 
-        ax.margins(y=0.22)
-
-    fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.96], h_pad=3.2)
+    fig.tight_layout(rect=[0.03, 0.02, 0.98, 0.965])
 
     return publish_figure(fig, f"{stock_id}_chip")
