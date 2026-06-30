@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import requests
@@ -247,7 +248,27 @@ def _display_session(value: Any) -> str:
     text = str(value or "").strip()
 
     return text or "--"
-    
+
+def _current_tw_futures_session_preference() -> str:
+    """
+    依台灣時間決定目前應該優先顯示日盤或盤後。
+
+    第一版規則：
+    - 08:45 ~ 13:45：優先日盤
+    - 15:00 之後：優先盤後
+    - 其他時間：優先日盤
+    """
+    now_tpe = datetime.now(ZoneInfo("Asia/Taipei"))
+    t = now_tpe.time()
+
+    if time(8, 45) <= t <= time(13, 45):
+        return "regular"
+
+    if t >= time(15, 0):
+        return "afterhours"
+
+    return "regular"
+
 def _is_position_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
@@ -475,8 +496,8 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     2. 排除價格為 0 的資料
     3. 找最新有效交易日
     4. 最新交易日中，contract_date 最小者 = 近月
-    5. 同一近月中，after_market / 盤後優先
-    6. 沒盤後，用 position 當日盤
+    5. 若現在是日盤時間，優先日盤 / position
+    6. 若現在是盤後時間，優先 after_market
     """
     valid_rows: list[dict] = []
 
@@ -535,18 +556,32 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
         if _is_afterhours_session(r.get("trading_session"))
     ]
 
-    if afterhours_rows:
-        print("DEBUG futures choose afterhours =", afterhours_rows[-1])
-        return afterhours_rows[-1]
-
     regular_rows = [
         r for r in near_rows
         if _is_regular_session(r.get("trading_session"))
     ]
 
-    if regular_rows:
-        print("DEBUG futures choose regular/position =", regular_rows[-1])
-        return regular_rows[-1]
+    preference = _current_tw_futures_session_preference()
+
+    print("DEBUG futures session_preference =", preference)
+
+    if preference == "regular":
+        if regular_rows:
+            print("DEBUG futures choose regular/position =", regular_rows[-1])
+            return regular_rows[-1]
+
+        if afterhours_rows:
+            print("DEBUG futures fallback afterhours =", afterhours_rows[-1])
+            return afterhours_rows[-1]
+
+    if preference == "afterhours":
+        if afterhours_rows:
+            print("DEBUG futures choose afterhours =", afterhours_rows[-1])
+            return afterhours_rows[-1]
+
+        if regular_rows:
+            print("DEBUG futures fallback regular/position =", regular_rows[-1])
+            return regular_rows[-1]
 
     print("DEBUG futures choose fallback =", near_rows[-1])
     return near_rows[-1]
@@ -749,7 +784,8 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         contract_date=display_contract,
         session=display_session,
     )
-
+    print("DEBUG futures chart_url =", chart_url)
+    print("DEBUG futures kline_rows_count =", len(kline_rows))
     print("DEBUG chart_url =", chart_url)
 
     return FuturesSnapshot(
