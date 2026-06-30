@@ -80,6 +80,10 @@ def _normalize_action(action: str | None) -> str:
         "futures": "futures",
         "future": "futures",
         "期貨": "futures",
+        "futures_day": "futures_day",
+        "期貨日盤": "futures_day",
+        "futures_all": "futures_all",
+        "期貨全盤": "futures_all",
     }
 
     return aliases.get(action, action)
@@ -566,6 +570,37 @@ def _fmt_signed_pct(value: float) -> str:
     except Exception:
         return "--"
 
+def _futures_session_buttons(
+    stock_id: str,
+    active_session: str,
+    current_tf: str,
+) -> dict[str, Any]:
+    """
+    期貨專用：日盤 / 全盤切換按鈕
+    active_session:
+    - day
+    - all
+    """
+    active_session = str(active_session or "day").strip().lower()
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label="日盤",
+                data=f"{stock_id},futures_day,futures,{current_tf}",
+                active=active_session == "day",
+            ),
+            _postback_button(
+                label="全盤",
+                data=f"{stock_id},futures_all,futures,{current_tf}",
+                active=active_session == "all",
+            ),
+        ],
+    }
 
 def _build_futures_flex(
     stock_id: str,
@@ -900,9 +935,30 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 ),
             )
                 
-        if action == "futures":
-            snapshot = get_stock_futures_snapshot(meta.stock_id, stock_name)
+        if action in {"futures", "futures_day", "futures_all"}:
+            futures_session_mode = "day"
 
+            if action == "futures_all":
+                futures_session_mode = "all"
+
+            snapshot = get_stock_futures_snapshot(
+                meta.stock_id,
+                stock_name,
+                session_mode=futures_session_mode,
+            )
+
+            title = snapshot.futures_name or f"{stock_name}期貨"
+
+            return _reply_with_title(
+                title,
+                _build_futures_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    snapshot=snapshot,
+                    current_tf=requested_tf,
+                    active_session=futures_session_mode,
+                ),
+            )
             title = snapshot.futures_name or f"{stock_name}期貨"
 
             return _reply_with_title(
