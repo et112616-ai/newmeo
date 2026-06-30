@@ -722,22 +722,34 @@ def _build_futures_flex(
         ("契約", snapshot.contract_date, "#222222"),
         ("時段", snapshot.trading_session, "#222222"),
         ("日期", snapshot.trade_date, "#888888"),
-        (
-            "期貨",
-            f"{_fmt_price(snapshot.future_price)}  "
-            f"{_fmt_signed(snapshot.future_change)} "
-            f"({_fmt_signed_pct(snapshot.future_change_pct)})",
-            change_color,
-        ),
-        ("現貨", _fmt_price(snapshot.spot_price), "#222222"),
-        (
-            "期現價差",
-            f"{_fmt_signed(snapshot.basis)} ({_fmt_signed_pct(snapshot.basis_pct)})",
-            basis_color,
-        ),
-        ("成交量", _fmt_int(snapshot.volume), "#222222"),
-        ("未平倉", _fmt_int(snapshot.open_interest), "#222222"),
     ]
+    quote_source = getattr(snapshot, "quote_source", "")
+    quote_time = getattr(snapshot, "quote_time", "")
+
+    if quote_source:
+        rows.append(("資料", quote_source, "#888888"))
+
+    if quote_time:
+        rows.append(("更新", quote_time[:19], "#888888"))
+        rows.extend(
+            [
+                (
+                    "期貨",
+                    f"{_fmt_price(snapshot.future_price)}  "
+                    f"{_fmt_signed(snapshot.future_change)} "
+                    f"({_fmt_signed_pct(snapshot.future_change_pct)})",
+                    change_color,
+                ),
+                ("現貨", _fmt_price(snapshot.spot_price), "#222222"),
+                (
+                    "期現價差",
+                    f"{_fmt_signed(snapshot.basis)} ({_fmt_signed_pct(snapshot.basis_pct)})",
+                    basis_color,
+                ),
+                ("成交量", _fmt_int(snapshot.volume), "#222222"),
+                ("未平倉", _fmt_int(snapshot.open_interest), "#222222"),
+            ]
+        )
 
     for label, value, color in rows:
         contents.append(
