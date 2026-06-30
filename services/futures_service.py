@@ -363,19 +363,28 @@ def _is_regular_session(value: Any) -> bool:
         or "position" in text
     )
 
+def _normalize_session_mode(session_mode: str) -> str:
+    mode = str(session_mode or "day").strip().lower()
+
+    if mode in {"all", "full", "all_session", "全盤"}:
+        return "all"
+
+    return "day"
 
 def _display_session(value: Any) -> str:
+    text = str(value or "").strip()
+
+    if text.lower() in {"all", "full", "all_session"} or text == "全盤":
+        return "全盤"
+
     if _is_afterhours_session(value):
         return "盤後"
 
     if _is_regular_session(value):
         return "日盤"
 
-    text = str(value or "").strip()
-
     return text or "--"
-
-
+    
 def _current_tw_futures_session_preference() -> str:
     """
     依台灣時間決定目前應該優先顯示日盤或盤後。
@@ -466,18 +475,112 @@ def _is_valid_trade_row(row: dict) -> bool:
 
     return True
 
+def _get_open_price(row: dict) -> float:
+    return _safe_float(
+        row.get("open")
+        or row.get("Open")
+        or row.get("open_price")
+        or row.get("開盤價")
+        or _row_price(row)
+    )
 
-def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
+
+def _get_high_price(row: dict) -> float:
+    return _safe_float(
+        row.get("max")
+        or row.get("high")
+        or row.get("High")
+        or row.get("最高價")
+        or _row_price(row)
+    )
+
+
+def _get_low_price(row: dict) -> float:
+    return _safe_float(
+        row.get("min")
+        or row.get("low")
+        or row.get("Low")
+        or row.get("最低價")
+        or _row_price(row)
+    )
+
+
+def _combine_all_session_rows(rows: list[dict]) -> dict | None:
+    """
+    將同一交易日、同一契約的日盤 + 盤後合併成「全盤」。
+
+    全盤定義：
+    - 15:00 ~ 05:00
+    - 08:45 ~ 13:45
+
+    合併邏輯：
+    - open：優先盤後 open，沒有盤後才用日盤 open
+    - high：日盤 / 盤後最高價取 max
+    - low：日盤 / 盤後最低價取 min
+    - close：優先日盤 close，沒有日盤才用盤後 close
+    - volume：日盤 + 盤後
+    - open_interest：取最後一筆可用資料
+    """
+    valid = [dict(r) for r in rows if _is_valid_trade_row(r)]
+
+    if not valid:
+        return None
+
+    after_rows = [
+        r for r in valid
+        if _is_afterhours_session(_get_session_value(r))
+    ]
+
+    regular_rows = [
+        r for r in valid
+        if _is_regular_session(_get_session_value(r))
+    ]
+
+    # open：全盤優先用盤後，沒有盤後才用日盤
+    open_source = after_rows[0] if after_rows else valid[0]
+
+    # close：完整全盤通常日盤比較新；若只有盤後，就用盤後
+    close_source = regular_rows[-1] if regular_rows else valid[-1]
+
+    prices_high = [_get_high_price(r) for r in valid if _get_high_price(r) > 0]
+    prices_low = [_get_low_price(r) for r in valid if _get_low_price(r) > 0]
+
+    combined = dict(close_source)
+
+    combined["open"] = _get_open_price(open_source)
+    combined["max"] = max(prices_high) if prices_high else _row_price(close_source)
+    combined["min"] = min(prices_low) if prices_low else _row_price(close_source)
+    combined["close"] = _row_price(close_source)
+    combined["volume"] = sum(_safe_int(r.get("volume")) for r in valid)
+
+    combined["trading_session"] = "all"
+    combined["_trade_date_norm"] = valid[0].get("_trade_date_norm") or _normalize_trade_date(valid[0].get("date"))
+    combined["_contract_norm"] = valid[0].get("_contract_norm") or _normalize_contract_date(valid[0].get("contract_date"))
+
+    # open_interest / settlement_price 取最後一筆可用
+    for key in ["open_interest", "settlement_price"]:
+        for r in reversed(valid):
+            if r.get(key) not in (None, "", 0, "0"):
+                combined[key] = r.get(key)
+                break
+
+    return combined
+
+def _pick_near_month_prefer_afterhours(
+    rows: list[dict],
+    session_mode: str = "day",
+) -> dict | None:
     """
     選資料規則：
 
-    1. 排除跨月價差
-    2. 排除價格為 0
-    3. 找最新有效交易日
-    4. 最新交易日中，contract_date 最小者 = 近月
-    5. 現在是日盤時間，優先日盤 / position
-    6. 現在是盤後時間，優先 after_market
+    day：
+    - 只選日盤 / position
+
+    all：
+    - 同一交易日、同一近月契約，把日盤 + 盤後合併成全盤
     """
+    session_mode = _normalize_session_mode(session_mode)
+
     valid_rows: list[dict] = []
 
     for r in rows:
@@ -496,7 +599,7 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
 
         valid_rows.append(item)
 
-    _debug("valid_rows_count =", len(valid_rows))
+    _debug("valid_rows_count =", len(valid_rows), "session_mode =", session_mode)
 
     if not valid_rows:
         return None
@@ -521,61 +624,76 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     if not near_rows:
         return None
 
-    afterhours_rows = [
-        r for r in near_rows
-        if _is_afterhours_session(_get_session_value(r))
-    ]
+    if session_mode == "all":
+        combined = _combine_all_session_rows(near_rows)
 
+        _debug(
+            "choose all-session",
+            "latest_date =",
+            latest_date,
+            "near_contract =",
+            near_contract,
+            "rows =",
+            len(near_rows),
+            "combined =",
+            combined,
+        )
+
+        return combined
+
+    # day mode：只取日盤 / position
     regular_rows = [
         r for r in near_rows
         if _is_regular_session(_get_session_value(r))
     ]
 
-    preference = _current_tw_futures_session_preference()
+    if regular_rows:
+        _debug(
+            "choose day-session",
+            "latest_date =",
+            latest_date,
+            "near_contract =",
+            near_contract,
+            "regular_rows =",
+            len(regular_rows),
+        )
+        return regular_rows[-1]
 
+    # fallback：如果真的沒有日盤，才用近月最後一筆
     _debug(
-        "latest_date =", latest_date,
-        "near_contract =", near_contract,
-        "preference =", preference,
-        "regular =", len(regular_rows),
-        "afterhours =", len(afterhours_rows),
+        "day-session fallback",
+        "latest_date =",
+        latest_date,
+        "near_contract =",
+        near_contract,
+        "near_rows =",
+        len(near_rows),
     )
-
-    if preference == "regular":
-        if regular_rows:
-            return regular_rows[-1]
-
-        if afterhours_rows:
-            return afterhours_rows[-1]
-
-    if preference == "afterhours":
-        if afterhours_rows:
-            return afterhours_rows[-1]
-
-        if regular_rows:
-            return regular_rows[-1]
 
     return near_rows[-1]
 
-
-def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[dict]:
+def _prepare_futures_kline_rows(
+    rows: list[dict],
+    selected_row: dict,
+    session_mode: str = "day",
+) -> list[dict]:
     """
-    依照選到的近月契約，準備 K 線資料。
+    準備股票期貨 K 線資料。
 
-    規則：
-    - 只取同一個近月 contract_date
-    - 如果選到盤後，就畫盤後
-    - 如果選到日盤/position，就畫日盤/position
-    - 排除跨月價差與價格 0
+    day：
+    - 只畫日盤 / position
+
+    all：
+    - 每個交易日把日盤 + 盤後合併成一根全盤 K
     """
+    session_mode = _normalize_session_mode(session_mode)
+
     contract = selected_row.get("_contract_norm") or _normalize_contract_date(
         selected_row.get("contract_date")
     )
 
     if not contract:
         return []
-
-    prefer_afterhours = _is_afterhours_session(_get_session_value(selected_row))
 
     same_contract_rows: list[dict] = []
 
@@ -600,22 +718,31 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
     if not same_contract_rows:
         return []
 
-    if prefer_afterhours:
-        preferred = [
-            r for r in same_contract_rows
-            if _is_afterhours_session(_get_session_value(r))
-        ]
+    # 全盤：依交易日合併日盤 + 盤後
+    if session_mode == "all":
+        grouped: dict[str, list[dict]] = {}
 
-        if preferred:
-            same_contract_rows = preferred
-    else:
-        preferred = [
-            r for r in same_contract_rows
-            if _is_regular_session(_get_session_value(r))
-        ]
+        for r in same_contract_rows:
+            grouped.setdefault(r["_trade_date_norm"], []).append(r)
 
-        if preferred:
-            same_contract_rows = preferred
+        combined_rows: list[dict] = []
+
+        for trade_date in sorted(grouped):
+            combined = _combine_all_session_rows(grouped[trade_date])
+
+            if combined:
+                combined_rows.append(combined)
+
+        return combined_rows[-30:]
+
+    # 日盤：只取 regular / position
+    regular_rows = [
+        r for r in same_contract_rows
+        if _is_regular_session(_get_session_value(r))
+    ]
+
+    if regular_rows:
+        same_contract_rows = regular_rows
 
     same_contract_rows = sorted(
         same_contract_rows,
@@ -628,8 +755,7 @@ def _prepare_futures_kline_rows(rows: list[dict], selected_row: dict) -> list[di
         by_date[r["_trade_date_norm"]] = r
 
     return list(by_date.values())[-30:]
-
-
+    
 def _generate_futures_kline_chart(
     rows: list[dict],
     futures_id: str,
@@ -728,7 +854,12 @@ def _generate_futures_kline_chart(
             color=color,
         )
 
-    session_label = "After-hours" if session == "盤後" else "Day"
+    if session == "全盤":
+        session_label = "All-session"
+    elif session == "盤後":
+        session_label = "After-hours"
+    else:
+        session_label = "Day"
 
     ax_k.set_title(
         f"{futures_id} {contract_date} {session_label} Futures K",
@@ -834,7 +965,11 @@ def _calc_change_from_kline_rows(kline_rows: list[dict], future_price: float) ->
     return change, change_pct
 
 
-def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapshot:
+def get_stock_futures_snapshot(
+    stock_id: str,
+    stock_name: str,
+    session_mode: str = "day",
+) -> FuturesSnapshot:
     """
     股票期貨：
 
@@ -846,7 +981,7 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
     - 盤後時間優先盤後
     """
     sid = _clean_stock_id(stock_id)
-
+    session_mode = _normalize_session_mode(session_mode)
     futures_name, candidates, source = _resolve_stock_futures_candidates(sid, stock_name)
 
     _debug(
@@ -884,7 +1019,10 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
         if not rows:
             continue
 
-        row = _pick_near_month_prefer_afterhours(rows)
+        row = _pick_near_month_prefer_afterhours(
+            rows,
+            session_mode=session_mode,
+        )
 
         _debug("selected row for", futures_id, "=", row)
 
@@ -906,8 +1044,11 @@ def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapsho
     display_contract = _format_contract_date(selected_row.get("contract_date"))
     display_session = _display_session(_get_session_value(selected_row))
 
-    kline_rows = _prepare_futures_kline_rows(selected_rows, selected_row)
-
+    kline_rows = _prepare_futures_kline_rows(
+        selected_rows,
+        selected_row,
+        session_mode=session_mode,
+    )
     chart_url = _generate_futures_kline_chart(
         rows=kline_rows,
         futures_id=selected_futures_id,
