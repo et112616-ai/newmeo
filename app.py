@@ -39,21 +39,19 @@ def make_reply_payload(message: Any, reply_token: str = "") -> Dict[str, Any]:
     else:
         messages = [message]
 
-    # LINE Reply API 一次最多 5 則
     messages = messages[:5]
 
     reply_body = {
         "replyToken": reply_token,
-        "messages": messages
+        "messages": messages,
     }
 
     return {
         "replyToken": reply_token,
         "messages": messages,
         "messages_json": json.dumps(messages, ensure_ascii=False),
-        "reply_body_json": json.dumps(reply_body, ensure_ascii=False)
+        "reply_body_json": json.dumps(reply_body, ensure_ascii=False),
     }
-
 
 @app.route("/", methods=["GET"])
 def health():
