@@ -465,8 +465,10 @@ def _generate_futures_kline_chart(
             color=color,
         )
 
+    session_label = "After-hours" if session == "盤後" else "Day"
+
     ax_k.set_title(
-        f"{futures_name} {futures_id} {contract_date} {session} K線",
+        f"{futures_id} {contract_date} {session_label} Futures K",
         fontsize=13,
         fontweight="bold",
     )
