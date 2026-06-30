@@ -1,4 +1,5 @@
 from __future__ import annotations
+from services.futures_map_service import sync_stock_futures_map_from_taifex
 
 import base64
 import hashlib
@@ -143,6 +144,29 @@ def health():
         }
     ), 200
 
+@app.route("/sync_stock_futures_map", methods=["GET", "POST"])
+def sync_stock_futures_map_route():
+    token = request.args.get("token", "").strip()
+
+    if not token:
+        token = request.headers.get("X-Sync-Token", "").strip()
+
+    if not TDCC_SYNC_TOKEN or token != TDCC_SYNC_TOKEN:
+        return jsonify(
+            {
+                "status": "forbidden",
+                "message": "invalid token",
+            }
+        ), 403
+
+    result = sync_stock_futures_map_from_taifex()
+
+    return jsonify(
+        {
+            "status": "ok" if result.get("ok") else "error",
+            "result": result,
+        }
+    ), 200
 
 @app.route("/sync_tdcc_large_holder", methods=["GET", "POST"])
 def sync_tdcc_large_holder_route():
