@@ -233,29 +233,32 @@ def _normalize_institution_name(name: str) -> str | None:
 
 def _extract_buy_sell_value(row: dict) -> float:
     """
-    抓法人買賣超。
+    抓法人買賣超，並統一轉成「張」。
 
-    優先順序：
-    1. buy - sell
-    2. buy_sell
-    3. buy_sell_amount
-    4. net_buy_sell
+    FinMind 的法人買賣超常見單位是「股」，
+    所以這裡統一除以 1000，轉成「張」。
+
+    例：
+    -20,610,326 股 -> -20,610 張
     """
+    value_shares = 0.0
+
     if "buy" in row and "sell" in row:
-        return _to_float(row.get("buy")) - _to_float(row.get("sell"))
+        value_shares = _to_float(row.get("buy")) - _to_float(row.get("sell"))
+    else:
+        for key in [
+            "buy_sell",
+            "buy_sell_amount",
+            "net_buy_sell",
+            "買賣超",
+            "買賣超股數",
+        ]:
+            if key in row:
+                value_shares = _to_float(row.get(key))
+                break
 
-    for key in [
-        "buy_sell",
-        "buy_sell_amount",
-        "net_buy_sell",
-        "買賣超",
-        "買賣超股數",
-    ]:
-        if key in row:
-            return _to_float(row.get(key))
-
-    return 0.0
-
+    # 股 -> 張
+    return value_shares / 1000.0
 
 def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
     """
@@ -347,7 +350,7 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         result[section] = [
             {
                 "date": _fmt_md(d),
-                "buy_sell": v,
+                "buy_sell": int(round(v)),  # 已經是「張」
                 "ratio": temp_ratio[section].get(d, "--"),
             }
             for d, v in items
