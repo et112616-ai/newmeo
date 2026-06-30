@@ -1,5 +1,5 @@
 from __future__ import annotations
-import traceback
+
 import json
 import traceback
 from typing import Any, Dict
@@ -9,8 +9,8 @@ from flask import Flask, jsonify, request
 from config import PORT, TDCC_SYNC_STOCKS, TDCC_SYNC_TOKEN
 from controller import handle_request
 from services.chip_service import sync_tdcc_latest_large_holder_many
-from flex.flex_builder import text_message
 from utils.parser import parse_make_payload
+
 
 app = Flask(__name__)
 
@@ -29,9 +29,10 @@ def extract_reply_token(payload: Dict[str, Any]) -> str:
     if isinstance(events, list) and len(events) > 0:
         first_event = events[0]
         if isinstance(first_event, dict):
-            return first_event.get("replyToken", "")
+            return str(first_event.get("replyToken", "")).strip()
 
     return ""
+
 
 def make_reply_payload(message: Any, reply_token: str = "") -> Dict[str, Any]:
     if isinstance(message, list):
@@ -53,12 +54,16 @@ def make_reply_payload(message: Any, reply_token: str = "") -> Dict[str, Any]:
         "reply_body_json": json.dumps(reply_body, ensure_ascii=False),
     }
 
+
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "stock-line-bot"
-    }), 200
+    return jsonify(
+        {
+            "status": "ok",
+            "service": "stock-line-bot",
+        }
+    ), 200
+
 
 @app.route("/sync_tdcc_large_holder", methods=["GET", "POST"])
 def sync_tdcc_large_holder_route():
@@ -100,33 +105,53 @@ def sync_tdcc_large_holder_route():
         }
     ), 200
 
+
 @app.route("/get_chart", methods=["POST"])
 def get_chart():
+    reply_token = ""
+
     try:
         payload: Dict[str, Any] = request.get_json(force=True, silent=False) or {}
 
         reply_token = extract_reply_token(payload)
 
+        print("get_chart payload:", json.dumps(payload, ensure_ascii=False), flush=True)
+
         bot_req = parse_make_payload(payload)
+
+        print(
+            "parsed bot_req:",
+            {
+                "stock": getattr(bot_req, "stock", None),
+                "action": getattr(bot_req, "action", None),
+                "current_mode": getattr(bot_req, "current_mode", None),
+                "time_frame": getattr(bot_req, "time_frame", None),
+                "raw_text": getattr(bot_req, "raw_text", None),
+            },
+            flush=True,
+        )
 
         msg = handle_request(bot_req)
 
         return jsonify(make_reply_payload(msg, reply_token)), 200
 
     except Exception as exc:
-        print("ERROR in /get_chart:", str(exc))
-        print(traceback.format_exc())
+        err = traceback.format_exc()
 
-        error_msg = text_message(f"伺服器內部錯誤：{str(exc)}")
+        print("handle_request failed traceback:", flush=True)
+        print(err, flush=True)
 
-        reply_token = ""
-        try:
-            payload = request.get_json(force=True, silent=True) or {}
-            reply_token = extract_reply_token(payload)
-        except Exception:
-            pass
+        error_text = f"查詢失敗：{type(exc).__name__}: {exc}"
 
-        return jsonify(make_reply_payload(error_msg, reply_token)), 200
+        return jsonify(
+            make_reply_payload(
+                {
+                    "type": "text",
+                    "text": error_text,
+                },
+                reply_token,
+            )
+        ), 200
 
 
 if __name__ == "__main__":
