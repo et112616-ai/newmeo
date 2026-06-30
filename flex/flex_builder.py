@@ -26,6 +26,7 @@ def image_dashboard(
     stock_name: str,
     image_url: str,
     current_mode: str,
+    image_aspect_ratio: str = "4:3",
     time_frame: str,
     price_info: str = "--",
     change_info: str = "--",
@@ -72,7 +73,7 @@ def image_dashboard(
                         "borderWidth": "1px",
                         "borderColor": "#E5E5EA",
                         "contents": [
-                            {"type": "image", "url": image_url, "size": "full", "aspectMode": "fit", "aspectRatio": "4:3"}
+                            {"type": "image", "url": image_url, "size": "full", "aspectMode": "fit", "aspectRatio": image_aspect_ratio}
                         ],
                     },
                 ],
