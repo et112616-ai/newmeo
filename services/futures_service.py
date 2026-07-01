@@ -14,6 +14,13 @@ try:
         get_futures_snapshot as get_shioaji_futures_snapshot,
         get_stock_snapshot as get_shioaji_stock_snapshot,
     )
+
+try:
+    from services.futures_map_service import get_stock_futures_mapping
+except Exception:
+    def get_stock_futures_mapping(stock_id: str):
+        return None
+
 except Exception:
     def get_shioaji_futures_snapshot(futures_id: str, contract_date: str = ""):
         return None
@@ -390,18 +397,93 @@ def _row_change_pct(row: dict) -> float:
     return 0.0
 
 
-def _resolve_stock_futures_candidates(stock_id: str) -> tuple[str, list[str]]:
+def _resolve_stock_futures_candidates(
+    stock_id: str,
+    stock_name: str = "",
+) -> tuple[str, list[str], str]:
+    """
+    股票代號 -> 股票期貨代號。
+
+    優先順序：
+    1. Supabase stock_futures_map
+    2. STOCK_FUTURES_MAP fallback
+
+    回傳：
+    futures_name, candidates, source
+    """
     sid = _clean_stock_id(stock_id)
+
+    # =========================
+    # 1. Supabase 對照表
+    # =========================
+    try:
+        mapping = get_stock_futures_mapping(sid)
+    except Exception as exc:
+        print(
+            "DEBUG futures mapping supabase failed",
+            sid,
+            exc,
+            flush=True,
+        )
+        mapping = None
+
+    if mapping:
+        futures_name = (
+            mapping.get("futures_name")
+            or mapping.get("name")
+            or f"{mapping.get('stock_name') or stock_name or sid}期貨"
+        )
+
+        candidates = list(mapping.get("candidates") or [])
+
+        if not candidates:
+            futures_code = (
+                mapping.get("futures_code")
+                or mapping.get("code")
+                or mapping.get("futures_id")
+                or ""
+            )
+
+            candidates = _build_candidates_from_futures_code(str(futures_code))
+
+        candidates = _unique(candidates)
+
+        if candidates:
+            print(
+                "DEBUG futures mapping source=supabase",
+                sid,
+                futures_name,
+                candidates,
+                flush=True,
+            )
+            return str(futures_name), candidates, "supabase"
+
+    # =========================
+    # 2. 手動 fallback
+    # =========================
     info = STOCK_FUTURES_MAP.get(sid)
 
-    if not info:
-        return "", []
+    if info:
+        futures_name = str(info.get("name") or f"{stock_name or sid}期貨")
+        candidates = _unique(list(info.get("candidates") or []))
 
-    name = str(info.get("name") or "")
-    candidates = list(info.get("candidates") or [])
+        if candidates:
+            print(
+                "DEBUG futures mapping source=fallback",
+                sid,
+                futures_name,
+                candidates,
+                flush=True,
+            )
+            return futures_name, candidates, "fallback"
 
-    return name, candidates
+    print(
+        "DEBUG futures mapping not found",
+        sid,
+        flush=True,
+    )
 
+    return "", [], "none"
 
 def get_stock_futures_snapshot(
     stock_id: str,
