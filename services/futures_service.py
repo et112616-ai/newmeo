@@ -395,6 +395,51 @@ def _row_change_pct(row: dict) -> float:
 
     return 0.0
 
+def _unique(values: list[str]) -> list[str]:
+    """
+    去除空白、轉大寫、去重，並保留原本順序。
+    """
+    result = []
+
+    for value in values or []:
+        text = str(value or "").strip().upper()
+
+        if not text:
+            continue
+
+        if text not in result:
+            result.append(text)
+
+    return result
+
+
+def _build_candidates_from_futures_code(futures_code: str) -> list[str]:
+    """
+    期交所資料通常給基礎代碼，例如：
+    2303 聯電 = CC
+
+    FinMind / Shioaji 可能使用：
+    CCF 或 CC
+
+    所以自動產生：
+    CC  -> CCF, CC
+    CCF -> CCF, CC
+    """
+    code = str(futures_code or "").strip().upper()
+
+    if not code:
+        return []
+
+    candidates = []
+
+    if code.endswith("F"):
+        candidates.append(code)
+        candidates.append(code[:-1])
+    else:
+        candidates.append(f"{code}F")
+        candidates.append(code)
+
+    return _unique(candidates)
 
 def _resolve_stock_futures_candidates(
     stock_id: str,
