@@ -9,6 +9,17 @@ import yfinance as yf
 
 from config import FINMIND_TOKEN
 
+try:
+    from services.sinopac_quote_service import (
+        get_futures_snapshot as get_shioaji_futures_snapshot,
+        get_stock_snapshot as get_shioaji_stock_snapshot,
+    )
+except Exception:
+    def get_shioaji_futures_snapshot(futures_id: str, contract_date: str = ""):
+        return None
+
+    def get_shioaji_stock_snapshot(stock_id: str):
+        return None
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -392,90 +403,365 @@ def _resolve_stock_futures_candidates(stock_id: str) -> tuple[str, list[str]]:
     return name, candidates
 
 
-def get_stock_futures_snapshot(stock_id: str, stock_name: str) -> FuturesSnapshot:
+def get_stock_futures_snapshot(
+    stock_id: str,
+    stock_name: str,
+    session_mode: str = "day",
+) -> FuturesSnapshot:
     """
-    股票期貨第一版：
+    股票期貨：
 
-    - 只抓標準股票期貨
-    - 只抓近月
-    - 同近月盤後優先
-    - 沒盤後才用日盤
-    - 不抓小型期貨
+    - 支援 controller 傳入 session_mode
+    - day：日盤
+    - all：全盤
+    - 價格優先使用 Shioaji 期貨 snapshot
+    - fallback 使用 FinMind TaiwanFuturesDaily
     """
+    from dataclasses import fields as dataclass_fields
+
     sid = _clean_stock_id(stock_id)
 
-    futures_name, candidates = _resolve_stock_futures_candidates(sid)
+    session_mode = str(session_mode or "day").strip().lower()
+
+    if session_mode not in {"day", "all"}:
+        session_mode = "day"
+
+    resolved = _resolve_stock_futures_candidates(sid)
+
+    if isinstance(resolved, tuple) and len(resolved) >= 3:
+        futures_name = resolved[0]
+        candidates = resolved[1]
+    else:
+        futures_name, candidates = resolved
 
     if not candidates:
-        return FuturesSnapshot(
-            available=False,
-            message="這檔股票尚未建立標準股票期貨代號對照。",
-            stock_id=sid,
-            stock_name=stock_name,
-        )
+        payload = {
+            "available": False,
+            "message": "這檔股票尚未建立標準股票期貨代號對照。",
+            "stock_id": sid,
+            "stock_name": stock_name,
+        }
+
+        allowed = {f.name for f in dataclass_fields(FuturesSnapshot)}
+        return FuturesSnapshot(**{k: v for k, v in payload.items() if k in allowed})
+
+    def _session_text(row: dict) -> str:
+        for key in [
+            "trading_session",
+            "TradingSession",
+            "session",
+            "tradingSession",
+            "交易時段",
+        ]:
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
+
+        return ""
+
+    def _pick_row_by_mode(rows: list[dict], mode: str) -> dict | None:
+        valid_rows: list[dict] = []
+
+        for r in rows:
+            try:
+                if not _is_valid_trade_row(r):
+                    continue
+            except Exception:
+                contract = _normalize_contract_date(r.get("contract_date"))
+                price = _row_price(r)
+
+                if not contract or price <= 0:
+                    continue
+
+            trade_date = _normalize_trade_date(r.get("date"))
+            contract = _normalize_contract_date(r.get("contract_date"))
+
+            if not trade_date or not contract:
+                continue
+
+            item = dict(r)
+            item["_trade_date_norm"] = trade_date
+            item["_contract_norm"] = contract
+            valid_rows.append(item)
+
+        if not valid_rows:
+            return None
+
+        if mode == "day":
+            day_rows = [
+                r for r in valid_rows
+                if _is_regular_session(_session_text(r))
+            ]
+
+            if not day_rows:
+                return None
+
+            latest_date = max(r["_trade_date_norm"] for r in day_rows)
+
+            latest_rows = [
+                r for r in day_rows
+                if r["_trade_date_norm"] == latest_date
+            ]
+
+            near_contract = min(r["_contract_norm"] for r in latest_rows)
+
+            near_rows = [
+                r for r in latest_rows
+                if r["_contract_norm"] == near_contract
+            ]
+
+            return near_rows[-1] if near_rows else None
+
+        latest_date = max(r["_trade_date_norm"] for r in valid_rows)
+
+        latest_rows = [
+            r for r in valid_rows
+            if r["_trade_date_norm"] == latest_date
+        ]
+
+        near_contract = min(r["_contract_norm"] for r in latest_rows)
+
+        near_rows = [
+            r for r in latest_rows
+            if r["_contract_norm"] == near_contract
+        ]
+
+        if not near_rows:
+            return None
+
+        regular_rows = [
+            r for r in near_rows
+            if _is_regular_session(_session_text(r))
+        ]
+
+        # 全盤：如果同一交易日已經有日盤資料，收盤價以日盤最後一筆為主；
+        # 如果只有盤後，才用盤後。
+        chosen = regular_rows[-1] if regular_rows else near_rows[-1]
+        chosen = dict(chosen)
+        chosen["trading_session"] = "all"
+
+        return chosen
 
     selected_row: dict | None = None
     selected_futures_id = ""
+    selected_rows: list[dict] = []
 
     for futures_id in candidates:
         rows = _request_finmind_futures_daily(futures_id)
 
+        print(
+            "DEBUG futures candidate",
+            "| futures_id=", futures_id,
+            "| rows_count=", len(rows),
+            flush=True,
+        )
+
         if not rows:
             continue
 
-        row = _pick_near_month_prefer_afterhours(rows)
+        row = _pick_row_by_mode(rows, session_mode)
 
         if row:
             selected_row = row
             selected_futures_id = futures_id
+            selected_rows = rows
             break
 
     if not selected_row:
-        return FuturesSnapshot(
-            available=False,
-            message="查無近月股票期貨資料，可能是 FinMind 尚未更新或期貨代號需調整。",
-            stock_id=sid,
-            stock_name=stock_name,
-            futures_name=futures_name,
-        )
+        payload = {
+            "available": False,
+            "message": "查無近月股票期貨資料，可能是 FinMind 尚未更新或期貨代號需調整。",
+            "stock_id": sid,
+            "stock_name": stock_name,
+            "futures_name": futures_name,
+        }
+
+        allowed = {f.name for f in dataclass_fields(FuturesSnapshot)}
+        return FuturesSnapshot(**{k: v for k, v in payload.items() if k in allowed})
+
+    display_contract = _format_contract_date(selected_row.get("contract_date"))
+
+    if session_mode == "all":
+        display_session = "全盤"
+    else:
+        display_session = _display_session(_session_text(selected_row))
 
     future_price = _row_price(selected_row)
     future_change = _row_change(selected_row)
     future_change_pct = _row_change_pct(selected_row)
+    future_volume = _safe_int(selected_row.get("volume"))
 
-    spot_price = _get_spot_price(sid)
+    quote_source = "日成交"
+    quote_time = ""
+
+    # =========================
+    # 第一順位：Shioaji 期貨即時價
+    # =========================
+    try:
+        shioaji_quote = get_shioaji_futures_snapshot(
+            selected_futures_id,
+            selected_row.get("contract_date"),
+        )
+    except Exception as exc:
+        print(
+            "DEBUG futures shioaji futures snapshot failed",
+            selected_futures_id,
+            exc,
+            flush=True,
+        )
+        shioaji_quote = None
+
+    if shioaji_quote:
+        sj_price = _safe_float(shioaji_quote.get("close"))
+
+        if sj_price > 0:
+            future_price = sj_price
+            future_change = _safe_float(
+                shioaji_quote.get("change"),
+                future_change,
+            )
+            future_change_pct = _safe_float(
+                shioaji_quote.get("change_pct"),
+                future_change_pct,
+            )
+
+            future_volume = _safe_int(
+                shioaji_quote.get("total_volume")
+                or shioaji_quote.get("volume"),
+                future_volume,
+            )
+
+            quote_source = "永豐即時"
+            quote_time = str(shioaji_quote.get("ts") or "")
+
+            print(
+                "DEBUG futures use shioaji futures snapshot",
+                "| futures_id=", selected_futures_id,
+                "| snapshot_futures_id=", shioaji_quote.get("futures_id"),
+                "| price=", future_price,
+                "| change=", future_change,
+                "| change_pct=", future_change_pct,
+                "| volume=", future_volume,
+                "| time=", quote_time,
+                flush=True,
+            )
+
+    # =========================
+    # 現貨價格：優先 Shioaji，fallback 原本 _get_spot_price
+    # =========================
+    spot_price = 0.0
+
+    try:
+        stock_snapshot = get_shioaji_stock_snapshot(sid)
+
+        if stock_snapshot:
+            spot_price = _safe_float(stock_snapshot.get("close"))
+    except Exception as exc:
+        print(
+            "DEBUG futures shioaji stock snapshot failed",
+            sid,
+            exc,
+            flush=True,
+        )
+
+    if spot_price <= 0:
+        spot_price = _get_spot_price(sid)
 
     basis = future_price - spot_price if future_price and spot_price else 0.0
     basis_pct = (basis / spot_price * 100) if spot_price else 0.0
 
+    trade_date = _normalize_trade_date(selected_row.get("date"))
+
+    if quote_time:
+        trade_date = quote_time[:10]
+
+    chart_url = ""
+
+    try:
+        if "_prepare_futures_kline_rows" in globals() and "_generate_futures_kline_chart" in globals():
+            kline_rows = _prepare_futures_kline_rows(
+                selected_rows,
+                selected_row,
+                session_mode=session_mode,
+            )
+
+            chart_url = _generate_futures_kline_chart(
+                rows=kline_rows,
+                futures_id=selected_futures_id,
+                futures_name=futures_name,
+                contract_date=display_contract,
+                session=display_session,
+                current_price=future_price if quote_source != "日成交" else 0.0,
+                quote_time=quote_time,
+            )
+
+    except TypeError:
+        try:
+            kline_rows = _prepare_futures_kline_rows(
+                selected_rows,
+                selected_row,
+            )
+
+            chart_url = _generate_futures_kline_chart(
+                rows=kline_rows,
+                futures_id=selected_futures_id,
+                futures_name=futures_name,
+                contract_date=display_contract,
+                session=display_session,
+            )
+
+        except Exception as exc:
+            print("DEBUG futures chart fallback failed", exc, flush=True)
+
+    except Exception as exc:
+        print("DEBUG futures chart failed", exc, flush=True)
+
     print(
-        "futures_service_v1",
+        "DEBUG futures final",
         "| stock=", sid,
         "| futures_id=", selected_futures_id,
         "| contract=", selected_row.get("contract_date"),
-        "| session=", selected_row.get("trading_session"),
-        "| date=", selected_row.get("date"),
+        "| session=", display_session,
+        "| date=", trade_date,
+        "| quote_source=", quote_source,
+        "| quote_time=", quote_time,
         "| future_price=", future_price,
         "| spot_price=", spot_price,
+        "| basis=", basis,
+        "| chart_url=", chart_url,
+        flush=True,
     )
 
+    payload = {
+        "available": True,
+        "message": "ok",
+        "stock_id": sid,
+        "stock_name": stock_name,
+        "futures_id": str(selected_row.get("futures_id") or selected_futures_id),
+        "futures_name": futures_name,
+        "contract_date": display_contract,
+        "trade_date": trade_date,
+        "trading_session": display_session,
+        "chart_url": chart_url,
+        "future_price": future_price,
+        "future_change": future_change,
+        "future_change_pct": future_change_pct,
+        "spot_price": spot_price,
+        "basis": basis,
+        "basis_pct": basis_pct,
+        "volume": future_volume,
+        "open_interest": _safe_int(selected_row.get("open_interest")),
+        "settlement_price": _safe_float(selected_row.get("settlement_price")),
+        "quote_source": quote_source,
+        "quote_time": quote_time,
+    }
+
+    allowed = {f.name for f in dataclass_fields(FuturesSnapshot)}
+
     return FuturesSnapshot(
-        available=True,
-        message="ok",
-        stock_id=sid,
-        stock_name=stock_name,
-        futures_id=str(selected_row.get("futures_id") or selected_futures_id),
-        futures_name=futures_name,
-        contract_date=_format_contract_date(selected_row.get("contract_date")),
-        trade_date=_normalize_trade_date(selected_row.get("date")),
-        trading_session=_display_session(selected_row.get("trading_session")),
-        future_price=future_price,
-        future_change=future_change,
-        future_change_pct=future_change_pct,
-        spot_price=spot_price,
-        basis=basis,
-        basis_pct=basis_pct,
-        volume=_safe_int(selected_row.get("volume")),
-        open_interest=_safe_int(selected_row.get("open_interest")),
-        settlement_price=_safe_float(selected_row.get("settlement_price")),
+        **{
+            k: v
+            for k, v in payload.items()
+            if k in allowed
+        }
     )
