@@ -1200,12 +1200,17 @@ def get_stock_futures_snapshot(
     - STOCK_FUTURES_MAP 為 fallback
     - 只抓標準股票期貨
     - 只抓近月
-    - 日盤時間優先日盤
-    - 盤後時間優先盤後
+    - day：日盤
+    - all：全盤
+    - 即時報價若權限不足，會 fallback 回日成交
     """
     sid = _clean_stock_id(stock_id)
     session_mode = _normalize_session_mode(session_mode)
-    futures_name, candidates, source = _resolve_stock_futures_candidates(sid, stock_name)
+
+    futures_name, candidates, source = _resolve_stock_futures_candidates(
+        sid,
+        stock_name,
+    )
 
     _debug(
         "start",
@@ -1217,6 +1222,8 @@ def get_stock_futures_snapshot(
         futures_name,
         "candidates =",
         candidates,
+        "session_mode =",
+        session_mode,
     )
 
     if not candidates:
@@ -1264,19 +1271,23 @@ def get_stock_futures_snapshot(
             futures_name=futures_name,
         )
 
-    display_contract = _format_contract_date(selected_row.get("contract_date"))
-    
+    display_contract = _format_contract_date(
+        selected_row.get("contract_date")
+    )
+
     if session_mode == "all":
         display_session = "全盤"
     else:
-        display_session = _display_session(_get_session_value(selected_row))
-    
+        display_session = _display_session(
+            _get_session_value(selected_row)
+        )
+
     kline_rows = _prepare_futures_kline_rows(
         selected_rows,
         selected_row,
         session_mode=session_mode,
     )
-    
+
     future_price = _row_price(selected_row)
     future_change = _row_change(selected_row)
     future_change_pct = _row_change_pct(selected_row)
@@ -1284,7 +1295,7 @@ def get_stock_futures_snapshot(
     future_volume = _safe_int(selected_row.get("volume"))
     quote_source = "日成交"
     quote_time = ""
-    
+
     # =========================
     # 優先使用即時期貨報價
     # =========================
@@ -1298,8 +1309,14 @@ def get_stock_futures_snapshot(
 
         if rt_price > 0:
             future_price = rt_price
-            future_change = _safe_float(snapshot_row.get("change_price"), future_change)
-            future_change_pct = _safe_float(snapshot_row.get("change_rate"), future_change_pct)
+            future_change = _safe_float(
+                snapshot_row.get("change_price"),
+                future_change,
+            )
+            future_change_pct = _safe_float(
+                snapshot_row.get("change_rate"),
+                future_change_pct,
+            )
 
             future_volume = _safe_int(
                 snapshot_row.get("total_volume")
@@ -1312,6 +1329,8 @@ def get_stock_futures_snapshot(
 
             _debug(
                 "use realtime snapshot",
+                "request_id =",
+                snapshot_request_id,
                 "selected_futures_id =",
                 selected_futures_id,
                 "snapshot_futures_id =",
@@ -1326,73 +1345,74 @@ def get_stock_futures_snapshot(
                 quote_time,
             )
 
-            if quote_source != "即時報價" and future_change == 0 and future_change_pct == 0:
-                calc_change, calc_change_pct = _calc_change_from_kline_rows(
-                    kline_rows,
-                    future_price,
-                )
+    # 即時報價抓不到時，用 K 線前一筆補漲跌
+    if quote_source != "即時報價" and future_change == 0 and future_change_pct == 0:
+        calc_change, calc_change_pct = _calc_change_from_kline_rows(
+            kline_rows,
+            future_price,
+        )
 
-                if calc_change != 0:
-                    future_change = calc_change
-                    future_change_pct = calc_change_pct
+        if calc_change != 0:
+            future_change = calc_change
+            future_change_pct = calc_change_pct
 
-              chart_url = _generate_futures_kline_chart(
-                rows=kline_rows,
-                futures_id=selected_futures_id,
-                futures_name=futures_name,
-                contract_date=display_contract,
-                session=display_session,
-                current_price=future_price if quote_source == "即時報價" else 0.0,
-                quote_time=quote_time,
-            )
+    chart_url = _generate_futures_kline_chart(
+        rows=kline_rows,
+        futures_id=selected_futures_id,
+        futures_name=futures_name,
+        contract_date=display_contract,
+        session=display_session,
+        current_price=future_price if quote_source == "即時報價" else 0.0,
+        quote_time=quote_time,
+    )
 
-            spot_price = _get_spot_price(sid)
+    spot_price = _get_spot_price(sid)
 
-            basis = future_price - spot_price if future_price and spot_price else 0.0
-            basis_pct = (basis / spot_price * 100) if spot_price else 0.0
+    basis = future_price - spot_price if future_price and spot_price else 0.0
+    basis_pct = (basis / spot_price * 100) if spot_price else 0.0
 
-            _debug(
-                "result",
-                "selected_futures_id =",
-                selected_futures_id,
-                "contract =",
-                display_contract,
-                "session =",
-                display_session,
-                "future_price =",
-                future_price,
-                "spot_price =",
-                spot_price,
-                "basis =",
-                basis,
-                "quote_source =",
-                quote_source,
-                "quote_time =",
-                quote_time,
-                "chart_url =",
-                chart_url,
-            )
+    _debug(
+        "result",
+        "selected_futures_id =",
+        selected_futures_id,
+        "contract =",
+        display_contract,
+        "session =",
+        display_session,
+        "future_price =",
+        future_price,
+        "spot_price =",
+        spot_price,
+        "basis =",
+        basis,
+        "quote_source =",
+        quote_source,
+        "quote_time =",
+        quote_time,
+        "chart_url =",
+        chart_url,
+    )
 
-            return FuturesSnapshot(
-                available=True,
-                message="ok",
-                stock_id=sid,
-                stock_name=stock_name,
-                futures_id=str(selected_row.get("futures_id") or selected_futures_id),
-                futures_name=futures_name or f"{stock_name}期貨",
-                contract_date=display_contract,
-                trade_date=_normalize_trade_date(selected_row.get("date")),
-                trading_session=display_session,
-                chart_url=chart_url,
-                future_price=future_price,
-                future_change=future_change,
-                future_change_pct=future_change_pct,
-                spot_price=spot_price,
-                basis=basis,
-                basis_pct=basis_pct,
-                volume=future_volume,
-                open_interest=_safe_int(selected_row.get("open_interest")),
-                settlement_price=_safe_float(selected_row.get("settlement_price")),
-                quote_source=quote_source,
-                quote_time=quote_time,
-            )
+    return FuturesSnapshot(
+        available=True,
+        message="ok",
+        stock_id=sid,
+        stock_name=stock_name,
+        futures_id=str(selected_row.get("futures_id") or selected_futures_id),
+        futures_name=futures_name or f"{stock_name}期貨",
+        contract_date=display_contract,
+        trade_date=_normalize_trade_date(selected_row.get("date")),
+        trading_session=display_session,
+        chart_url=chart_url,
+        future_price=future_price,
+        future_change=future_change,
+        future_change_pct=future_change_pct,
+        spot_price=spot_price,
+        basis=basis,
+        basis_pct=basis_pct,
+        volume=future_volume,
+        open_interest=_safe_int(selected_row.get("open_interest")),
+        settlement_price=_safe_float(selected_row.get("settlement_price")),
+        quote_source=quote_source,
+        quote_time=quote_time,
+    )
