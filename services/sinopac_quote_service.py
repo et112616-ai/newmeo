@@ -246,7 +246,6 @@ def get_stock_snapshot(stock_id: str) -> dict[str, Any] | None:
             "sell_price": _safe_float(raw.get("sell_price")),
             "ts": _normalize_ts(raw.get("ts")),
             "source": "Shioaji",
-            "raw": raw,
         }
 
         _STOCK_SNAPSHOT_CACHE[sid] = (now, data)
@@ -275,12 +274,10 @@ def append_stock_snapshot_to_intraday_df(df: pd.DataFrame, stock_id: str) -> pd.
     """
     把 Shioaji 即時 snapshot 補到 1m / 5m 圖表最後一點。
 
-    目的：
-    - 上方價格
-    - 更新時間
-    - 圖表最後一點
-
-    三者使用同一筆資料。
+    注意：
+    不要把 Shioaji 原始物件放進 df.attrs，
+    否則 pandas deepcopy 時可能出現：
+    TypeError: cannot pickle 'builtins.TickType' object
     """
     if df is None or df.empty:
         return df
@@ -308,20 +305,32 @@ def append_stock_snapshot_to_intraday_df(df: pd.DataFrame, stock_id: str) -> pd.
 
         result = df.copy()
 
+        # 只存純文字 / 純數字，避免 TickType 之類物件造成 deepcopy 錯誤
+        result.attrs["shioaji_snapshot"] = {
+            "stock_id": str(snapshot.get("stock_id") or ""),
+            "close": _safe_float(snapshot.get("close")),
+            "change": _safe_float(snapshot.get("change")),
+            "change_pct": _safe_float(snapshot.get("change_pct")),
+            "volume": _safe_int(snapshot.get("volume")),
+            "total_volume": _safe_int(snapshot.get("total_volume")),
+            "ts": str(snapshot.get("ts") or ""),
+            "source": "Shioaji",
+        }
+
         # 對齊 index 時區
         if getattr(result.index, "tz", None) is not None:
             if snap_ts.tzinfo is None:
                 snap_ts = snap_ts.tz_localize("Asia/Taipei")
+
             snap_ts = snap_ts.tz_convert(result.index.tz)
+
         else:
             if snap_ts.tzinfo is not None:
                 snap_ts = snap_ts.tz_convert("Asia/Taipei").tz_localize(None)
 
         last_idx = result.index[-1]
 
-        # 如果 Shioaji 時間比 yfinance 最後一筆舊，就只記錄 attrs，不強行覆蓋圖表
-        result.attrs["shioaji_snapshot"] = snapshot
-
+        # 如果 Shioaji 時間沒有比 K 線新，就不硬塞點，但保留 attrs 給價格區使用
         if snap_ts <= last_idx:
             return result
 
@@ -333,7 +342,10 @@ def append_stock_snapshot_to_intraday_df(df: pd.DataFrame, stock_id: str) -> pd.
         last_row["Close"] = price
 
         if "Volume" in result.columns:
-            last_row["Volume"] = _safe_int(snapshot.get("volume"))
+            last_row["Volume"] = _safe_int(
+                snapshot.get("volume")
+                or snapshot.get("total_volume")
+            )
 
         result.loc[snap_ts] = last_row
         result = result.sort_index()
