@@ -589,6 +589,184 @@ def _pick_chart_anchor_row(rows: list[dict]) -> dict | None:
 
     return latest_rows[-1]
 
+def _get_open_price(row: dict) -> float:
+    return _safe_float(
+        row.get("open")
+        or row.get("Open")
+        or row.get("open_price")
+        or row.get("開盤價")
+        or _row_price(row)
+    )
+
+
+def _get_high_price(row: dict) -> float:
+    return _safe_float(
+        row.get("max")
+        or row.get("high")
+        or row.get("High")
+        or row.get("最高價")
+        or _row_price(row)
+    )
+
+
+def _get_low_price(row: dict) -> float:
+    return _safe_float(
+        row.get("min")
+        or row.get("low")
+        or row.get("Low")
+        or row.get("最低價")
+        or _row_price(row)
+    )
+
+
+def _combine_all_session_rows(rows: list[dict]) -> dict | None:
+    """
+    同一交易日、同一契約，把日盤 + 盤後合併成全盤 K。
+    """
+    valid = [dict(r) for r in rows if _is_valid_trade_row(r)]
+
+    if not valid:
+        return None
+
+    after_rows = [
+        r for r in valid
+        if _is_afterhours_session(_get_session_value(r))
+    ]
+
+    regular_rows = [
+        r for r in valid
+        if _is_regular_session(_get_session_value(r))
+    ]
+
+    open_source = after_rows[0] if after_rows else valid[0]
+    close_source = regular_rows[-1] if regular_rows else valid[-1]
+
+    prices_high = [
+        _get_high_price(r)
+        for r in valid
+        if _get_high_price(r) > 0
+    ]
+
+    prices_low = [
+        _get_low_price(r)
+        for r in valid
+        if _get_low_price(r) > 0
+    ]
+
+    combined = dict(close_source)
+
+    combined["open"] = _get_open_price(open_source)
+    combined["max"] = max(prices_high) if prices_high else _row_price(close_source)
+    combined["min"] = min(prices_low) if prices_low else _row_price(close_source)
+    combined["close"] = _row_price(close_source)
+    combined["volume"] = sum(_safe_int(r.get("volume")) for r in valid)
+
+    combined["trading_session"] = "all"
+    combined["_trade_date_norm"] = (
+        valid[0].get("_trade_date_norm")
+        or _normalize_trade_date(valid[0].get("date"))
+    )
+    combined["_contract_norm"] = (
+        valid[0].get("_contract_norm")
+        or _normalize_contract_date(valid[0].get("contract_date"))
+    )
+
+    for key in ["open_interest", "settlement_price"]:
+        for r in reversed(valid):
+            if r.get(key) not in (None, "", 0, "0"):
+                combined[key] = r.get(key)
+                break
+
+    return combined
+
+
+def _prepare_futures_kline_rows(
+    rows: list[dict],
+    selected_row: dict,
+    session_mode: str = "day",
+) -> list[dict]:
+    """
+    準備股票期貨 K 線資料。
+
+    day：
+    - 只畫日盤 / position
+
+    all：
+    - 每個交易日把日盤 + 盤後合併成一根全盤 K
+    """
+    session_mode = str(session_mode or "day").strip().lower()
+
+    if session_mode not in {"day", "all"}:
+        session_mode = "day"
+
+    contract = selected_row.get("_contract_norm") or _normalize_contract_date(
+        selected_row.get("contract_date")
+    )
+
+    if not contract:
+        return []
+
+    same_contract_rows: list[dict] = []
+
+    for r in rows or []:
+        r_contract = _normalize_contract_date(r.get("contract_date"))
+
+        if r_contract != contract:
+            continue
+
+        if not _is_valid_trade_row(r):
+            continue
+
+        item = dict(r)
+        item["_trade_date_norm"] = _normalize_trade_date(r.get("date"))
+        item["_contract_norm"] = r_contract
+
+        if not item["_trade_date_norm"]:
+            continue
+
+        same_contract_rows.append(item)
+
+    if not same_contract_rows:
+        return []
+
+    # 全盤：每個交易日合併日盤 + 盤後
+    if session_mode == "all":
+        grouped: dict[str, list[dict]] = {}
+
+        for r in same_contract_rows:
+            grouped.setdefault(r["_trade_date_norm"], []).append(r)
+
+        combined_rows: list[dict] = []
+
+        for trade_date in sorted(grouped):
+            combined = _combine_all_session_rows(grouped[trade_date])
+
+            if combined:
+                combined_rows.append(combined)
+
+        return combined_rows[-30:]
+
+    # 日盤：只取 regular / position
+    regular_rows = [
+        r for r in same_contract_rows
+        if _is_regular_session(_get_session_value(r))
+    ]
+
+    if not regular_rows:
+        return []
+
+    regular_rows = sorted(
+        regular_rows,
+        key=lambda r: r["_trade_date_norm"],
+    )
+
+    by_date: dict[str, dict] = {}
+
+    for r in regular_rows:
+        by_date[r["_trade_date_norm"]] = r
+
+    return list(by_date.values())[-30:]
+
 def get_stock_futures_snapshot(
     stock_id: str,
     stock_name: str,
