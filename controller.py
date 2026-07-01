@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df
+
 from typing import Any
 
 from services.chart_service import (
