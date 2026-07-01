@@ -300,6 +300,13 @@ def line_webhook():
             return jsonify({"status": "ok", "message": "no events"}), 200
 
         for event in events:
+            if event.get("deliveryContext", {}).get("isRedelivery"):
+                print(
+                    "LINE redelivery event ignored:",
+                    event.get("webhookEventId"),
+                    flush=True,
+                )
+                continue
             reply_token = str(event.get("replyToken", "")).strip()
 
             bot_payload = {
