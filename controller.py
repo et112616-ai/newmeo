@@ -547,6 +547,300 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
         },
     }
 
+def _market_future_session_buttons(active_action: str = "market_future_day") -> list[dict[str, Any]]:
+    active_action = str(active_action or "market_future_day").strip()
+
+    row = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label="日盤",
+                data="TAIEX,market_future_day,market_index,D",
+                active=active_action == "market_future_day",
+            ),
+            _postback_button(
+                label="全盤",
+                data="TAIEX,market_future_all,market_index,D",
+                active=active_action == "market_future_all",
+            ),
+        ],
+    }
+
+    return [row]
+
+
+def _build_market_future_placeholder_flex(
+    action: str = "market_future_day",
+) -> dict[str, Any]:
+    """
+    台指期暫時卡片。
+    保留這個函式是為了避免舊路由還在呼叫 placeholder 時爆掉。
+    """
+    session_text = "全盤" if action == "market_future_all" else "日盤"
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "台指期",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": f"TXF 近月｜{session_text}",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": f"台指期 {session_text} 模組已建立，下一步接 Shioaji TXF 即時資料。",
+            "size": "sm",
+            "color": "#666666",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "之後這裡會顯示：期貨價、漲跌、漲跌幅、開、高、低、量、更新時間。",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_index_buttons(action))
+    contents.extend(_market_future_session_buttons(action))
+
+    return {
+        "type": "flex",
+        "altText": "台指期",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
+
+def _build_market_future_realtime_flex(
+    snapshot,
+    action: str = "market_future_day",
+) -> dict[str, Any]:
+    """
+    台指期 TXF 即時卡片。
+    """
+
+    def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#888888",
+                    "flex": 3,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(value),
+                    "size": "sm",
+                    "color": color,
+                    "flex": 7,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    session_text = "全盤" if action == "market_future_all" else "日盤"
+
+    if not getattr(snapshot, "available", False):
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "台指期",
+                "size": "xxl",
+                "weight": "bold",
+                "color": "#111111",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": f"TXF 近月｜{session_text}",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#444444",
+                "margin": "sm",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": getattr(snapshot, "message", "查無台指期即時資料。"),
+                "size": "sm",
+                "color": "#666666",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+
+        contents.extend(_market_index_buttons(action))
+        contents.extend(_market_future_session_buttons(action))
+
+        return {
+            "type": "flex",
+            "altText": "台指期",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    change = getattr(snapshot, "future_change", 0.0)
+    change_pct = getattr(snapshot, "future_change_pct", 0.0)
+
+    change_color = "#FF2D2D" if change > 0 else "#00B050" if change < 0 else "#666666"
+
+    price_text = _fmt_market_price(getattr(snapshot, "future_price", 0.0))
+    change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
+
+    rows = [
+        (
+            "商品",
+            f"{getattr(snapshot, 'futures_name', '台指期近月')} ({getattr(snapshot, 'contract_code', 'TXFR1')})",
+            "#222222",
+        ),
+        ("時段", getattr(snapshot, "trading_session", session_text), "#222222"),
+        ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
+        ("更新", str(getattr(snapshot, "quote_time", "") or "--")[:19], "#888888"),
+        ("開", _fmt_market_price(getattr(snapshot, "open_price", 0.0)), "#222222"),
+        ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
+        ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
+        ("期貨", price_text, change_color),
+        ("漲", change_text, change_color),
+        ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
+    ]
+
+    buy_price = getattr(snapshot, "buy_price", 0.0)
+    sell_price = getattr(snapshot, "sell_price", 0.0)
+
+    if buy_price or sell_price:
+        rows.append(
+            (
+                "買賣",
+                f"{_fmt_market_price(buy_price)} / {_fmt_market_price(sell_price)}",
+                "#222222",
+            )
+        )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "台指期",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": f"TXF 近月｜{session_text}",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": price_text,
+            "size": "xxl",
+            "weight": "bold",
+            "color": change_color,
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": change_text,
+            "size": "md",
+            "weight": "bold",
+            "color": change_color,
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _info_row(label, value, color)
+                for label, value, color in rows
+            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_index_buttons(action))
+    contents.extend(_market_future_session_buttons(action))
+
+    return {
+        "type": "flex",
+        "altText": "台指期",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 def _build_market_index_placeholder_flex(
     action: str = "market_index",
 ) -> dict[str, Any]:
