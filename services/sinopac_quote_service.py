@@ -352,7 +352,16 @@ def append_stock_snapshot_to_intraday_df(df: pd.DataFrame, stock_id: str) -> pd.
 
         return result
 
-    SHIOAJI_FUTURES_SNAPSHOT_CACHE_TTL_SECONDS = 3
+    except Exception as exc:
+        _debug("append snapshot failed", stock_id, exc)
+        return df
+
+
+# =========================
+# Shioaji 期貨即時報價
+# =========================
+
+SHIOAJI_FUTURES_SNAPSHOT_CACHE_TTL_SECONDS = 3
 _SHIOAJI_FUTURES_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
