@@ -36,6 +36,31 @@ def _normalize_action(action: str | None) -> str:
     aliases = {
         "": "instant",
 
+        # 加權指數 / 大盤
+        "market_index": "market_index",
+        "index": "market_index",
+        "taiex": "market_index",
+        "大盤": "market_index",
+        "指數": "market_index",
+        "加權": "market_index",
+        "加權指數": "market_index",
+
+        "market_k": "market_k",
+        "index_k": "market_k",
+        "大盤k": "market_k",
+        "加權k": "market_k",
+        "加權k線": "market_k",
+
+        "market_chip": "market_chip",
+        "index_chip": "market_chip",
+        "大盤法人": "market_chip",
+        "加權法人": "market_chip",
+
+        "market_margin": "market_margin",
+        "index_margin": "market_margin",
+        "大盤融資券": "market_margin",
+        "加權融資券": "market_margin",
+        
         # 即時
         "realtime": "instant",
         "real_time": "instant",
@@ -211,6 +236,48 @@ def _time_buttons(stock_id: str, current_mode: str, current_tf: str) -> dict[str
         "contents": buttons,
     }
 
+def _market_index_buttons(active_action: str = "market_index") -> list[dict[str, Any]]:
+    active_action = str(active_action or "market_index").strip()
+
+    row1 = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label="即時",
+                data="TAIEX,market_index,market_index,D",
+                active=active_action == "market_index",
+            ),
+            _postback_button(
+                label="K線",
+                data="TAIEX,market_k,market_index,D",
+                active=active_action == "market_k",
+            ),
+        ],
+    }
+
+    row2 = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "sm",
+        "contents": [
+            _postback_button(
+                label="法人",
+                data="TAIEX,market_chip,market_index,D",
+                active=active_action == "market_chip",
+            ),
+            _postback_button(
+                label="融資券",
+                data="TAIEX,market_margin,market_index,D",
+                active=active_action == "market_margin",
+            ),
+        ],
+    }
+
+    return [row1, row2]
 
 def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict[str, Any]]:
     active_mode = _normalize_action(active_mode)
@@ -296,6 +363,83 @@ def _futures_session_buttons(
                 active=active_session == "all",
             ),
         ],
+    }
+
+def _build_market_index_placeholder_flex(
+    action: str = "market_index",
+) -> dict[str, Any]:
+    title_map = {
+        "market_index": "加權指數即時",
+        "market_k": "加權指數K線",
+        "market_chip": "加權指數法人",
+        "market_margin": "加權指數融資券",
+    }
+
+    message_map = {
+        "market_index": "加權指數即時模組已建立，下一步接 Shioaji 即時指數資料。",
+        "market_k": "加權指數K線模組已建立，下一步加入 5MA / 20MA / 60MA / 120MA 與成交量。",
+        "market_chip": "加權指數法人模組已建立，下一步接整體市場三大法人資料。",
+        "market_margin": "加權指數融資券模組已建立，下一步接整體市場融資融券資料。",
+    }
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "加權指數",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": title_map.get(action, "加權指數"),
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": message_map.get(action, "加權指數模組已建立。"),
+            "size": "sm",
+            "color": "#666666",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "關鍵字：大盤 / 指數 / 加權 / 加權指數 / TAIEX",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_index_buttons(action))
+
+    return {
+        "type": "flex",
+        "altText": "加權指數",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
     }
 
 def _build_chart_flex(
@@ -636,6 +780,36 @@ def _futures_session_buttons(
             ),
         ],
     }
+
+MARKET_INDEX_KEYWORDS = {
+    "大盤",
+    "指數",
+    "加權",
+    "加權指數",
+    "台股大盤",
+    "台灣加權",
+    "TAIEX",
+    "TWII",
+    "^TWII",
+}
+
+
+def _is_market_index_request(*values) -> bool:
+    for value in values:
+        text = str(value or "").strip()
+
+        if not text:
+            continue
+
+        upper_text = text.upper()
+
+        if upper_text in MARKET_INDEX_KEYWORDS:
+            return True
+
+        if text in MARKET_INDEX_KEYWORDS:
+            return True
+
+    return False
 
 def _build_futures_flex(
     stock_id: str,
@@ -985,6 +1159,25 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         current_mode = _normalize_action(req.current_mode or action)
         requested_tf = normalize_time_frame(req.time_frame)
 
+        # =========================
+        # 加權指數 / 大盤路由
+        # 必須放在 normalize_stock_input() 前面
+        # =========================
+        if (
+            action in {"market_index", "market_k", "market_chip", "market_margin"}
+            or _is_market_index_request(raw_stock, raw_text)
+        ):
+            if action not in {"market_index", "market_k", "market_chip", "market_margin"}:
+                action = "market_index"
+
+            return _reply_with_title(
+                "加權指數",
+                _build_market_index_placeholder_flex(action),
+            )
+
+        meta = normalize_stock_input(req.stock)
+        stock_name = get_stock_name(meta)
+        
         # 文字輸入預設是 instant，但 parser 可能給 D。
         # 即時圖只適合 1m / 5m，所以預設改成 1m。
         if action == "instant" and requested_tf not in {"1m", "5m"}:
