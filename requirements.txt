@@ -9,3 +9,4 @@ FinMind>=1.6.4
 gunicorn>=21.2.0
 twstock>=1.4.0
 supabase>=2.6.0
+shioaji
