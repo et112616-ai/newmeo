@@ -61,6 +61,21 @@ def _normalize_action(action: str | None) -> str:
         "index_margin": "market_margin",
         "大盤融資券": "market_margin",
         "加權融資券": "market_margin",
+
+        # 大盤 / 加權指數期貨：台指期 TXF
+        "market_future": "market_future_day",
+        "market_future_day": "market_future_day",
+        "market_future_all": "market_future_all",
+        "index_future": "market_future_day",
+        "taiex_future": "market_future_day",
+        "txf": "market_future_day",
+        "台指期": "market_future_day",
+        "大盤期貨": "market_future_day",
+        "加權期貨": "market_future_day",
+        "台指期日盤": "market_future_day",
+        "台指期全盤": "market_future_all",
+        "大盤期貨日盤": "market_future_day",
+        "大盤期貨全盤": "market_future_all",
         
         # 即時
         "realtime": "instant",
@@ -984,6 +999,13 @@ MARKET_INDEX_KEYWORDS = {
     "^TWII",
 }
 
+MARKET_INDEX_ACTIONS = {
+    "market_index",
+    "market_chip",
+    "market_margin",
+    "market_future_day",
+    "market_future_all",
+}
 
 def _is_market_index_request(*values) -> bool:
     for value in values:
@@ -1350,18 +1372,32 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # 必須放在 normalize_stock_input() 前面
         # =========================
         if (
-            action in {"market_index", "market_k", "market_chip", "market_margin"}
+             action in MARKET_INDEX_ACTIONS
             or _is_market_index_request(raw_stock, raw_text)
         ):
-            if action not in {"market_index", "market_k", "market_chip", "market_margin"}:
-                action = "market_index"
+            if action not in MARKET_INDEX_ACTIONS:
+                if _is_market_future_request(raw_stock, raw_text):
+                    action = "market_future_day"
+                else:
+                    action = "market_index"
 
             if action == "market_index":
                 snapshot = get_market_index_snapshot()
 
+                return _reply_with_title(
+                    "加權指數",
+                    _build_market_index_realtime_flex(snapshot),
+                )
+
+            if action in {"market_future_day", "market_future_all"}:
+                return _reply_with_title(
+                    "台指期",
+                _build_market_future_placeholder_flex(action),
+                )
+
             return _reply_with_title(
                 "加權指數",
-                _build_market_index_realtime_flex(snapshot),
+                _build_market_index_placeholder_flex(action),
             )
 
         return _reply_with_title(
