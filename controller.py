@@ -267,9 +267,9 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
                 active=active_action == "market_index",
             ),
             _postback_button(
-                label="K線",
-                data="TAIEX,market_k,market_index,D",
-                active=active_action == "market_k",
+                label="法人",
+                data="TAIEX,market_chip,market_index,D",
+                active=active_action == "market_chip",
             ),
         ],
     }
@@ -281,14 +281,14 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
         "margin": "sm",
         "contents": [
             _postback_button(
-                label="法人",
-                data="TAIEX,market_chip,market_index,D",
-                active=active_action == "market_chip",
-            ),
-            _postback_button(
                 label="融資券",
                 data="TAIEX,market_margin,market_index,D",
                 active=active_action == "market_margin",
+            ),
+            _postback_button(
+                label="期貨",
+                data="TAIEX,market_future_day,market_index,D",
+                active=active_action in {"market_future_day", "market_future_all"},
             ),
         ],
     }
