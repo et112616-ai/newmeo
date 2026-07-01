@@ -43,6 +43,7 @@ class FuturesSnapshot:
     contract_date: str = ""
     trade_date: str = ""
     trading_session: str = ""
+    chart_url: str = ""
 
     future_price: float = 0.0
     future_change: float = 0.0
@@ -55,6 +56,9 @@ class FuturesSnapshot:
     volume: int = 0
     open_interest: int = 0
     settlement_price: float = 0.0
+
+    quote_source: str = "日成交"
+    quote_time: str = ""
 
 
 # 第一版只放標準股票期貨，不放小型股票期貨。
@@ -529,6 +533,62 @@ def _resolve_stock_futures_candidates(
 
     return "", [], "none"
 
+def _pick_chart_anchor_row(rows: list[dict]) -> dict | None:
+    """
+    給 K 線圖用的 fallback row。
+
+    用途：
+    - 即時價格已經由 Shioaji 取得
+    - 但 FinMind 的日盤 / 全盤挑選沒有選到 selected_row
+    - 仍然用 FinMind 有效資料產生 K 線圖
+    """
+    valid_rows: list[dict] = []
+
+    for r in rows or []:
+        try:
+            if not _is_valid_trade_row(r):
+                continue
+        except Exception:
+            if _row_price(r) <= 0:
+                continue
+
+        trade_date = _normalize_trade_date(r.get("date"))
+        contract = _normalize_contract_date(r.get("contract_date"))
+
+        if not trade_date or not contract:
+            continue
+
+        item = dict(r)
+        item["_trade_date_norm"] = trade_date
+        item["_contract_norm"] = contract
+
+        valid_rows.append(item)
+
+    if not valid_rows:
+        return None
+
+    latest_date = max(r["_trade_date_norm"] for r in valid_rows)
+
+    latest_rows = [
+        r for r in valid_rows
+        if r["_trade_date_norm"] == latest_date
+    ]
+
+    if not latest_rows:
+        return valid_rows[-1]
+
+    near_contract = min(r["_contract_norm"] for r in latest_rows)
+
+    near_rows = [
+        r for r in latest_rows
+        if r["_contract_norm"] == near_contract
+    ]
+
+    if near_rows:
+        return near_rows[-1]
+
+    return latest_rows[-1]
+
 def get_stock_futures_snapshot(
     stock_id: str,
     stock_name: str,
@@ -644,6 +704,9 @@ def get_stock_futures_snapshot(
     selected_row: dict | None = None
     selected_rows: list[dict] = []
 
+    chart_source_rows: list[dict] = []
+    chart_source_futures_id = ""
+
     for fid in candidates:
         rows = _request_finmind_futures_daily(fid)
 
@@ -656,6 +719,11 @@ def get_stock_futures_snapshot(
 
         if not rows:
             continue
+                   
+        # 即使沒有選到日盤 row，也先保留一份給 K 線圖使用
+        if rows and not chart_source_rows:
+            chart_source_rows = rows
+            chart_source_futures_id = fid
 
         try:
             row = _pick_near_month_prefer_afterhours(
@@ -684,6 +752,17 @@ def get_stock_futures_snapshot(
     # =========================
     # 4. 如果 Shioaji 與 FinMind 都沒有，才失敗
     # =========================
+        # 如果有 FinMind rows 但沒有成功選到 selected_row，
+    # 仍然保留給 K 線圖使用。
+    if not selected_rows and chart_source_rows:
+        selected_rows = chart_source_rows
+
+    if not selected_futures_id and chart_source_futures_id:
+        selected_futures_id = chart_source_futures_id
+
+    if not selected_row and selected_rows:
+        selected_row = _pick_chart_anchor_row(selected_rows)
+    
     if not shioaji_quote and not selected_row:
         payload = {
             "available": False,
@@ -812,12 +891,24 @@ def get_stock_futures_snapshot(
     # =========================
     chart_url = ""
 
-    if selected_row and selected_rows:
+    chart_anchor_row = selected_row
+
+    if not chart_anchor_row and selected_rows:
+        chart_anchor_row = _pick_chart_anchor_row(selected_rows)
+
+    if chart_anchor_row and selected_rows:
         try:
             kline_rows = _prepare_futures_kline_rows(
                 selected_rows,
-                selected_row,
+                chart_anchor_row,
                 session_mode=session_mode,
+            )
+
+            print(
+                "DEBUG futures chart rows",
+                "| count=", len(kline_rows),
+                "| selected_futures_id=", selected_futures_id,
+                flush=True,
             )
 
             chart_url = _generate_futures_kline_chart(
@@ -834,7 +925,7 @@ def get_stock_futures_snapshot(
             try:
                 kline_rows = _prepare_futures_kline_rows(
                     selected_rows,
-                    selected_row,
+                    chart_anchor_row,
                 )
 
                 chart_url = _generate_futures_kline_chart(
@@ -859,22 +950,6 @@ def get_stock_futures_snapshot(
                 flush=True,
             )
 
-    print(
-        "DEBUG futures final",
-        "| stock=", sid,
-        "| futures_id=", selected_display_futures_id,
-        "| contract=", display_contract,
-        "| session=", display_session,
-        "| trade_date=", trade_date,
-        "| quote_source=", quote_source,
-        "| quote_time=", quote_time,
-        "| future_price=", future_price,
-        "| spot_price=", spot_price,
-        "| basis=", basis,
-        "| volume=", future_volume,
-        "| chart_url=", chart_url,
-        flush=True,
-    )
 
     # =========================
     # 9. 相容舊版 FuturesSnapshot dataclass
