@@ -12,7 +12,7 @@ from services.chart_service import (
 from services.chip_service import (
     get_institutional_chips,
     get_large_holder_table,
-    get_margin_tableF,
+    get_margin_table,
 )
 from services.futures_service import get_stock_futures_snapshot
 from services.market_index_service import get_market_index_snapshot
