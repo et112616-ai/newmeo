@@ -12,9 +12,10 @@ from services.chart_service import (
 from services.chip_service import (
     get_institutional_chips,
     get_large_holder_table,
-    get_margin_table,
+    get_margin_tableF,
 )
 from services.futures_service import get_stock_futures_snapshot
+from services.market_index_service import get_market_index_snapshot
 from services.stock_service import (
     build_price_meta,
     get_history,
@@ -363,6 +364,171 @@ def _futures_session_buttons(
                 active=active_session == "all",
             ),
         ],
+    }
+
+def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
+    """
+    加權指數即時卡片。
+    """
+
+    def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#888888",
+                    "flex": 3,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(value),
+                    "size": "sm",
+                    "color": color,
+                    "flex": 7,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    if not getattr(snapshot, "available", False):
+        contents = [
+            {
+                "type": "text",
+                "text": "加權指數",
+                "size": "xxl",
+                "weight": "bold",
+                "color": "#111111",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": "即時",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#444444",
+                "margin": "sm",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": getattr(snapshot, "message", "查無加權指數即時資料。"),
+                "size": "sm",
+                "color": "#666666",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+
+        contents.extend(_market_index_buttons("market_index"))
+
+        return {
+            "type": "flex",
+            "altText": "加權指數即時",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    change = getattr(snapshot, "change", 0.0)
+    change_pct = getattr(snapshot, "change_pct", 0.0)
+
+    change_color = "#FF2D2D" if change > 0 else "#00B050" if change < 0 else "#666666"
+
+    close_text = _fmt_market_price(getattr(snapshot, "close_price", 0.0))
+    change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
+
+    rows = [
+        ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
+        ("更新", str(getattr(snapshot, "quote_time", "") or "--")[:19], "#888888"),
+        ("開", _fmt_market_price(getattr(snapshot, "open_price", 0.0)), "#222222"),
+        ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
+        ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
+        ("收", close_text, change_color),
+        ("漲", change_text, change_color),
+        ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
+    ]
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "加權指數",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": close_text,
+            "size": "xxl",
+            "weight": "bold",
+            "color": change_color,
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": change_text,
+            "size": "md",
+            "weight": "bold",
+            "color": change_color,
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _info_row(label, value, color)
+                for label, value, color in rows
+            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_index_buttons("market_index"))
+
+    return {
+        "type": "flex",
+        "altText": "加權指數即時",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
     }
 
 def _build_market_index_placeholder_flex(
@@ -1165,10 +1331,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if action not in {"market_index", "market_k", "market_chip", "market_margin"}:
                 action = "market_index"
 
+            if action == "market_index":
+                snapshot = get_market_index_snapshot()
+
             return _reply_with_title(
                 "加權指數",
-                _build_market_index_placeholder_flex(action),
+                _build_market_index_realtime_flex(snapshot),
             )
+
+        return _reply_with_title(
+            "加權指數",
+            _build_market_index_placeholder_flex(action),
+        )
 
         meta = normalize_stock_input(req.stock)
         stock_name = get_stock_name(meta)
