@@ -352,6 +352,187 @@ def append_stock_snapshot_to_intraday_df(df: pd.DataFrame, stock_id: str) -> pd.
 
         return result
 
+    SHIOAJI_FUTURES_SNAPSHOT_CACHE_TTL_SECONDS = 3
+_SHIOAJI_FUTURES_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _normalize_futures_yyyymm(value: Any) -> str:
+    text = str(value or "").strip()
+
+    if not text:
+        return ""
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+
+    if len(digits) >= 6:
+        return digits[:6]
+
+    return ""
+
+
+def _try_get_contract(container, code: str):
+    if container is None:
+        return None
+
+    code = str(code or "").strip()
+
+    if not code:
+        return None
+
+    try:
+        return container[code]
+    except Exception:
+        pass
+
+    try:
+        return getattr(container, code)
+    except Exception:
+        pass
+
+    return None
+
+
+def _get_futures_contract(api, futures_id: str, contract_date: str = ""):
+    """
+    取得股票期貨 contract。
+
+    優先：
+    1. 指定月份，例如 CCF202607
+    2. 連續近月，例如 CCFR1
+    3. base code，例如 CCF
+    """
+    base = str(futures_id or "").strip().upper()
+    yyyymm = _normalize_futures_yyyymm(contract_date)
+
+    if not base:
+        return None
+
+    futures_root = getattr(api.Contracts, "Futures", None)
+
+    if futures_root is None:
+        return None
+
+    group = _try_get_contract(futures_root, base)
+
+    candidates: list[str] = []
+
+    if yyyymm:
+        candidates.append(f"{base}{yyyymm}")
+
+    candidates.extend(
+        [
+            f"{base}R1",
+            f"{base}R2",
+            base,
+        ]
+    )
+
+    for code in candidates:
+        contract = _try_get_contract(group, code)
+
+        if contract is not None:
+            return contract
+
+        contract = _try_get_contract(futures_root, code)
+
+        if contract is not None:
+            return contract
+
+    return None
+
+
+def get_futures_snapshot(
+    futures_id: str,
+    contract_date: str = "",
+) -> dict[str, Any] | None:
+    """
+    查期貨即時 snapshot。
+
+    回傳純 dict，不能放 Shioaji 原始物件，避免 TickType deepcopy 錯誤。
+    """
+    fid = str(futures_id or "").strip().upper()
+    yyyymm = _normalize_futures_yyyymm(contract_date)
+
+    if not fid:
+        return None
+
+    cache_key = f"{fid}:{yyyymm or 'R1'}"
+    now = time.time()
+
+    cached = _SHIOAJI_FUTURES_SNAPSHOT_CACHE.get(cache_key)
+
+    if cached:
+        ts, data = cached
+
+        if now - ts <= SHIOAJI_FUTURES_SNAPSHOT_CACHE_TTL_SECONDS:
+            return data
+
+    api = get_api()
+
+    if api is None:
+        return None
+
+    contract = _get_futures_contract(
+        api,
+        futures_id=fid,
+        contract_date=yyyymm,
+    )
+
+    if contract is None:
+        _debug("futures contract not found", fid, yyyymm)
+        return None
+
+    try:
+        snapshots = api.snapshots([contract])
+
+        if not snapshots:
+            return None
+
+        raw = _to_dict(snapshots[0])
+
+        close = _safe_float(raw.get("close"))
+
+        if close <= 0:
+            return None
+
+        data = {
+            "futures_id": str(raw.get("code") or fid),
+            "close": close,
+            "change": _safe_float(raw.get("change_price")),
+            "change_pct": _safe_float(raw.get("change_rate")),
+            "open": _safe_float(raw.get("open")),
+            "high": _safe_float(raw.get("high")),
+            "low": _safe_float(raw.get("low")),
+            "volume": _safe_int(raw.get("volume")),
+            "total_volume": _safe_int(raw.get("total_volume")),
+            "buy_price": _safe_float(raw.get("buy_price")),
+            "sell_price": _safe_float(raw.get("sell_price")),
+            "ts": _normalize_ts(raw.get("ts")),
+            "source": "Shioaji",
+        }
+
+        _SHIOAJI_FUTURES_SNAPSHOT_CACHE[cache_key] = (now, data)
+
+        _debug(
+            "futures snapshot",
+            fid,
+            yyyymm,
+            "contract =",
+            data["futures_id"],
+            "close =",
+            data["close"],
+            "change =",
+            data["change"],
+            "change_pct =",
+            data["change_pct"],
+            "total_volume =",
+            data["total_volume"],
+            "ts =",
+            data["ts"],
+        )
+
+        return data
+
     except Exception as exc:
-        _debug("append snapshot failed", stock_id, exc)
-        return df
+        _debug("futures snapshot failed", fid, yyyymm, exc)
+        return None
