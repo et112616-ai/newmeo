@@ -9,6 +9,15 @@ import yfinance as yf
 
 from config import FINMIND_TOKEN
 
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from services.upload_service import publish_figure
+
 try:
     from services.futures_map_service import get_stock_futures_mapping
 except Exception:
@@ -825,6 +834,141 @@ def _prepare_futures_kline_rows(
         by_date[r["_trade_date_norm"]] = r
 
     return list(by_date.values())[-30:]
+
+def _generate_futures_kline_chart(
+    rows: list[dict],
+    futures_id: str,
+    futures_name: str,
+    contract_date: str,
+    session: str,
+) -> str:
+    """
+    產生股票期貨 K 線圖（含成交量）。
+    """
+    if not rows:
+        return ""
+
+    chart_rows = []
+
+    for r in rows:
+        date = _normalize_trade_date(r.get("date"))
+        close = _row_price(r)
+
+        if not date or close <= 0:
+            continue
+
+        open_price = _safe_float(r.get("open") or r.get("Open") or close)
+        high_price = _safe_float(r.get("max") or r.get("high") or r.get("High") or close)
+        low_price = _safe_float(r.get("min") or r.get("low") or r.get("Low") or close)
+        volume = _safe_int(r.get("volume"))
+
+        if open_price <= 0:
+            open_price = close
+
+        if high_price <= 0:
+            high_price = max(open_price, close)
+
+        if low_price <= 0:
+            low_price = min(open_price, close)
+
+        chart_rows.append(
+            {
+                "date": date,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close,
+                "volume": volume,
+            }
+        )
+
+    if not chart_rows:
+        return ""
+
+    df = pd.DataFrame(chart_rows)
+
+    fig = plt.figure(figsize=(7.2, 5.8), dpi=130, facecolor="white")
+    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.06)
+
+    ax_k = fig.add_subplot(gs[0])
+    ax_v = fig.add_subplot(gs[1], sharex=ax_k)
+
+    ax_k.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
+
+    x = list(range(len(df)))
+    width = 0.58
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+
+        o = float(row["open"])
+        h = float(row["high"])
+        l = float(row["low"])
+        c = float(row["close"])
+
+        color = "#FF3B30" if c >= o else "#34C759"
+
+        # 上下影線
+        ax_k.vlines(i, l, h, linewidth=1.0, color=color)
+
+        # K棒實體
+        lower = min(o, c)
+        height = abs(c - o)
+        if height <= 0:
+            height = 0.01
+
+        ax_k.bar(
+            i,
+            height,
+            bottom=lower,
+            width=width,
+            color=color,
+            align="center",
+        )
+
+        # 成交量
+        ax_v.bar(
+            i,
+            int(row["volume"]),
+            width=width,
+            color=color,
+        )
+
+    session_label = "全盤" if session == "盤後" else "日盤"
+
+    ax_k.set_title(
+        f"{futures_name} {contract_date} {session_label}",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    ax_k.grid(True, linestyle=":", alpha=0.4)
+    ax_v.grid(True, linestyle=":", alpha=0.35)
+
+    ax_v.set_ylabel("成交量", fontsize=9)
+
+    labels = [str(d)[5:] for d in df["date"].tolist()]
+    step = max(1, len(labels) // 6)
+    ticks = list(range(0, len(labels), step))
+
+    ax_v.set_xticks(ticks)
+    ax_v.set_xticklabels(
+        [labels[i] for i in ticks],
+        rotation=0,
+        fontsize=8,
+    )
+
+    plt.setp(ax_k.get_xticklabels(), visible=False)
+
+    ax_k.spines["top"].set_visible(False)
+    ax_k.spines["right"].set_visible(False)
+    ax_v.spines["top"].set_visible(False)
+    ax_v.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+
+    return publish_figure(fig, f"{futures_id}_futures_kline")
 
 def get_stock_futures_snapshot(
     stock_id: str,
