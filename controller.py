@@ -1145,19 +1145,14 @@ def _reply_with_title(title: str, message: dict[str, Any]) -> list[dict[str, Any
 def handle_request(req: BotRequest) -> dict[str, Any]:
     """
     LINE / Make 進來後的主控制器。
-
-    重要修正：
-    - get_history() 回傳的 tf 要傳給 build_price_meta()
-    - 1m / 5m 的漲跌幅改用平盤價計算
-    - 即時圖預設使用 1m
     """
     try:
-        meta = normalize_stock_input(req.stock)
-        stock_name = get_stock_name(meta)
-
         action = _normalize_action(req.action)
         current_mode = _normalize_action(req.current_mode or action)
         requested_tf = normalize_time_frame(req.time_frame)
+
+        raw_stock = str(getattr(req, "stock", "") or "").strip()
+        raw_text = str(getattr(req, "raw_text", "") or "").strip()
 
         # =========================
         # 加權指數 / 大盤路由
