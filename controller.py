@@ -15,6 +15,7 @@ from services.chip_service import (
     get_margin_table,
 )
 from services.futures_service import get_stock_futures_snapshot
+from services.market_future_service import get_market_future_snapshot
 from services.market_index_service import get_market_index_snapshot
 from services.stock_service import (
     build_price_meta,
@@ -1395,7 +1396,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # 必須放在 normalize_stock_input() 前面
         # =========================
         if (
-             action in MARKET_INDEX_ACTIONS
+            action in MARKET_INDEX_ACTIONS
             or _is_market_index_request(raw_stock, raw_text)
         ):
             if action not in MARKET_INDEX_ACTIONS:
@@ -1413,20 +1414,19 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             if action in {"market_future_day", "market_future_all"}:
+                session_mode = "all" if action == "market_future_all" else "day"
+
+                snapshot = get_market_future_snapshot(session_mode=session_mode)
+
                 return _reply_with_title(
                     "台指期",
-                _build_market_future_placeholder_flex(action),
+                    _build_market_future_realtime_flex(snapshot, action),
                 )
 
             return _reply_with_title(
                 "加權指數",
                 _build_market_index_placeholder_flex(action),
             )
-
-        return _reply_with_title(
-            "加權指數",
-            _build_market_index_placeholder_flex(action),
-        )
 
         meta = normalize_stock_input(req.stock)
         stock_name = get_stock_name(meta)
