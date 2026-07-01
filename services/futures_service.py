@@ -776,6 +776,7 @@ def _pick_near_month_prefer_afterhours(
 
     day：
     - 只選日盤 / position
+    - 不再 fallback 到 after_market
 
     all：
     - 同一交易日、同一近月契約，把日盤 + 盤後合併成全盤
@@ -805,6 +806,51 @@ def _pick_near_month_prefer_afterhours(
     if not valid_rows:
         return None
 
+    # =========================
+    # day mode：只找日盤 / position
+    # =========================
+    if session_mode == "day":
+        day_rows = [
+            r for r in valid_rows
+            if _is_regular_session(_get_session_value(r))
+        ]
+
+        if not day_rows:
+            _debug("day-session no regular rows")
+            return None
+
+        latest_date = max(r["_trade_date_norm"] for r in day_rows)
+
+        latest_rows = [
+            r for r in day_rows
+            if r["_trade_date_norm"] == latest_date
+        ]
+
+        near_contract = min(r["_contract_norm"] for r in latest_rows)
+
+        near_rows = [
+            r for r in latest_rows
+            if r["_contract_norm"] == near_contract
+        ]
+
+        if not near_rows:
+            return None
+
+        _debug(
+            "choose day-session",
+            "latest_date =",
+            latest_date,
+            "near_contract =",
+            near_contract,
+            "regular_rows =",
+            len(near_rows),
+        )
+
+        return near_rows[-1]
+
+    # =========================
+    # all mode：全盤合併
+    # =========================
     latest_date = max(r["_trade_date_norm"] for r in valid_rows)
 
     latest_rows = [
@@ -825,54 +871,21 @@ def _pick_near_month_prefer_afterhours(
     if not near_rows:
         return None
 
-    if session_mode == "all":
-        combined = _combine_all_session_rows(near_rows)
+    combined = _combine_all_session_rows(near_rows)
 
-        _debug(
-            "choose all-session",
-            "latest_date =",
-            latest_date,
-            "near_contract =",
-            near_contract,
-            "rows =",
-            len(near_rows),
-            "combined =",
-            combined,
-        )
-
-        return combined
-
-    # day mode：只取日盤 / position
-    regular_rows = [
-        r for r in near_rows
-        if _is_regular_session(_get_session_value(r))
-    ]
-
-    if regular_rows:
-        _debug(
-            "choose day-session",
-            "latest_date =",
-            latest_date,
-            "near_contract =",
-            near_contract,
-            "regular_rows =",
-            len(regular_rows),
-        )
-        return regular_rows[-1]
-
-    # fallback：如果真的沒有日盤，才用近月最後一筆
     _debug(
-        "day-session fallback",
+        "choose all-session",
         "latest_date =",
         latest_date,
         "near_contract =",
         near_contract,
-        "near_rows =",
+        "rows =",
         len(near_rows),
+        "combined =",
+        combined,
     )
 
-    return near_rows[-1]
-
+    return combined
 def _prepare_futures_kline_rows(
     rows: list[dict],
     selected_row: dict,
@@ -1103,7 +1116,13 @@ def _generate_futures_kline_chart(
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    fig.tight_layout()
+    fig.subplots_adjust(
+        left=0.10,
+        right=0.96,
+        top=0.90,
+        bottom=0.12,
+        hspace=0.08,
+    )
 
     return publish_figure(fig, f"{futures_id}_futures_kline")
 
