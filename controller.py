@@ -1024,6 +1024,29 @@ def _is_market_index_request(*values) -> bool:
 
     return False
 
+def _is_market_future_request(*values) -> bool:
+    keywords = {
+        "TXF",
+        "台指期",
+        "大盤期貨",
+        "加權期貨",
+        "台指期貨",
+    }
+
+    for value in values:
+        text = str(value or "").strip()
+
+        if not text:
+            continue
+
+        if text.upper() in keywords:
+            return True
+
+        if text in keywords:
+            return True
+
+    return False
+
 def _build_futures_flex(
     stock_id: str,
     stock_name: str,
