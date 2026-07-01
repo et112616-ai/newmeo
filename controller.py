@@ -888,6 +888,31 @@ def _build_margin_flex(
         },
     }
 
+def _fmt_market_price(value) -> str:
+    try:
+        num = float(value)
+
+        if num == 0:
+            return "--"
+
+        return f"{num:,.2f}"
+
+    except Exception:
+        return "--"
+
+
+def _fmt_market_int(value) -> str:
+    try:
+        num = int(float(value))
+
+        if num == 0:
+            return "--"
+
+        return f"{num:,}"
+
+    except Exception:
+        return "--"
+
 def _fmt_price(value: float) -> str:
     try:
         return f"{float(value):,.2f}"
