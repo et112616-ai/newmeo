@@ -145,15 +145,24 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     if df.empty:
         return _empty_chart(f"{stock_id}", "No intraday data")
 
-    fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
-    ax.set_facecolor("#F8F9FA")
+    df = df.copy()
+
+    fig = plt.figure(figsize=(7.2, 6.2), dpi=120, facecolor="white")
+    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+
+    ax_p = fig.add_subplot(gs[0])
+    ax_v = fig.add_subplot(gs[1], sharex=ax_p)
+
+    ax_p.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
 
     close = df["Close"].astype(float)
     ref_price = _get_reference_price(df)
 
-    ax.plot(df.index, close, linewidth=2.2, label="Price")
+    # ===== 上方價格線 =====
+    ax_p.plot(df.index, close, linewidth=2.0, label="Price")
 
-    ax.fill_between(
+    ax_p.fill_between(
         df.index,
         close,
         ref_price,
@@ -162,7 +171,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         interpolate=True,
     )
 
-    ax.fill_between(
+    ax_p.fill_between(
         df.index,
         close,
         ref_price,
@@ -171,18 +180,36 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         interpolate=True,
     )
 
-    ax.set_title(f"{stock_id} Intraday", fontsize=13, fontweight="bold")
+    ax_p.set_title(f"{stock_id} {stock_name} 即時走勢", fontsize=13, fontweight="bold")
 
-    _set_tw_stock_intraday_axis(ax, df)
-    _set_centered_price_axis(ax, df)
+    _set_tw_stock_intraday_axis(ax_p, df)
+    _set_centered_price_axis(ax_p, df)
 
-    ax.grid(True, linestyle=":", alpha=0.55)
-    ax.legend(loc="best", fontsize=8)
+    ax_p.grid(True, linestyle=":", alpha=0.55)
+    ax_p.legend(loc="best", fontsize=8)
 
-    fig.autofmt_xdate()
+    # ===== 下方成交量 =====
+    volumes = df["Volume"].fillna(0).astype(float)
+
+    prev_close = close.shift(1)
+    colors = [
+        "#FF3B30" if i == 0 or close.iloc[i] >= prev_close.iloc[i] else "#34C759"
+        for i in range(len(close))
+    ]
+
+    ax_v.bar(df.index, volumes, color=colors, width=0.0009)
+
+    _set_tw_stock_intraday_axis(ax_v, df)
+
+    ax_v.grid(True, linestyle=":", alpha=0.45)
+    ax_v.set_ylabel("Volume", fontsize=8)
+
+    plt.setp(ax_p.get_xticklabels(), visible=False)
+
     fig.tight_layout()
 
     return publish_figure(fig, f"{stock_id}_instant")
+    
 def _fmt_ma_value(value) -> str:
     try:
         if value is None or pd.isna(value):
