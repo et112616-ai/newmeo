@@ -767,78 +767,53 @@ def get_stock_name(meta: StockMeta) -> str:
     return meta.stock_id
     
 def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
-    if df.empty:
+    """
+    價格資訊。
+
+    規則：
+    - 1m / 5m：最新價、時間 一律以 intraday df 最後一筆為準
+    - 漲跌幅 = 最新價 vs 平盤價(reference_price)
+    - D / W / M：最新一根 vs 前一根
+    """
+    if df is None or df.empty:
         return PriceMeta("--", "--", "--", 0.0, 0.0)
 
     tf = normalize_time_frame(time_frame)
 
-    latest = _get_latest_price_from_df(df)
+    latest = float(df["Close"].iloc[-1])
 
     if tf in {"1m", "5m"}:
-        prev = _get_reference_price_from_df(df)
+        ref_price = df.attrs.get("reference_price")
+
+        try:
+            prev = float(ref_price)
+        except Exception:
+            prev = 0.0
 
         if not prev:
-            prev = latest
+            try:
+                prev = float(df["Open"].iloc[0])
+            except Exception:
+                prev = latest
 
-    else:
-        prev = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
+        change = latest - prev
+        pct = (change / prev * 100) if prev else 0.0
 
+        stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
+
+        return PriceMeta(
+            price_info=f"{latest:.2f}",
+            change_info=f"{signed_number(change)} ({signed_percent(pct)})",
+            time_stamp=stamp,
+            price_change=change,
+            latest_price=latest,
+        )
+
+    # D / W / M
+    prev = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
     change = latest - prev
     pct = (change / prev * 100) if prev else 0.0
-
-    if tf in {"1m", "5m"}:
-        display_stamp = df.attrs.get("display_timestamp")
-
-        if not display_stamp and DISPLAY_TIMESTAMP_COL in df.columns:
-            try:
-                s = df[DISPLAY_TIMESTAMP_COL].dropna()
-
-                if not s.empty:
-                    display_stamp = str(s.iloc[-1])
-
-            except Exception:
-                display_stamp = ""
-
-        if display_stamp:
-            stamp = str(display_stamp)
-        else:
-            last_ts = df.index[-1]
-
-            try:
-                now_tpe = datetime.now(ZoneInfo("Asia/Taipei"))
-                trade_date = last_ts.date()
-
-                if (
-                    last_ts.time() >= time(13, 20)
-                    and (
-                        trade_date < now_tpe.date()
-                        or (
-                            trade_date == now_tpe.date()
-                            and now_tpe.time() >= time(13, 35)
-                        )
-                    )
-                ):
-                    stamp = f"{trade_date.strftime('%Y-%m-%d')} 13:30"
-                else:
-                    stamp = last_ts.strftime("%Y-%m-%d %H:%M")
-
-            except Exception:
-                stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
-
-    else:
-        stamp = df.index[-1].strftime("%Y-%m-%d")
-
-    print(
-        STOCK_SERVICE_VERSION,
-        "| build_price_meta",
-        "| tf=", tf,
-        "| latest=", latest,
-        "| reference/prev=", prev,
-        "| change=", change,
-        "| pct=", pct,
-        "| stamp=", stamp,
-        "| attrs=", df.attrs,
-    )
+    stamp = df.index[-1].strftime("%Y-%m-%d")
 
     return PriceMeta(
         price_info=f"{latest:.2f}",
@@ -847,3 +822,4 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
         price_change=change,
         latest_price=latest,
     )
+    
