@@ -999,7 +999,9 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         if action in {"instant", "k_line", "chip"}:
             df, tf = _get_history_df_tf(meta, requested_tf)
 
-            # 關鍵：一定要用 get_history 回傳的 tf
+            if tf in {"1m", "5m"}:
+                df = append_stock_snapshot_to_intraday_df(df, meta.stock_id)
+            
             price_meta = build_price_meta(df, tf)
 
             if action == "instant":
