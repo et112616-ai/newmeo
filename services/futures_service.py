@@ -10,21 +10,20 @@ import yfinance as yf
 from config import FINMIND_TOKEN
 
 try:
-    from services.sinopac_quote_service import (
-        get_futures_snapshot as get_shioaji_futures_snapshot,
-        get_stock_snapshot as get_shioaji_stock_snapshot,
-    )
-
-try:
     from services.futures_map_service import get_stock_futures_mapping
 except Exception:
     def get_stock_futures_mapping(stock_id: str):
         return None
 
+
+try:
+    from services.sinopac_quote_service import (
+        get_futures_snapshot as get_shioaji_futures_snapshot,
+        get_stock_snapshot as get_shioaji_stock_snapshot,
+    )
 except Exception:
     def get_shioaji_futures_snapshot(futures_id: str, contract_date: str = ""):
         return None
-
     def get_shioaji_stock_snapshot(stock_id: str):
         return None
 
