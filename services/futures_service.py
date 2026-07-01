@@ -679,6 +679,65 @@ def _combine_all_session_rows(rows: list[dict]) -> dict | None:
 
     return combined
 
+def _get_session_value(row: dict) -> str:
+    for key in [
+        "trading_session",
+        "TradingSession",
+        "session",
+        "tradingSession",
+        "交易時段",
+    ]:
+        value = row.get(key)
+
+        if value not in (None, ""):
+            return str(value)
+
+    return ""
+
+
+def _is_afterhours_session(value) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        "after" in text
+        or "night" in text
+        or "盤後" in text
+        or "夜盤" in text
+    )
+
+
+def _is_regular_session(value) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        "regular" in text
+        or "day" in text
+        or "一般" in text
+        or "日盤" in text
+        or "position" in text
+    )
+
+
+def _is_valid_trade_row(row: dict) -> bool:
+    """
+    只保留有效的單一契約交易資料。
+
+    排除：
+    - 跨月價差，例如 202609/202612
+    - contract_date 空白 / 全月份
+    - 價格為 0
+    """
+    contract = _normalize_contract_date(row.get("contract_date"))
+
+    if not contract:
+        return False
+
+    price = _row_price(row)
+
+    if price <= 0:
+        return False
+
+    return True
 
 def _prepare_futures_kline_rows(
     rows: list[dict],
