@@ -1336,7 +1336,7 @@ def get_stock_futures_snapshot(
                     future_change = calc_change
                     future_change_pct = calc_change_pct
 
-            chart_url = _generate_futures_kline_chart(
+              chart_url = _generate_futures_kline_chart(
                 rows=kline_rows,
                 futures_id=selected_futures_id,
                 futures_name=futures_name,
