@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df
+from services.market_margin_service import get_market_margin_snapshot
 
 from typing import Any
 
@@ -135,6 +136,307 @@ def _normalize_action(action: str | None) -> str:
 
     return aliases.get(action, action)
 
+def _fmt_margin_int(value, signed: bool = False) -> str:
+    try:
+        num = int(float(value))
+
+        if signed:
+            sign = "+" if num > 0 else ""
+            return f"{sign}{num:,}"
+
+        return f"{num:,}"
+
+    except Exception:
+        return "--"
+
+
+def _fmt_margin_money_yi(value, signed: bool = False) -> str:
+    try:
+        num = float(value) / 100_000_000
+
+        if signed:
+            sign = "+" if num > 0 else ""
+            return f"{sign}{num:,.2f} 億"
+
+        return f"{num:,.2f} 億"
+
+    except Exception:
+        return "--"
+
+
+def _fmt_margin_ratio(value) -> str:
+    try:
+        return f"{float(value):.2f}%"
+    except Exception:
+        return "--"
+
+
+def _margin_change_color(value) -> str:
+    try:
+        num = float(value)
+
+        if num > 0:
+            return "#FF2D2D"
+
+        if num < 0:
+            return "#00B050"
+
+    except Exception:
+        pass
+
+    return "#666666"
+
+
+def _fmt_margin_mmdd(date_text: str) -> str:
+    text = str(date_text or "").strip()
+
+    if len(text) >= 10 and "-" in text:
+        return text[5:10].replace("-", "/")
+
+    return text.replace("-", "/")
+
+
+def _build_market_margin_flex(snapshot) -> dict[str, Any]:
+    """
+    大盤融資券卡片。
+    """
+
+    def _summary_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#666666",
+                    "flex": 4,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(value),
+                    "size": "sm",
+                    "color": color,
+                    "weight": "bold",
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def _cell(
+        text: str,
+        flex: int,
+        color: str = "#333333",
+        weight: str = "regular",
+        align: str = "end",
+    ) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "text": str(text),
+            "size": "xs",
+            "color": color,
+            "weight": weight,
+            "flex": flex,
+            "align": align,
+            "wrap": True,
+        }
+
+    def _table_header() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "backgroundColor": "#EEF1F4",
+            "cornerRadius": "sm",
+            "contents": [
+                _cell("日期", 2, "#555555", "bold", "start"),
+                _cell("融資增減", 3, "#555555", "bold", "end"),
+                _cell("融券增減", 3, "#555555", "bold", "end"),
+                _cell("資券比", 2, "#555555", "bold", "end"),
+            ],
+        }
+
+    def _table_row(item: dict) -> dict[str, Any]:
+        margin_change = int(item.get("margin_change") or 0)
+        short_change = int(item.get("short_change") or 0)
+        ratio = float(item.get("margin_short_ratio") or 0)
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "contents": [
+                _cell(_fmt_margin_mmdd(item.get("date", "--")), 2, "#333333", "regular", "start"),
+                _cell(_fmt_margin_int(margin_change, signed=True), 3, _margin_change_color(margin_change)),
+                _cell(_fmt_margin_int(short_change, signed=True), 3, _margin_change_color(short_change)),
+                _cell(_fmt_margin_ratio(ratio), 2, "#333333"),
+            ],
+        }
+
+    if not getattr(snapshot, "available", False):
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "大盤融資券",
+                "size": "xxl",
+                "weight": "bold",
+                "color": "#111111",
+                "wrap": True,
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": getattr(snapshot, "message", "查無大盤融資券資料。"),
+                "size": "sm",
+                "color": "#666666",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+
+        contents.extend(_market_index_buttons("market_margin"))
+
+        return {
+            "type": "flex",
+            "altText": "大盤融資券",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    latest_date = str(getattr(snapshot, "latest_date", "") or "--")
+
+    margin_balance = int(getattr(snapshot, "margin_balance", 0) or 0)
+    margin_change = int(getattr(snapshot, "margin_change", 0) or 0)
+    margin_money_balance = int(getattr(snapshot, "margin_money_balance", 0) or 0)
+    margin_money_change = int(getattr(snapshot, "margin_money_change", 0) or 0)
+
+    short_balance = int(getattr(snapshot, "short_balance", 0) or 0)
+    short_change = int(getattr(snapshot, "short_change", 0) or 0)
+
+    ratio = float(getattr(snapshot, "margin_short_ratio", 0.0) or 0.0)
+
+    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
+    recent_rows = list(reversed(recent_rows))
+
+    table_contents: list[dict[str, Any]] = [_table_header()]
+
+    if recent_rows:
+        for item in recent_rows:
+            table_contents.append(_table_row(item))
+    else:
+        table_contents.append(
+            {
+                "type": "text",
+                "text": "暫無近5日資料",
+                "size": "sm",
+                "color": "#999999",
+                "margin": "sm",
+            }
+        )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "大盤融資券",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": f"最新日期：{latest_date}",
+            "size": "sm",
+            "color": "#666666",
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _summary_row("融資餘額", _fmt_margin_int(margin_balance), "#222222"),
+                _summary_row("融資增減", _fmt_margin_int(margin_change, signed=True), _margin_change_color(margin_change)),
+                _summary_row("融券餘額", _fmt_margin_int(short_balance), "#222222"),
+                _summary_row("融券增減", _fmt_margin_int(short_change, signed=True), _margin_change_color(short_change)),
+                _summary_row("資券比", _fmt_margin_ratio(ratio), "#222222"),
+                _summary_row("融資金額", _fmt_margin_money_yi(margin_money_balance), "#222222"),
+                _summary_row("融資金額增減", _fmt_margin_money_yi(margin_money_change, signed=True), _margin_change_color(margin_money_change)),
+            ],
+        },
+        {
+            "type": "text",
+            "text": "近5日融資融券變化",
+            "size": "md",
+            "weight": "bold",
+            "color": "#222222",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "xs",
+            "margin": "sm",
+            "paddingAll": "6px",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "md",
+            "contents": table_contents,
+        },
+        {
+            "type": "text",
+            "text": "融資/融券單位：張；融資金額單位：元換算億元；盤後資料。",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_index_buttons("market_margin"))
+
+    return {
+        "type": "flex",
+        "altText": "大盤融資券",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 def _fmt_market_chip_yi(value) -> str:
     try:
         num = float(value)
@@ -142,7 +444,6 @@ def _fmt_market_chip_yi(value) -> str:
         return f"{sign}{num:,.2f} 億"
     except Exception:
         return "--"
-
 
 def _market_chip_color(value) -> str:
     try:
@@ -2055,7 +2356,15 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "大盤法人",
                 _build_market_chip_flex(snapshot),
                 )
-           
+
+            if action == "market_margin":
+                snapshot = get_market_margin_snapshot()
+
+                return _reply_with_title(
+                "大盤融資券",
+                _build_market_margin_flex(snapshot),
+                )
+            
             if action in {"market_future_day", "market_future_all"}:
                 session_mode = "all" if action == "market_future_all" else "day"
 
