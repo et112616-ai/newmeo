@@ -1,5 +1,8 @@
 from __future__ import annotations
 from services.futures_map_service import sync_stock_futures_map_from_taifex
+from services.market_index_service import get_market_index_snapshot
+from services.market_future_service import get_market_future_snapshot
+from services.sinopac_quote_service import get_stock_snapshot
 
 import base64
 import hashlib
@@ -133,6 +136,155 @@ def reply_to_line(reply_token: str, messages: list[dict[str, Any]]) -> None:
         print("LINE reply failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
 
+@app.route("/warmup_all", methods=["GET"])
+def warmup_all():
+    """
+    預熱 LINE Bot 常用資料。
+
+    這個 endpoint 是給 UptimeRobot / cron-job.org / Render Cron 打的。
+    目標不是回覆使用者，而是讓：
+    - Render 不冷啟動
+    - Shioaji get_api() / contracts 先載入
+    - 大盤 K 線圖先產好
+    - 常用股票 snapshot 先查過
+    """
+
+    token = request.args.get("token", "")
+
+    if TDCC_SYNC_TOKEN and token != TDCC_SYNC_TOKEN:
+        return jsonify(
+            {
+                "ok": False,
+                "message": "unauthorized",
+            }
+        ), 401
+
+    import os
+    import time
+
+    t0 = time.perf_counter()
+
+    result = {
+        "ok": True,
+        "items": {},
+        "stocks": {},
+    }
+
+    # -------------------------
+    # 1. 大盤：即時 + K線圖
+    # -------------------------
+    try:
+        t = time.perf_counter()
+
+        snapshot = get_market_index_snapshot(with_chart=True)
+
+        result["items"]["market_index"] = {
+            "ok": bool(getattr(snapshot, "available", False)),
+            "chart_url": bool(getattr(snapshot, "chart_url", "")),
+            "quote_time": str(getattr(snapshot, "quote_time", "") or ""),
+            "seconds": round(time.perf_counter() - t, 3),
+        }
+
+    except Exception as exc:
+        result["items"]["market_index"] = {
+            "ok": False,
+            "error": str(exc),
+        }
+
+    # -------------------------
+    # 2. 台指期：日盤
+    # -------------------------
+    try:
+        t = time.perf_counter()
+
+        snapshot = get_market_future_snapshot(session_mode="day")
+
+        result["items"]["market_future_day"] = {
+            "ok": bool(getattr(snapshot, "available", False)),
+            "contract_code": str(getattr(snapshot, "contract_code", "") or ""),
+            "quote_time": str(getattr(snapshot, "quote_time", "") or ""),
+            "seconds": round(time.perf_counter() - t, 3),
+        }
+
+    except Exception as exc:
+        result["items"]["market_future_day"] = {
+            "ok": False,
+            "error": str(exc),
+        }
+
+    # -------------------------
+    # 3. 台指期：全盤
+    # -------------------------
+    try:
+        t = time.perf_counter()
+
+        snapshot = get_market_future_snapshot(session_mode="all")
+
+        result["items"]["market_future_all"] = {
+            "ok": bool(getattr(snapshot, "available", False)),
+            "contract_code": str(getattr(snapshot, "contract_code", "") or ""),
+            "quote_time": str(getattr(snapshot, "quote_time", "") or ""),
+            "seconds": round(time.perf_counter() - t, 3),
+        }
+
+    except Exception as exc:
+        result["items"]["market_future_all"] = {
+            "ok": False,
+            "error": str(exc),
+        }
+
+    # -------------------------
+    # 4. 常用個股 snapshot
+    # -------------------------
+    stocks_text = (
+        request.args.get("stocks")
+        or os.getenv(
+            "WARMUP_STOCKS",
+            "2330,2303,2408,2313,2301,2634,0052,009816",
+        )
+    )
+
+    stock_ids = []
+
+    for item in str(stocks_text or "").replace("，", ",").split(","):
+        sid = item.strip()
+
+        if sid and sid not in stock_ids:
+            stock_ids.append(sid)
+
+    for sid in stock_ids:
+        try:
+            t = time.perf_counter()
+
+            snapshot = get_stock_snapshot(sid)
+
+            result["stocks"][sid] = {
+                "ok": bool(snapshot),
+                "close": snapshot.get("close") if isinstance(snapshot, dict) else None,
+                "quote_time": snapshot.get("ts") if isinstance(snapshot, dict) else "",
+                "seconds": round(time.perf_counter() - t, 3),
+            }
+
+        except Exception as exc:
+            result["stocks"][sid] = {
+                "ok": False,
+                "error": str(exc),
+            }
+
+    result["total_seconds"] = round(time.perf_counter() - t0, 3)
+
+    print(
+        "DEBUG warmup_all",
+        "| total_seconds =",
+        result["total_seconds"],
+        "| market_index =",
+        result["items"].get("market_index"),
+        "| stocks_count =",
+        len(stock_ids),
+        flush=True,
+    )
+
+    return jsonify(result)
 
 @app.route("/", methods=["GET"])
 def health():
