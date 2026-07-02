@@ -345,8 +345,13 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
     - K線
     - 5MA / 20MA / 60MA / 120MA
     - 成交量
-    - 5 分鐘快取
+    - 快取
+
+    Timing debug：
+    - 用來確認是 yfinance 慢、畫圖慢、publish_figure 慢，還是快取沒命中。
     """
+    t0 = time.perf_counter()
+
     cache_key = "TAIEX:D:MA"
     now = time.time()
 
@@ -354,20 +359,99 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
 
     if cached:
         ts, url = cached
+        age = now - ts
 
-        if url and now - ts <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
+        if url and age <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
+            print(
+                "DEBUG market_index chart timing",
+                "| chart_cache_hit = True",
+                "| age_sec =",
+                round(age, 1),
+                "| ttl_sec =",
+                MARKET_INDEX_CHART_CACHE_TTL_SECONDS,
+                "| total_sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+
             return url
 
+        print(
+            "DEBUG market_index chart timing",
+            "| chart_cache_hit = False",
+            "| cache_expired =",
+            bool(url),
+            "| age_sec =",
+            round(age, 1),
+            "| ttl_sec =",
+            MARKET_INDEX_CHART_CACHE_TTL_SECONDS,
+            flush=True,
+        )
+
+    else:
+        print(
+            "DEBUG market_index chart timing",
+            "| chart_cache_hit = False",
+            "| no_cache = True",
+            flush=True,
+        )
+
     try:
+        t_fetch0 = time.perf_counter()
+
         df = _fetch_taiex_history()
 
-        if df.empty:
+        t_fetch1 = time.perf_counter()
+
+        print(
+            "DEBUG market_index chart timing",
+            "| fetch_history_sec =",
+            round(t_fetch1 - t_fetch0, 3),
+            "| rows =",
+            0 if df is None else len(df),
+            flush=True,
+        )
+
+        if df is None or df.empty:
+            print(
+                "DEBUG market_index chart timing",
+                "| failed = empty_history",
+                "| total_sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
             return ""
+
+        t_append0 = time.perf_counter()
 
         if snapshot is not None and getattr(snapshot, "available", False):
             df = _append_snapshot_to_history(df, snapshot)
 
+        t_append1 = time.perf_counter()
+
+        print(
+            "DEBUG market_index chart timing",
+            "| append_snapshot_sec =",
+            round(t_append1 - t_append0, 3),
+            flush=True,
+        )
+
+        t_chart0 = time.perf_counter()
+
         chart_url = _generate_market_index_kline_chart(df)
+
+        t_chart1 = time.perf_counter()
+
+        print(
+            "DEBUG market_index chart timing",
+            "| generate_chart_sec =",
+            round(t_chart1 - t_chart0, 3),
+            "| chart_url =",
+            bool(chart_url),
+            "| total_sec =",
+            round(t_chart1 - t0, 3),
+            flush=True,
+        )
 
         if chart_url:
             _MARKET_INDEX_CHART_CACHE[cache_key] = (now, chart_url)
@@ -375,9 +459,17 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
         return chart_url
 
     except Exception as exc:
+        print(
+            "DEBUG market_index chart timing",
+            "| failed_exception =",
+            exc,
+            "| total_sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
         _debug("chart failed", exc)
         return ""
-
 
 def _fetch_taiex_history() -> pd.DataFrame:
     """
@@ -390,6 +482,16 @@ def _fetch_taiex_history() -> pd.DataFrame:
 
     try:
         raw = yf.download(
+        "^TWII",
+        period="10mo",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        timeout=12,
+        )
+    except TypeError:
+        raw = yf.download(
             "^TWII",
             period="10mo",
             interval="1d",
@@ -397,6 +499,7 @@ def _fetch_taiex_history() -> pd.DataFrame:
             progress=False,
             threads=False,
         )
+
 
         if raw is None or raw.empty:
             _debug("yfinance ^TWII empty")
