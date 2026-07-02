@@ -1984,11 +1984,14 @@ def _futures_session_buttons(
 
 MARKET_INDEX_KEYWORDS = {
     "大盤",
-    "指數",
+    "台股大盤",
+    "台灣大盤",
     "加權",
     "加權指數",
-    "台股大盤",
     "台灣加權",
+    "台股加權",
+    "指數",
+    "台指",
     "TAIEX",
     "TWII",
     "^TWII",
@@ -2016,7 +2019,22 @@ def _is_market_index_request(*values) -> bool:
 
         if text in MARKET_INDEX_KEYWORDS:
             return True
+            
+        if "大盤" in text:
+            return True
 
+        if "加權" in text:
+            return True
+
+        if "指數" in text:
+            return True
+
+        if "TAIEX" in upper_text:
+            return True
+
+        if "TWII" in upper_text:
+            return True
+    
     return False
 
 def _is_market_future_request(*values) -> bool:
