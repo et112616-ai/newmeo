@@ -1288,9 +1288,14 @@ def _build_market_future_placeholder_flex(
 def _build_market_future_realtime_flex(
     snapshot,
     action: str = "market_future_day",
+    index_snapshot=None,
 ) -> dict[str, Any]:
     """
     台指期 TXF 即時卡片。
+    加入：
+    - 現貨：加權指數
+    - 期現價差
+    - 基差率
     """
 
     def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
@@ -1318,6 +1323,21 @@ def _build_market_future_realtime_flex(
                 },
             ],
         }
+
+    def _calc_color(value) -> str:
+        try:
+            num = float(value)
+
+            if num > 0:
+                return "#FF2D2D"
+
+            if num < 0:
+                return "#00B050"
+
+        except Exception:
+            pass
+
+        return "#666666"
 
     session_text = "全盤" if action == "market_future_all" else "日盤"
 
@@ -1375,13 +1395,22 @@ def _build_market_future_realtime_flex(
             },
         }
 
-    change = getattr(snapshot, "future_change", 0.0)
-    change_pct = getattr(snapshot, "future_change_pct", 0.0)
+    future_price = float(getattr(snapshot, "future_price", 0.0) or 0.0)
+    change = float(getattr(snapshot, "future_change", 0.0) or 0.0)
+    change_pct = float(getattr(snapshot, "future_change_pct", 0.0) or 0.0)
 
-    change_color = "#FF2D2D" if change > 0 else "#00B050" if change < 0 else "#666666"
+    change_color = _calc_color(change)
 
-    price_text = _fmt_market_price(getattr(snapshot, "future_price", 0.0))
+    price_text = _fmt_market_price(future_price)
     change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
+
+    spot_price = 0.0
+
+    if index_snapshot is not None and getattr(index_snapshot, "available", False):
+        try:
+            spot_price = float(getattr(index_snapshot, "close_price", 0.0) or 0.0)
+        except Exception:
+            spot_price = 0.0
 
     rows = [
         (
@@ -1396,9 +1425,30 @@ def _build_market_future_realtime_flex(
         ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
         ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
         ("期貨", price_text, change_color),
-        ("漲", change_text, change_color),
-        ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
     ]
+
+    if spot_price > 0 and future_price > 0:
+        basis = future_price - spot_price
+        basis_pct = basis / spot_price * 100
+        basis_color = _calc_color(basis)
+
+        rows.extend(
+            [
+                ("現貨", _fmt_market_price(spot_price), "#222222"),
+                (
+                    "期現價差",
+                    f"{_fmt_signed(basis)} ({_fmt_signed_pct(basis_pct)})",
+                    basis_color,
+                ),
+            ]
+        )
+
+    rows.extend(
+        [
+            ("漲", change_text, change_color),
+            ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
+        ]
+    )
 
     buy_price = getattr(snapshot, "buy_price", 0.0)
     sell_price = getattr(snapshot, "sell_price", 0.0)
@@ -1458,6 +1508,14 @@ def _build_market_future_realtime_flex(
                 _info_row(label, value, color)
                 for label, value, color in rows
             ],
+        },
+        {
+            "type": "text",
+            "text": "期現價差＝台指期近月 − 加權指數現貨。",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
         },
         {
             "type": "separator",
@@ -2369,10 +2427,11 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 session_mode = "all" if action == "market_future_all" else "day"
 
                 snapshot = get_market_future_snapshot(session_mode=session_mode)
+                index_snapshot = get_market_index_snapshot(with_chart=False)
 
                 return _reply_with_title(
                     "台指期",
-                    _build_market_future_realtime_flex(snapshot, action),
+                    _build_market_future_realtime_flex(snapshot, action, index_snapshot),
                 )
 
             return _reply_with_title(
