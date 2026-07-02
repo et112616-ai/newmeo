@@ -35,7 +35,7 @@ except Exception:
 
 
 MARKET_INDEX_CACHE_TTL_SECONDS = 3
-MARKET_INDEX_CHART_CACHE_TTL_SECONDS = 300
+MARKET_INDEX_CHART_CACHE_TTL_SECONDS = 900
 
 _MARKET_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _MARKET_INDEX_CHART_CACHE: dict[str, tuple[float, str]] = {}
