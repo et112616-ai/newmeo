@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
 import pandas as pd
+import requests
 
 try:
     import yfinance as yf
@@ -34,8 +36,11 @@ except Exception:
         return ""
 
 
-MARKET_INDEX_CACHE_TTL_SECONDS = 3
-MARKET_INDEX_CHART_CACHE_TTL_SECONDS = 900
+# =========================
+# Cache settings
+# =========================
+MARKET_INDEX_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CACHE_TTL_SECONDS", "3"))
+MARKET_INDEX_CHART_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CHART_CACHE_TTL_SECONDS", "900"))
 
 _MARKET_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _MARKET_INDEX_CHART_CACHE: dict[str, tuple[float, str]] = {}
@@ -82,7 +87,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
         text = str(value).replace(",", "").replace("%", "").strip()
 
-        if not text:
+        if not text or text in {"--", "-"}:
             return default
 
         return float(text)
@@ -229,11 +234,16 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketIndexSnapshot:
     )
 
 
+# =========================
+# Public APIs
+# =========================
 def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
     """
     取得加權指數即時 snapshot。
-    with_chart=True 時會附上 chart_url，但圖表會使用 5 分鐘快取。
+    with_chart=True 時會附 chart_url；圖表有 15 分鐘快取。
     """
+    route_t0 = time.perf_counter()
+
     cache_key = "TAIEX"
     now = time.time()
 
@@ -241,12 +251,25 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
 
     if cached:
         ts, data = cached
+        age = now - ts
 
-        if now - ts <= MARKET_INDEX_CACHE_TTL_SECONDS:
+        if age <= MARKET_INDEX_CACHE_TTL_SECONDS:
             snapshot = _snapshot_from_dict(data)
 
             if with_chart and not snapshot.chart_url:
                 snapshot.chart_url = get_market_index_chart_url(snapshot)
+                data["chart_url"] = snapshot.chart_url
+                _MARKET_INDEX_CACHE[cache_key] = (ts, data)
+
+            _debug(
+                "snapshot cache hit",
+                "| age_sec =",
+                round(age, 2),
+                "| chart_url =",
+                bool(snapshot.chart_url),
+                "| total_sec =",
+                round(time.perf_counter() - route_t0, 3),
+            )
 
             return snapshot
 
@@ -267,7 +290,11 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
         )
 
     try:
+        t_snapshot0 = time.perf_counter()
+
         snapshots = api.snapshots([contract])
+
+        t_snapshot1 = time.perf_counter()
 
         if not snapshots:
             return MarketIndexSnapshot(
@@ -302,30 +329,40 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             "chart_url": "",
         }
 
-        # 先快取即時數字，再產圖，避免圖表失敗影響即時資料。
+        # 先快取即時數字，避免圖表失敗影響即時回覆。
         _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
 
         snapshot = _snapshot_from_dict(data)
+
+        t_chart0 = time.perf_counter()
 
         if with_chart:
             data["chart_url"] = get_market_index_chart_url(snapshot)
             snapshot.chart_url = data["chart_url"]
             _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
 
+        t_chart1 = time.perf_counter()
+
         _debug(
             "snapshot",
-            "close =",
+            "| close =",
             data["close_price"],
-            "change =",
+            "| change =",
             data["change"],
-            "change_pct =",
+            "| change_pct =",
             data["change_pct"],
-            "volume =",
+            "| volume =",
             data["total_volume"],
-            "time =",
+            "| time =",
             data["quote_time"],
-            "chart_url =",
+            "| chart_url =",
             bool(data["chart_url"]),
+            "| shioaji_sec =",
+            round(t_snapshot1 - t_snapshot0, 3),
+            "| chart_sec =",
+            round(t_chart1 - t_chart0, 3),
+            "| total_sec =",
+            round(time.perf_counter() - route_t0, 3),
         )
 
         return snapshot
@@ -342,13 +379,12 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
 def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> str:
     """
     產生加權指數日K圖：
-    - K線
-    - 5MA / 20MA / 60MA / 120MA
-    - 成交量
-    - 快取
-
-    Timing debug：
-    - 用來確認是 yfinance 慢、畫圖慢、publish_figure 慢，還是快取沒命中。
+    1. 優先吃 15 分鐘 chart 快取。
+    2. 資料源優先順序：
+       - yfinance ^TWII
+       - Yahoo chart API direct
+       - TWSE MI_5MINS_HIST + FMTQIK
+    3. 如果新資料失敗，回舊圖 stale url。
     """
     t0 = time.perf_counter()
 
@@ -356,10 +392,12 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
     now = time.time()
 
     cached = _MARKET_INDEX_CHART_CACHE.get(cache_key)
+    stale_url = ""
 
     if cached:
         ts, url = cached
         age = now - ts
+        stale_url = url or ""
 
         if url and age <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
             print(
@@ -387,7 +425,6 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
             MARKET_INDEX_CHART_CACHE_TTL_SECONDS,
             flush=True,
         )
-
     else:
         print(
             "DEBUG market_index chart timing",
@@ -416,11 +453,14 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
             print(
                 "DEBUG market_index chart timing",
                 "| failed = empty_history",
+                "| use_stale_chart =",
+                bool(stale_url),
                 "| total_sec =",
                 round(time.perf_counter() - t0, 3),
                 flush=True,
             )
-            return ""
+
+            return stale_url
 
         t_append0 = time.perf_counter()
 
@@ -455,40 +495,96 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
 
         if chart_url:
             _MARKET_INDEX_CHART_CACHE[cache_key] = (now, chart_url)
+            return chart_url
 
-        return chart_url
+        return stale_url
 
     except Exception as exc:
         print(
             "DEBUG market_index chart timing",
             "| failed_exception =",
             exc,
+            "| use_stale_chart =",
+            bool(stale_url),
             "| total_sec =",
             round(time.perf_counter() - t0, 3),
             flush=True,
         )
 
         _debug("chart failed", exc)
-        return ""
+        return stale_url
 
+
+# =========================
+# History sources
+# =========================
 def _fetch_taiex_history() -> pd.DataFrame:
     """
     抓加權指數日K歷史資料。
-    第一版使用 yfinance ^TWII；失敗則回傳空表。
+    依序嘗試：
+    1. yfinance ^TWII
+    2. Yahoo chart API direct
+    3. TWSE MI_5MINS_HIST + FMTQIK
     """
+    sources = [
+        ("yfinance", _fetch_taiex_history_yfinance),
+        ("yahoo_direct", _fetch_taiex_history_yahoo_direct),
+        ("twse", _fetch_taiex_history_twse),
+    ]
+
+    for source_name, fetcher in sources:
+        t0 = time.perf_counter()
+
+        try:
+            df = fetcher()
+
+            elapsed = time.perf_counter() - t0
+
+            if df is not None and not df.empty:
+                df = _normalize_history_df(df)
+                _debug(
+                    "history source",
+                    source_name,
+                    "| rows =",
+                    len(df),
+                    "| sec =",
+                    round(elapsed, 3),
+                )
+                return df
+
+            _debug(
+                "history source empty",
+                source_name,
+                "| sec =",
+                round(elapsed, 3),
+            )
+
+        except Exception as exc:
+            _debug(
+                "history source failed",
+                source_name,
+                "| error =",
+                exc,
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+            )
+
+    return pd.DataFrame()
+
+
+def _fetch_taiex_history_yfinance() -> pd.DataFrame:
     if yf is None:
-        _debug("yfinance not available")
         return pd.DataFrame()
 
     try:
         raw = yf.download(
-        "^TWII",
-        period="10mo",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-        timeout=12,
+            "^TWII",
+            period="10mo",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            timeout=10,
         )
     except TypeError:
         raw = yf.download(
@@ -500,42 +596,365 @@ def _fetch_taiex_history() -> pd.DataFrame:
             threads=False,
         )
 
-
-        if raw is None or raw.empty:
-            _debug("yfinance ^TWII empty")
-            return pd.DataFrame()
-
-        df = raw.copy()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        required = ["Open", "High", "Low", "Close", "Volume"]
-
-        for col in required:
-            if col not in df.columns:
-                df[col] = 0
-
-        df = df[required].copy()
-
-        df.index = pd.to_datetime(df.index, errors="coerce")
-
-        if getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_convert("Asia/Taipei").tz_localize(None)
-
-        df.index = df.index.normalize()
-
-        for col in required:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-        df = df[df["Close"] > 0]
-        df = df.sort_index()
-
-        return df.tail(180)
-
-    except Exception as exc:
-        _debug("fetch history failed", exc)
+    if raw is None or raw.empty:
         return pd.DataFrame()
+
+    df = raw.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    return df
+
+
+def _fetch_taiex_history_yahoo_direct() -> pd.DataFrame:
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII"
+
+    params = {
+        "range": "10mo",
+        "interval": "1d",
+        "includePrePost": "false",
+        "events": "history",
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
+
+    resp = requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+    payload = resp.json()
+
+    chart = payload.get("chart") or {}
+    result = chart.get("result") or []
+
+    if not result:
+        return pd.DataFrame()
+
+    item = result[0]
+    timestamps = item.get("timestamp") or []
+    indicators = item.get("indicators") or {}
+    quote = (indicators.get("quote") or [{}])[0]
+
+    if not timestamps or not quote:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        {
+            "Open": quote.get("open") or [],
+            "High": quote.get("high") or [],
+            "Low": quote.get("low") or [],
+            "Close": quote.get("close") or [],
+            "Volume": quote.get("volume") or [],
+        },
+        index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None),
+    )
+
+    df.index = df.index.normalize()
+
+    return df
+
+
+def _fetch_taiex_history_twse() -> pd.DataFrame:
+    """
+    TWSE fallback：
+    - MI_5MINS_HIST：加權指數每月 OHLC。
+    - FMTQIK：大盤每月成交量。
+    合併後產生日K資料。
+
+    若 TWSE 回傳欄位名稱調整，解析失敗會回空表，不影響主流程。
+    """
+    today = pd.Timestamp.now(tz="Asia/Taipei").date()
+    months = _latest_month_starts(today, months=12)
+
+    frames: list[pd.DataFrame] = []
+
+    for month_start in months:
+        ohlc = _fetch_twse_monthly_ohlc(month_start)
+        volume = _fetch_twse_monthly_volume(month_start)
+
+        if ohlc.empty:
+            continue
+
+        if not volume.empty:
+            merged = ohlc.merge(
+                volume,
+                left_index=True,
+                right_index=True,
+                how="left",
+            )
+        else:
+            merged = ohlc.copy()
+            merged["Volume"] = 0
+
+        frames.append(merged)
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, axis=0)
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
+
+    return df.tail(220)
+
+
+def _latest_month_starts(today, months: int = 12) -> list[pd.Timestamp]:
+    current = pd.Timestamp(today).replace(day=1)
+    result = []
+
+    for i in range(months):
+        result.append(current - pd.DateOffset(months=i))
+
+    # 舊到新
+    return list(reversed(result))
+
+
+def _fetch_twse_monthly_ohlc(month_start: pd.Timestamp) -> pd.DataFrame:
+    date_text = month_start.strftime("%Y%m01")
+
+    urls = [
+        "https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST",
+        "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST",
+    ]
+
+    for url in urls:
+        try:
+            payload = _twse_get_json(
+                url,
+                params={
+                    "response": "json",
+                    "date": date_text,
+                },
+            )
+
+            data = payload.get("data") or payload.get("tables", [{}])[0].get("data") or []
+            fields = payload.get("fields") or payload.get("tables", [{}])[0].get("fields") or []
+
+            df = _parse_twse_ohlc_table(data, fields)
+
+            if not df.empty:
+                return df
+
+        except Exception as exc:
+            _debug("twse ohlc failed", date_text, exc)
+
+    return pd.DataFrame()
+
+
+def _fetch_twse_monthly_volume(month_start: pd.Timestamp) -> pd.DataFrame:
+    date_text = month_start.strftime("%Y%m01")
+
+    urls = [
+        "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK",
+        "https://www.twse.com.tw/exchangeReport/FMTQIK",
+    ]
+
+    for url in urls:
+        try:
+            payload = _twse_get_json(
+                url,
+                params={
+                    "response": "json",
+                    "date": date_text,
+                },
+            )
+
+            data = payload.get("data") or payload.get("tables", [{}])[0].get("data") or []
+            fields = payload.get("fields") or payload.get("tables", [{}])[0].get("fields") or []
+
+            df = _parse_twse_volume_table(data, fields)
+
+            if not df.empty:
+                return df
+
+        except Exception as exc:
+            _debug("twse volume failed", date_text, exc)
+
+    return pd.DataFrame()
+
+
+def _twse_get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://www.twse.com.tw/",
+    }
+
+    resp = requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=8,
+    )
+    resp.raise_for_status()
+
+    return resp.json()
+
+
+def _parse_twse_ohlc_table(data: list, fields: list | None = None) -> pd.DataFrame:
+    rows = []
+
+    for row in data or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            continue
+
+        date = _parse_twse_date(row[0])
+        open_price = _safe_float(row[1])
+        high_price = _safe_float(row[2])
+        low_price = _safe_float(row[3])
+        close_price = _safe_float(row[4])
+
+        if not date or close_price <= 0:
+            continue
+
+        rows.append(
+            {
+                "Date": date,
+                "Open": open_price,
+                "High": high_price,
+                "Low": low_price,
+                "Close": close_price,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    df = df.set_index("Date")
+    df.index = df.index.normalize()
+
+    return df
+
+
+def _parse_twse_volume_table(data: list, fields: list | None = None) -> pd.DataFrame:
+    rows = []
+
+    for row in data or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+
+        date = _parse_twse_date(row[0])
+
+        if not date:
+            continue
+
+        # FMTQIK 第一個數值通常是成交股數。
+        volume = _safe_int(row[1])
+
+        rows.append(
+            {
+                "Date": date,
+                "Volume": volume,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    df = df.set_index("Date")
+    df.index = df.index.normalize()
+
+    return df
+
+
+def _parse_twse_date(value: Any) -> str:
+    """
+    支援：
+    - 2026/07/01
+    - 115/07/01
+    """
+    text = str(value or "").strip()
+
+    if not text:
+        return ""
+
+    text = text.replace("-", "/")
+
+    parts = text.split("/")
+
+    if len(parts) != 3:
+        return ""
+
+    try:
+        year = int(parts[0])
+        month = int(parts[1])
+        day = int(parts[2])
+
+        if year < 1911:
+            year += 1911
+
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    except Exception:
+        return ""
+
+
+def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    work = df.copy()
+
+    if isinstance(work.columns, pd.MultiIndex):
+        work.columns = work.columns.get_level_values(0)
+
+    # 欄名保險處理
+    rename = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+    }
+
+    work = work.rename(columns={col: rename.get(str(col).lower(), col) for col in work.columns})
+
+    required = ["Open", "High", "Low", "Close", "Volume"]
+
+    for col in required:
+        if col not in work.columns:
+            work[col] = 0
+
+    work = work[required].copy()
+
+    work.index = pd.to_datetime(work.index, errors="coerce")
+
+    if getattr(work.index, "tz", None) is not None:
+        work.index = work.index.tz_convert("Asia/Taipei").tz_localize(None)
+
+    work.index = work.index.normalize()
+
+    for col in required:
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
+
+    # 若 fallback 無 Volume，保留 0；價格一定要有效。
+    work = work[work["Close"] > 0]
+
+    # 若 Open/High/Low 缺失，用 Close 補齊，避免畫圖失敗。
+    for col in ["Open", "High", "Low"]:
+        work.loc[work[col] <= 0, col] = work.loc[work[col] <= 0, "Close"]
+
+    work["High"] = work[["High", "Open", "Close"]].max(axis=1)
+    work["Low"] = work[["Low", "Open", "Close"]].min(axis=1)
+
+    work = work.sort_index()
+    work = work[~work.index.duplicated(keep="last")]
+
+    return work.tail(220)
 
 
 def _append_snapshot_to_history(df: pd.DataFrame, snapshot: MarketIndexSnapshot) -> pd.DataFrame:
@@ -590,9 +1009,12 @@ def _append_snapshot_to_history(df: pd.DataFrame, snapshot: MarketIndexSnapshot)
 
     result = result.sort_index()
 
-    return result.tail(180)
+    return result.tail(220)
 
 
+# =========================
+# Chart
+# =========================
 def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     if df is None or df.empty:
         return ""
