@@ -2420,10 +2420,39 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if action == "market_index":
                 snapshot = get_market_index_snapshot()
 
-                return _reply_with_title(
-                    "加權指數",
-                    _build_market_index_realtime_flex(snapshot),
-                )
+                if action == "market_index":
+                    import time
+
+                    t0 = time.perf_counter()
+
+                    snapshot = get_market_index_snapshot(with_chart=True)
+
+                    t1 = time.perf_counter()
+
+                    flex = _build_market_index_realtime_flex(snapshot)
+
+                    t2 = time.perf_counter()
+
+                    print(
+                        "DEBUG market_index controller timing",
+                        "| raw_stock =", raw_stock,
+                        "| raw_text =", raw_text,
+                        "| action =", action,
+                        "| snapshot_sec =", round(t1 - t0, 3),
+                        "| flex_sec =", round(t2 - t1, 3),
+                        "| total_sec =", round(t2 - t0, 3),
+                        "| available =",
+                        getattr(snapshot, "available", None),
+                        "| chart_url =",
+                        bool(getattr(snapshot, "chart_url", "")),
+                        flush=True,
+                    )
+
+                    return _reply_with_title(
+                        "加權指數",
+                        flex,
+                    )
+
 
             if action == "market_chip":
                 snapshot = get_market_chip_snapshot()
