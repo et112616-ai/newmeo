@@ -14,6 +14,7 @@ from services.chip_service import (
     get_large_holder_table,
     get_margin_table,
 )
+from services.market_chip_service import get_market_chip_snapshot
 from services.futures_service import get_stock_futures_snapshot
 from services.market_future_service import get_market_future_snapshot
 from services.market_index_service import get_market_index_snapshot
