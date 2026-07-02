@@ -176,83 +176,121 @@ def _market_chip_label(value) -> str:
     return "持平"
 
 
+def _fmt_market_chip_yi(value, with_unit: bool = True) -> str:
+    try:
+        num = float(value)
+        sign = "+" if num > 0 else ""
+        unit = "億" if with_unit else ""
+        return f"{sign}{num:,.2f}{unit}"
+    except Exception:
+        return "--"
+
+
+def _market_chip_color(value) -> str:
+    try:
+        num = float(value)
+
+        if num > 0:
+            return "#FF2D2D"
+
+        if num < 0:
+            return "#00B050"
+
+    except Exception:
+        pass
+
+    return "#666666"
+
+
+def _fmt_mmdd(date_text: str) -> str:
+    text = str(date_text or "").strip()
+
+    if len(text) >= 10 and "-" in text:
+        return text[5:10].replace("-", "/")
+
+    return text.replace("-", "/")
+
+
 def _build_market_chip_flex(snapshot) -> dict[str, Any]:
     """
     大盤法人卡片。
-    分三列：
-    1. 外資
-    2. 投信
-    3. 自營商
+    顯示方式：
+    日期 | 外資 | 投信 | 自營商
     """
 
-    def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
+    def _cell(
+        text: str,
+        flex: int,
+        color: str = "#333333",
+        weight: str = "regular",
+        align: str = "end",
+    ) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "text": str(text),
+            "size": "xs",
+            "color": color,
+            "weight": weight,
+            "flex": flex,
+            "align": align,
+            "wrap": True,
+        }
+
+    def _table_header() -> dict[str, Any]:
         return {
             "type": "box",
             "layout": "horizontal",
-            "spacing": "md",
+            "paddingAll": "6px",
+            "backgroundColor": "#EEF1F4",
+            "cornerRadius": "sm",
+            "contents": [
+                _cell("日期", 2, "#555555", "bold", "start"),
+                _cell("外資", 3, "#555555", "bold", "end"),
+                _cell("投信", 3, "#555555", "bold", "end"),
+                _cell("自營商", 3, "#555555", "bold", "end"),
+            ],
+        }
+
+    def _table_row(item: dict) -> dict[str, Any]:
+        foreign = float(item.get("foreign") or 0)
+        investment_trust = float(item.get("investment_trust") or 0)
+        dealer = float(item.get("dealer") or 0)
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "contents": [
+                _cell(_fmt_mmdd(item.get("date", "--")), 2, "#333333", "regular", "start"),
+                _cell(_fmt_market_chip_yi(foreign), 3, _market_chip_color(foreign)),
+                _cell(_fmt_market_chip_yi(investment_trust), 3, _market_chip_color(investment_trust)),
+                _cell(_fmt_market_chip_yi(dealer), 3, _market_chip_color(dealer)),
+            ],
+        }
+
+    def _summary_row(label: str, value, color: str | None = None) -> dict[str, Any]:
+        if color is None:
+            color = _market_chip_color(value)
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
             "contents": [
                 {
                     "type": "text",
                     "text": label,
                     "size": "sm",
-                    "color": "#888888",
+                    "color": "#666666",
                     "flex": 4,
-                    "wrap": True,
-                },
-                {
-                    "type": "text",
-                    "text": str(value),
-                    "size": "sm",
-                    "color": color,
-                    "flex": 6,
-                    "align": "end",
-                    "wrap": True,
-                },
-            ],
-        }
-
-    def _institution_row(title: str, value) -> dict[str, Any]:
-        color = _market_chip_color(value)
-
-        return {
-            "type": "box",
-            "layout": "horizontal",
-            "spacing": "md",
-            "paddingAll": "10px",
-            "backgroundColor": "#F8F9FA",
-            "cornerRadius": "md",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "flex": 4,
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": title,
-                            "size": "md",
-                            "weight": "bold",
-                            "color": "#222222",
-                            "wrap": True,
-                        },
-                        {
-                            "type": "text",
-                            "text": _market_chip_label(value),
-                            "size": "xs",
-                            "color": color,
-                            "margin": "xs",
-                        },
-                    ],
                 },
                 {
                     "type": "text",
                     "text": _fmt_market_chip_yi(value),
-                    "size": "md",
-                    "weight": "bold",
+                    "size": "sm",
                     "color": color,
+                    "weight": "bold",
                     "flex": 6,
                     "align": "end",
-                    "gravity": "center",
                     "wrap": True,
                 },
             ],
@@ -304,38 +342,29 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         }
 
     latest_date = str(getattr(snapshot, "latest_date", "") or "--")
-    foreign = getattr(snapshot, "foreign", 0.0)
-    investment_trust = getattr(snapshot, "investment_trust", 0.0)
-    dealer = getattr(snapshot, "dealer", 0.0)
-    total = getattr(snapshot, "total", 0.0)
+    foreign = float(getattr(snapshot, "foreign", 0.0) or 0.0)
+    investment_trust = float(getattr(snapshot, "investment_trust", 0.0) or 0.0)
+    dealer = float(getattr(snapshot, "dealer", 0.0) or 0.0)
+    total = float(getattr(snapshot, "total", 0.0) or 0.0)
 
     recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
+    recent_rows = list(reversed(recent_rows))
 
-    history_contents: list[dict[str, Any]] = []
+    table_contents: list[dict[str, Any]] = [_table_header()]
 
     if recent_rows:
-        history_contents.append(
+        for item in recent_rows:
+            table_contents.append(_table_row(item))
+    else:
+        table_contents.append(
             {
                 "type": "text",
-                "text": "近5日合計買賣超",
+                "text": "暫無近5日資料",
                 "size": "sm",
-                "weight": "bold",
-                "color": "#444444",
-                "margin": "md",
+                "color": "#999999",
+                "margin": "sm",
             }
         )
-
-        for item in recent_rows:
-            date = str(item.get("date") or "")[5:]
-            value = float(item.get("total") or 0)
-
-            history_contents.append(
-                _info_row(
-                    date,
-                    _fmt_market_chip_yi(value),
-                    _market_chip_color(value),
-                )
-            )
 
     contents: list[dict[str, Any]] = [
         {
@@ -348,7 +377,7 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": "整體市場三大法人買賣超",
+            "text": f"最新日期：{latest_date}",
             "size": "sm",
             "color": "#666666",
             "margin": "xs",
@@ -363,46 +392,47 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
             "spacing": "sm",
             "margin": "md",
             "contents": [
-                _institution_row("外資", foreign),
-                _institution_row("投信", investment_trust),
-                _institution_row("自營商", dealer),
+                _summary_row("外資", foreign),
+                _summary_row("投信", investment_trust),
+                _summary_row("自營商", dealer),
+                {
+                    "type": "separator",
+                    "margin": "sm",
+                },
+                _summary_row("三大法人合計", total),
             ],
         },
         {
-            "type": "separator",
+            "type": "text",
+            "text": "近5日買賣超",
+            "size": "md",
+            "weight": "bold",
+            "color": "#222222",
             "margin": "md",
         },
         {
             "type": "box",
             "layout": "vertical",
-            "spacing": "sm",
+            "spacing": "xs",
+            "margin": "sm",
+            "paddingAll": "6px",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "md",
+            "contents": table_contents,
+        },
+        {
+            "type": "text",
+            "text": "單位：億元；盤後資料，非即時逐筆。",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
             "margin": "md",
-            "contents": [
-                _info_row("日期", latest_date, "#888888"),
-                _info_row("三大法人合計", _fmt_market_chip_yi(total), _market_chip_color(total)),
-            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
         },
     ]
-
-    if history_contents:
-        contents.extend(history_contents)
-
-    contents.extend(
-        [
-            {
-                "type": "text",
-                "text": "單位：億元；盤後資料，非即時逐筆。",
-                "size": "xs",
-                "color": "#888888",
-                "wrap": True,
-                "margin": "md",
-            },
-            {
-                "type": "separator",
-                "margin": "md",
-            },
-        ]
-    )
 
     contents.extend(_market_index_buttons("market_chip"))
 
@@ -420,7 +450,6 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
             },
         },
     }
-
 
 def _get_history_df_tf(meta, requested_tf: str):
     """
