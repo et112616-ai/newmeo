@@ -147,19 +147,42 @@ def _fmt_market_chip_yi(value) -> str:
 def _market_chip_color(value) -> str:
     try:
         num = float(value)
+
         if num > 0:
             return "#FF2D2D"
+
         if num < 0:
             return "#00B050"
+
     except Exception:
         pass
 
     return "#666666"
 
 
+def _market_chip_label(value) -> str:
+    try:
+        num = float(value)
+
+        if num > 0:
+            return "買超"
+
+        if num < 0:
+            return "賣超"
+
+    except Exception:
+        pass
+
+    return "持平"
+
+
 def _build_market_chip_flex(snapshot) -> dict[str, Any]:
     """
     大盤法人卡片。
+    分三列：
+    1. 外資
+    2. 投信
+    3. 自營商
     """
 
     def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
@@ -183,6 +206,53 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
                     "color": color,
                     "flex": 6,
                     "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def _institution_row(title: str, value) -> dict[str, Any]:
+        color = _market_chip_color(value)
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "paddingAll": "10px",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "md",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "flex": 4,
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": title,
+                            "size": "md",
+                            "weight": "bold",
+                            "color": "#222222",
+                            "wrap": True,
+                        },
+                        {
+                            "type": "text",
+                            "text": _market_chip_label(value),
+                            "size": "xs",
+                            "color": color,
+                            "margin": "xs",
+                        },
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": _fmt_market_chip_yi(value),
+                    "size": "md",
+                    "weight": "bold",
+                    "color": color,
+                    "flex": 6,
+                    "align": "end",
+                    "gravity": "center",
                     "wrap": True,
                 },
             ],
@@ -239,14 +309,6 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
     dealer = getattr(snapshot, "dealer", 0.0)
     total = getattr(snapshot, "total", 0.0)
 
-    rows = [
-        ("日期", latest_date, "#888888"),
-        ("外資", _fmt_market_chip_yi(foreign), _market_chip_color(foreign)),
-        ("投信", _fmt_market_chip_yi(investment_trust), _market_chip_color(investment_trust)),
-        ("自營商", _fmt_market_chip_yi(dealer), _market_chip_color(dealer)),
-        ("合計", _fmt_market_chip_yi(total), _market_chip_color(total)),
-    ]
-
     recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
 
     history_contents: list[dict[str, Any]] = []
@@ -266,6 +328,7 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         for item in recent_rows:
             date = str(item.get("date") or "")[5:]
             value = float(item.get("total") or 0)
+
             history_contents.append(
                 _info_row(
                     date,
@@ -285,14 +348,6 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": _fmt_market_chip_yi(total),
-            "size": "xl",
-            "weight": "bold",
-            "color": _market_chip_color(total),
-            "margin": "sm",
-        },
-        {
-            "type": "text",
             "text": "整體市場三大法人買賣超",
             "size": "sm",
             "color": "#666666",
@@ -308,8 +363,23 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
             "spacing": "sm",
             "margin": "md",
             "contents": [
-                _info_row(label, value, color)
-                for label, value, color in rows
+                _institution_row("外資", foreign),
+                _institution_row("投信", investment_trust),
+                _institution_row("自營商", dealer),
+            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _info_row("日期", latest_date, "#888888"),
+                _info_row("三大法人合計", _fmt_market_chip_yi(total), _market_chip_color(total)),
             ],
         },
     ]
