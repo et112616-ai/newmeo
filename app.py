@@ -3,6 +3,7 @@ from services.futures_map_service import sync_stock_futures_map_from_taifex
 from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
 from services.sinopac_quote_service import get_stock_snapshot
+from services.sinopac_quote_service import get_api
 
 import base64
 import hashlib
@@ -169,7 +170,21 @@ def warmup_all():
         "items": {},
         "stocks": {},
     }
+    try:
+        t = time.perf_counter()
 
+        api = get_api()
+
+        result["items"]["shioaji_login"] = {
+            "ok": api is not None,
+            "seconds": round(time.perf_counter() - t, 3),
+        }
+
+    except Exception as exc:
+        result["items"]["shioaji_login"] = {
+            "ok": False,
+            "error": str(exc),
+        }
     # -------------------------
     # 1. 大盤：即時 + K線圖
     # -------------------------
