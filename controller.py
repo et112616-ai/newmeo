@@ -134,6 +134,223 @@ def _normalize_action(action: str | None) -> str:
 
     return aliases.get(action, action)
 
+def _fmt_market_chip_yi(value) -> str:
+    try:
+        num = float(value)
+        sign = "+" if num > 0 else ""
+        return f"{sign}{num:,.2f} 億"
+    except Exception:
+        return "--"
+
+
+def _market_chip_color(value) -> str:
+    try:
+        num = float(value)
+        if num > 0:
+            return "#FF2D2D"
+        if num < 0:
+            return "#00B050"
+    except Exception:
+        pass
+
+    return "#666666"
+
+
+def _build_market_chip_flex(snapshot) -> dict[str, Any]:
+    """
+    大盤法人卡片。
+    """
+
+    def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#888888",
+                    "flex": 4,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(value),
+                    "size": "sm",
+                    "color": color,
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    if not getattr(snapshot, "available", False):
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "大盤法人",
+                "size": "xxl",
+                "weight": "bold",
+                "color": "#111111",
+                "wrap": True,
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": getattr(snapshot, "message", "查無大盤法人資料。"),
+                "size": "sm",
+                "color": "#666666",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+
+        contents.extend(_market_index_buttons("market_chip"))
+
+        return {
+            "type": "flex",
+            "altText": "大盤法人",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    latest_date = str(getattr(snapshot, "latest_date", "") or "--")
+    foreign = getattr(snapshot, "foreign", 0.0)
+    investment_trust = getattr(snapshot, "investment_trust", 0.0)
+    dealer = getattr(snapshot, "dealer", 0.0)
+    total = getattr(snapshot, "total", 0.0)
+
+    rows = [
+        ("日期", latest_date, "#888888"),
+        ("外資", _fmt_market_chip_yi(foreign), _market_chip_color(foreign)),
+        ("投信", _fmt_market_chip_yi(investment_trust), _market_chip_color(investment_trust)),
+        ("自營商", _fmt_market_chip_yi(dealer), _market_chip_color(dealer)),
+        ("合計", _fmt_market_chip_yi(total), _market_chip_color(total)),
+    ]
+
+    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
+
+    history_contents: list[dict[str, Any]] = []
+
+    if recent_rows:
+        history_contents.append(
+            {
+                "type": "text",
+                "text": "近5日合計買賣超",
+                "size": "sm",
+                "weight": "bold",
+                "color": "#444444",
+                "margin": "md",
+            }
+        )
+
+        for item in recent_rows:
+            date = str(item.get("date") or "")[5:]
+            value = float(item.get("total") or 0)
+            history_contents.append(
+                _info_row(
+                    date,
+                    _fmt_market_chip_yi(value),
+                    _market_chip_color(value),
+                )
+            )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "大盤法人",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": _fmt_market_chip_yi(total),
+            "size": "xl",
+            "weight": "bold",
+            "color": _market_chip_color(total),
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": "整體市場三大法人買賣超",
+            "size": "sm",
+            "color": "#666666",
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _info_row(label, value, color)
+                for label, value, color in rows
+            ],
+        },
+    ]
+
+    if history_contents:
+        contents.extend(history_contents)
+
+    contents.extend(
+        [
+            {
+                "type": "text",
+                "text": "單位：億元；盤後資料，非即時逐筆。",
+                "size": "xs",
+                "color": "#888888",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+    )
+
+    contents.extend(_market_index_buttons("market_chip"))
+
+    return {
+        "type": "flex",
+        "altText": "大盤法人",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
+
 def _get_history_df_tf(meta, requested_tf: str):
     """
     相容不同版本的 get_history()。
@@ -1731,6 +1948,14 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     _build_market_index_realtime_flex(snapshot),
                 )
 
+            if action == "market_chip":
+                snapshot = get_market_chip_snapshot()
+
+                return _reply_with_title(
+                "大盤法人",
+                _build_market_chip_flex(snapshot),
+                )
+           
             if action in {"market_future_day", "market_future_all"}:
                 session_mode = "all" if action == "market_future_all" else "day"
 
