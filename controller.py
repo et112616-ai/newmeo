@@ -385,6 +385,11 @@ def _futures_session_buttons(
 def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
     """
     加權指數即時卡片。
+    內容：
+    - 即時點位
+    - 漲跌 / 漲跌幅
+    - K 線圖 + 5MA / 20MA / 60MA / 120MA + 成交量
+    - 開 / 高 / 低 / 收 / 漲 / 量
     """
 
     def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
@@ -474,6 +479,8 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
     close_text = _fmt_market_price(getattr(snapshot, "close_price", 0.0))
     change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
 
+    chart_url = str(getattr(snapshot, "chart_url", "") or "").strip()
+
     rows = [
         ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
         ("更新", str(getattr(snapshot, "quote_time", "") or "--")[:19], "#888888"),
@@ -510,25 +517,42 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
             "color": change_color,
             "margin": "xs",
         },
-        {
-            "type": "separator",
-            "margin": "md",
-        },
-        {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "margin": "md",
-            "contents": [
-                _info_row(label, value, color)
-                for label, value, color in rows
-            ],
-        },
-        {
-            "type": "separator",
-            "margin": "md",
-        },
     ]
+
+    if chart_url:
+        contents.append(
+            {
+                "type": "image",
+                "url": chart_url,
+                "size": "full",
+                "aspectRatio": "4:3",
+                "aspectMode": "fit",
+                "margin": "md",
+            }
+        )
+
+    contents.extend(
+        [
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _info_row(label, value, color)
+                    for label, value, color in rows
+                ],
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+    )
 
     contents.extend(_market_index_buttons("market_index"))
 
