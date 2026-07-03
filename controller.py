@@ -2418,14 +2418,14 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     action = "market_index"
 
             if action == "market_index":
-                snapshot = get_market_index_snapshot()
+                snapshot = ()
 
                 if action == "market_index":
                     import time
 
                     t0 = time.perf_counter()
 
-                    snapshot = get_market_index_snapshot(with_chart=True)
+                    snapshot = (with_chart=True)
 
                     t1 = time.perf_counter()
 
@@ -2474,7 +2474,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 session_mode = "all" if action == "market_future_all" else "day"
 
                 snapshot = get_market_future_snapshot(session_mode=session_mode)
-                index_snapshot = get_market_index_snapshot(with_chart=False)
+                index_snapshot = (with_chart=False)
 
                 return _reply_with_title(
                     "台指期",
@@ -2486,9 +2486,44 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 _build_market_index_placeholder_flex(action),
             )
 
+        import time
+
+        stock_t0 = time.perf_counter()
+
+        print(
+            "DEBUG stock timing enter",
+            "| raw_stock =", req.stock,
+            "| raw_text =", raw_text,
+            "| action =", action,
+            "| current_mode =", current_mode,
+            "| requested_tf =", requested_tf,
+            flush=True,
+        )
+
+        # -------------------------
+        # 1. 股票代碼 / 名稱解析
+        # -------------------------
+        t = time.perf_counter()
+
         meta = normalize_stock_input(req.stock)
+
+        t_meta = time.perf_counter()
+
         stock_name = get_stock_name(meta)
-        
+
+        t_name = time.perf_counter()
+
+        print(
+            "DEBUG stock timing normalize",
+            "| input =", req.stock,
+            "| stock_id =", getattr(meta, "stock_id", ""),
+            "| yf_symbol =", getattr(meta, "yf_symbol", ""),
+            "| stock_name =", stock_name,
+            "| normalize_sec =", round(t_meta - t, 3),
+            "| name_sec =", round(t_name - t_meta, 3),
+            flush=True,
+        )
+
         # 文字輸入預設是 instant，但 parser 可能給 D。
         # 即時圖只適合 1m / 5m，所以預設改成 1m。
         if action == "instant" and requested_tf not in {"1m", "5m"}:
@@ -2499,98 +2534,313 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             action = "k_line"
             current_mode = "k_line"
 
-        # 即時 / K 線 / 法人圖都需要行情資料
+        print(
+            "DEBUG stock timing action_adjust",
+            "| stock_id =", getattr(meta, "stock_id", ""),
+            "| action =", action,
+            "| current_mode =", current_mode,
+            "| requested_tf =", requested_tf,
+            "| elapsed_sec =", round(time.perf_counter() - stock_t0, 3),
+            flush=True,
+        )
+
+        # -------------------------
+        # 2. 即時 / K 線 / 法人圖
+        # -------------------------
         if action in {"instant", "k_line", "chip"}:
+            t_history0 = time.perf_counter()
+
             df, tf = _get_history_df_tf(meta, requested_tf)
+
+            t_history1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing history",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| action =", action,
+                "| requested_tf =", requested_tf,
+                "| final_tf =", tf,
+                "| rows =", 0 if df is None else len(df),
+                "| sec =", round(t_history1 - t_history0, 3),
+                flush=True,
+            )
+
+            t_append0 = time.perf_counter()
 
             if tf in {"1m", "5m"}:
                 df = append_stock_snapshot_to_intraday_df(df, meta.stock_id)
-            
+
+            t_append1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing append_snapshot",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| tf =", tf,
+                "| rows =", 0 if df is None else len(df),
+                "| sec =", round(t_append1 - t_append0, 3),
+                flush=True,
+            )
+
+            t_price0 = time.perf_counter()
+
             price_meta = build_price_meta(df, tf)
 
+            t_price1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing price_meta",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| tf =", tf,
+                "| price_info =", getattr(price_meta, "price_info", ""),
+                "| change_info =", getattr(price_meta, "change_info", ""),
+                "| sec =", round(t_price1 - t_price0, 3),
+                flush=True,
+            )
+
             if action == "instant":
+                t_chart0 = time.perf_counter()
+
                 image_url = generate_instant_chart(df, meta.stock_id, stock_name)
+
+                t_chart1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing chart",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| tf =", tf,
+                    "| image_url =", bool(image_url),
+                    "| sec =", round(t_chart1 - t_chart0, 3),
+                    flush=True,
+                )
+
+                t_flex0 = time.perf_counter()
+
+                flex = _build_chart_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    image_url=image_url,
+                    price_info=price_meta.price_info,
+                    change_info=price_meta.change_info,
+                    update_time=price_meta.time_stamp,
+                    price_change=price_meta.price_change,
+                    active_mode="instant",
+                    current_tf=tf,
+                )
+
+                t_flex1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing flex",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| sec =", round(t_flex1 - t_flex0, 3),
+                    flush=True,
+                )
+
+                print(
+                    "DEBUG stock timing total",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                    flush=True,
+                )
+
                 return _reply_with_title(
                     f"{stock_name} 即時走勢",
-                    _build_chart_flex(
-                        stock_id=meta.stock_id,
-                        stock_name=stock_name,
-                        image_url=image_url,
-                        price_info=price_meta.price_info,
-                        change_info=price_meta.change_info,
-                        update_time=price_meta.time_stamp,
-                        price_change=price_meta.price_change,
-                        active_mode="instant",
-                        current_tf=tf,
-                    ),
+                    flex,
                 )
 
             if action == "k_line":
+                t_chart0 = time.perf_counter()
+
                 image_url = generate_kline_chart(df, meta.stock_id, stock_name, tf)
+
+                t_chart1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing chart",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| tf =", tf,
+                    "| image_url =", bool(image_url),
+                    "| sec =", round(t_chart1 - t_chart0, 3),
+                    flush=True,
+                )
+
+                t_flex0 = time.perf_counter()
+
+                flex = _build_chart_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    image_url=image_url,
+                    price_info=price_meta.price_info,
+                    change_info=price_meta.change_info,
+                    update_time=price_meta.time_stamp,
+                    price_change=price_meta.price_change,
+                    active_mode="k_line",
+                    current_tf=tf,
+                )
+
+                t_flex1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing flex",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| sec =", round(t_flex1 - t_flex0, 3),
+                    flush=True,
+                )
+
+                print(
+                    "DEBUG stock timing total",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                    flush=True,
+                )
+
                 return _reply_with_title(
                     f"{stock_name} K線",
-                    _build_chart_flex(
-                        stock_id=meta.stock_id,
-                        stock_name=stock_name,
-                        image_url=image_url,
-                        price_info=price_meta.price_info,
-                        change_info=price_meta.change_info,
-                        update_time=price_meta.time_stamp,
-                        price_change=price_meta.price_change,
-                        active_mode="k_line",
-                        current_tf=tf,
-                    ),
+                    flex,
                 )
 
             if action == "chip":
+                t_chip0 = time.perf_counter()
+
                 chip_rows = get_institutional_chips(meta.stock_id)
+
+                t_chip1 = time.perf_counter()
+
                 image_url = generate_chip_chart(meta.stock_id, stock_name, chip_rows)
+
+                t_chart1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing chip_data_chart",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| data_sec =", round(t_chip1 - t_chip0, 3),
+                    "| chart_sec =", round(t_chart1 - t_chip1, 3),
+                    "| image_url =", bool(image_url),
+                    flush=True,
+                )
+
+                t_flex0 = time.perf_counter()
+
+                flex = _build_chart_flex(
+                    stock_id=meta.stock_id,
+                    stock_name=stock_name,
+                    image_url=image_url,
+                    price_info=price_meta.price_info,
+                    change_info=price_meta.change_info,
+                    update_time=price_meta.time_stamp,
+                    price_change=price_meta.price_change,
+                    active_mode="chip",
+                    current_tf=tf,
+                    image_aspect_ratio="4:5",
+                )
+
+                t_flex1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing flex",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| sec =", round(t_flex1 - t_flex0, 3),
+                    flush=True,
+                )
+
+                print(
+                    "DEBUG stock timing total",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                    flush=True,
+                )
 
                 return _reply_with_title(
                     f"{stock_name} 法人籌碼",
-                    _build_chart_flex(
-                        stock_id=meta.stock_id,
-                        stock_name=stock_name,
-                        image_url=image_url,
-                        price_info=price_meta.price_info,
-                        change_info=price_meta.change_info,
-                        update_time=price_meta.time_stamp,
-                        price_change=price_meta.price_change,
-                        active_mode="chip",
-                        current_tf=tf,
-                        image_aspect_ratio="4:5",   # 🔥 法人圖改高一點
-                    ),
+                    flex,
                 )
 
+        # -------------------------
+        # 3. 大戶持股
+        # -------------------------
         if action == "large_holder":
+            t_data0 = time.perf_counter()
+
             rows = get_large_holder_table(meta.stock_id)
+
+            t_data1 = time.perf_counter()
+
+            flex = _build_large_holder_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                rows=rows,
+                current_tf=requested_tf,
+            )
+
+            t_flex1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing large_holder",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| rows =", 0 if rows is None else len(rows),
+                "| data_sec =", round(t_data1 - t_data0, 3),
+                "| flex_sec =", round(t_flex1 - t_data1, 3),
+                "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+
             return _reply_with_title(
                 f"{stock_name} 大戶持股",
-                _build_large_holder_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    rows=rows,
-                    current_tf=requested_tf,
-                ),
+                flex,
             )
-                
+
+        # -------------------------
+        # 4. 融資券
+        # -------------------------
         if action == "margin":
+            t_data0 = time.perf_counter()
+
             rows = get_margin_table(meta.stock_id)
+
+            t_data1 = time.perf_counter()
+
+            flex = _build_margin_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                rows=rows,
+                current_tf=requested_tf,
+            )
+
+            t_flex1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing margin",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| rows =", 0 if rows is None else len(rows),
+                "| data_sec =", round(t_data1 - t_data0, 3),
+                "| flex_sec =", round(t_flex1 - t_data1, 3),
+                "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+
             return _reply_with_title(
                 f"{stock_name} 融資券",
-                _build_margin_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    rows=rows,
-                    current_tf=requested_tf,
-                ),
+                flex,
             )
-                
+
+        # -------------------------
+        # 5. 個股期貨
+        # -------------------------
         if action in {"futures", "futures_day", "futures_all"}:
             futures_session_mode = "day"
 
             if action == "futures_all":
                 futures_session_mode = "all"
+
+            t_data0 = time.perf_counter()
 
             snapshot = get_stock_futures_snapshot(
                 meta.stock_id,
@@ -2598,29 +2848,43 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 session_mode=futures_session_mode,
             )
 
+            t_data1 = time.perf_counter()
+
             title = snapshot.futures_name or f"{stock_name}期貨"
+
+            flex = _build_futures_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                snapshot=snapshot,
+                current_tf=requested_tf,
+                active_session=futures_session_mode,
+            )
+
+            t_flex1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing futures",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| session_mode =", futures_session_mode,
+                "| available =", getattr(snapshot, "available", None),
+                "| data_sec =", round(t_data1 - t_data0, 3),
+                "| flex_sec =", round(t_flex1 - t_data1, 3),
+                "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
 
             return _reply_with_title(
                 title,
-                _build_futures_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    snapshot=snapshot,
-                    current_tf=requested_tf,
-                    active_session=futures_session_mode,
-                ),
+                flex,
             )
-            title = snapshot.futures_name or f"{stock_name}期貨"
 
-            return _reply_with_title(
-                title,
-                _build_futures_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    snapshot=snapshot,
-                    current_tf=requested_tf,
-                ),
-            )
+        print(
+            "DEBUG stock timing unsupported",
+            "| stock_id =", getattr(meta, "stock_id", ""),
+            "| action =", action,
+            "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+            flush=True,
+        )
 
         return text_message(f"目前不支援的功能：{action}")
 
