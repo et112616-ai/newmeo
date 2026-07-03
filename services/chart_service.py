@@ -70,25 +70,91 @@ def _set_tw_stock_intraday_axis(ax, df: pd.DataFrame) -> None:
 
 def _get_reference_price(df: pd.DataFrame) -> float:
     """
-    取得平盤價。
-    優先使用 stock_service.py 放進 df.attrs 的 reference_price。
+    取得即時圖參考價 / 昨收。
+
+    優先順序：
+    1. df.attrs["previous_close"]：Yahoo chart API meta 的真正昨收。
+    2. df.attrs["chart_previous_close"]
+    3. df.attrs["regular_market_previous_close"]
+    4. df.attrs["prev_close"]
+    5. df 欄位 previous_close / prev_close / Adj Close 等。
+    6. 最後才 fallback 第一筆 Close。
+
+    注意：
+    不能優先用第一筆 Close，否則遇到跳空開盤會把開盤附近價格誤當昨收。
     """
-    ref = df.attrs.get("reference_price")
+    if df is None or df.empty:
+        return 0.0
 
+    # 1. 先讀 DataFrame attrs
+    attr_keys = [
+        "previous_close",
+        "chart_previous_close",
+        "regular_market_previous_close",
+        "prev_close",
+        "reference_price",
+        "ref_price",
+    ]
+
+    for key in attr_keys:
+        try:
+            value = df.attrs.get(key)
+
+            if value is None:
+                continue
+
+            value = float(value)
+
+            if value > 0:
+                return value
+
+        except Exception:
+            continue
+
+    # 2. 再讀欄位
+    column_keys = [
+        "previous_close",
+        "PreviousClose",
+        "prev_close",
+        "PrevClose",
+        "reference_price",
+        "ReferencePrice",
+        "ref_price",
+        "RefPrice",
+    ]
+
+    for col in column_keys:
+        if col not in df.columns:
+            continue
+
+        try:
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+            if values.empty:
+                continue
+
+            value = float(values.iloc[-1])
+
+            if value > 0:
+                return value
+
+        except Exception:
+            continue
+
+    # 3. 最後 fallback：第一筆 Close
     try:
-        if ref:
-            return float(ref)
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+
+        if not close.empty:
+            value = float(close.iloc[0])
+
+            if value > 0:
+                return value
+
     except Exception:
         pass
 
-    try:
-        if "Open" in df and not df["Open"].empty:
-            return float(df["Open"].iloc[0])
-    except Exception:
-        pass
-
-    return float(df["Close"].iloc[0])
-
+    return 0.0
 
 def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     """
@@ -177,6 +243,24 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     latest_change = latest_price - ref_price
     latest_pct = (latest_change / ref_price * 100) if ref_price else 0.0
 
+    print(
+        "DEBUG instant chart reference",
+        "| stock_id =",
+        stock_id,
+        "| stock_name =",
+        stock_name,
+        "| ref_price =",
+        ref_price,
+        "| df_attrs =",
+        {
+            "previous_close": df.attrs.get("previous_close"),
+            "regular_market_price": df.attrs.get("regular_market_price"),
+            "symbol": df.attrs.get("symbol"),
+            "source": df.attrs.get("source"),
+        },
+        flush=True,
+    )
+    
     day_high = float(close.max())
     day_low = float(close.min())
 
@@ -191,7 +275,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.95, 3.6, 1.15],
+        height_ratios=[0.45, 3.6, 1.15],
         hspace=0.06,
     )
 
@@ -203,61 +287,42 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     ax_price.set_facecolor("#FAFBFC")
     ax_vol.set_facecolor("#FAFBFC")
 
-    # ===== 上方資訊列 =====
-    title_text = f"{stock_id} {stock_name} 即時走勢"
-    price_text = f"{latest_price:.2f}"
-    change_text = f"{latest_change:+.2f} ({latest_pct:+.2f}%)"
+    # ===== 下方資訊列 =====
+    if "Open" in df.columns:
+        open_price = float(pd.to_numeric(df["Open"], errors="coerce").dropna().iloc[0])
+    else:
+        open_price = float(close.iloc[0])
+
+    if "High" in df.columns:
+        day_high = float(pd.to_numeric(df["High"], errors="coerce").max())
+    else:
+        day_high = float(close.max())
+
+    if "Low" in df.columns:
+        day_low = float(pd.to_numeric(df["Low"], errors="coerce").min())
+    else:
+        day_low = float(close.min())
+
+    total_volume = float(volume.sum())
+
     info_text = (
-        f"更新時間 {latest_time}    "
-        f"昨收 {ref_price:.2f}    "
-        f"最高 {day_high:.2f}    "
-        f"最低 {day_low:.2f}"
+        f"昨收 {ref_price:.2f}　"
+        f"開盤 {open_price:.2f}　"
+        f"最高 {day_high:.2f}　"
+        f"最低 {day_low:.2f}　"
+        f"參考 {ref_price:.2f}　"
+        f"成交量 {total_volume:,.0f}"
     )
 
     ax_info.text(
         0.01,
-        0.78,
-        title_text,
+        0.45,
+        info_text,
         fontsize=17,
         fontweight="bold",
-        color="#111111",
+        color="#333333",
         ha="left",
         va="center",
-        **font_kwargs,
-    )
-
-    ax_info.text(
-        0.01,
-        0.34,
-        price_text,
-        fontsize=22,
-        fontweight="bold",
-        color=price_color,
-        ha="left",
-        va="center",
-        **font_kwargs,
-    )
-
-    ax_info.text(
-        0.22,
-        0.34,
-        change_text,
-        fontsize=15,
-        fontweight="bold",
-        color=price_color,
-        ha="left",
-        va="center",
-        **font_kwargs,
-    )
-
-    ax_info.text(
-        0.01,
-        0.02,
-        info_text,
-        fontsize=11.5,
-        color="#666666",
-        ha="left",
-        va="bottom",
         **font_kwargs,
     )
 
