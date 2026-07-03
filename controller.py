@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, get_stock_intraday_kbars, get_stock_intraday_yahoo_direct
+from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, append_stock_snapshot_to_intraday_df_fast, get_stock_intraday_kbars, get_stock_intraday_yahoo_direct
 from services.market_margin_service import get_market_margin_snapshot
 
 from typing import Any
@@ -2728,7 +2728,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_append0 = time.perf_counter()
 
             if tf in {"1m", "5m"}:
-                df = append_stock_snapshot_to_intraday_df(df, meta.stock_id)
+                import os
+
+                allow_cold_login = (
+                    str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
+                    == "1"
+                )
+
+                df = append_stock_snapshot_to_intraday_df_fast(
+                    df,
+                    meta.stock_id,
+                    allow_cold_login=allow_cold_login,
+                )
 
             t_append1 = time.perf_counter()
 
