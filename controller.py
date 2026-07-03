@@ -2474,7 +2474,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 session_mode = "all" if action == "market_future_all" else "day"
 
                 snapshot = get_market_future_snapshot(session_mode=session_mode)
-                index_snapshot = (with_chart=False)
+                snapshot = get_market_index_snapshot(with_chart=True)
 
                 return _reply_with_title(
                     "台指期",
