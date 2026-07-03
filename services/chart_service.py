@@ -142,71 +142,257 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     return ref_price
 
 def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
+    """
+    個股即時圖（美化版）
+    功能：
+    1. 中文標題
+    2. 上方資訊列：最新價 / 漲跌 / 漲跌幅 / 昨收 / 最高 / 最低
+    3. 中間即時折線圖
+    4. 下方成交量柱狀圖
+    5. 右側顯示漲跌幅 %
+    """
     if df.empty:
-        return _empty_chart(f"{stock_id}", "No intraday data")
+        return _empty_chart(f"{stock_id} {stock_name}", "暫無即時資料")
+
+    font_kwargs = _get_font_kwargs_safe()
 
     df = df.copy()
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    df = df.dropna(subset=["Close"])
 
-    fig = plt.figure(figsize=(7.2, 6.2), dpi=120, facecolor="white")
-    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+    if df.empty:
+        return _empty_chart(f"{stock_id} {stock_name}", "暫無即時資料")
 
-    ax_p = fig.add_subplot(gs[0])
-    ax_v = fig.add_subplot(gs[1], sharex=ax_p)
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
 
-    ax_p.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
+    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
 
     close = df["Close"].astype(float)
+    volume = df["Volume"].astype(float)
+
     ref_price = _get_reference_price(df)
+    latest_price = float(close.iloc[-1])
+    latest_time = df.index[-1].strftime("%H:%M")
+    latest_change = latest_price - ref_price
+    latest_pct = (latest_change / ref_price * 100) if ref_price else 0.0
 
-    # ===== 上方價格線 =====
-    ax_p.plot(df.index, close, linewidth=2.0, label="Price")
+    day_high = float(close.max())
+    day_low = float(close.min())
 
-    ax_p.fill_between(
+    if latest_change > 0:
+        price_color = "#E53935"
+    elif latest_change < 0:
+        price_color = "#1E9F5A"
+    else:
+        price_color = "#444444"
+
+    fig = plt.figure(figsize=(8.6, 6.9), dpi=140, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.95, 3.6, 1.15],
+        hspace=0.06,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax_price = fig.add_subplot(gs[1])
+    ax_vol = fig.add_subplot(gs[2], sharex=ax_price)
+
+    ax_info.axis("off")
+    ax_price.set_facecolor("#FAFBFC")
+    ax_vol.set_facecolor("#FAFBFC")
+
+    # ===== 上方資訊列 =====
+    title_text = f"{stock_id} {stock_name} 即時走勢"
+    price_text = f"{latest_price:.2f}"
+    change_text = f"{latest_change:+.2f} ({latest_pct:+.2f}%)"
+    info_text = (
+        f"更新時間 {latest_time}    "
+        f"昨收 {ref_price:.2f}    "
+        f"最高 {day_high:.2f}    "
+        f"最低 {day_low:.2f}"
+    )
+
+    ax_info.text(
+        0.01,
+        0.78,
+        title_text,
+        fontsize=17,
+        fontweight="bold",
+        color="#111111",
+        ha="left",
+        va="center",
+        **font_kwargs,
+    )
+
+    ax_info.text(
+        0.01,
+        0.34,
+        price_text,
+        fontsize=22,
+        fontweight="bold",
+        color=price_color,
+        ha="left",
+        va="center",
+        **font_kwargs,
+    )
+
+    ax_info.text(
+        0.22,
+        0.34,
+        change_text,
+        fontsize=15,
+        fontweight="bold",
+        color=price_color,
+        ha="left",
+        va="center",
+        **font_kwargs,
+    )
+
+    ax_info.text(
+        0.01,
+        0.02,
+        info_text,
+        fontsize=11.5,
+        color="#666666",
+        ha="left",
+        va="bottom",
+        **font_kwargs,
+    )
+
+    # ===== 即時折線圖 =====
+    ax_price.plot(
+        df.index,
+        close,
+        linewidth=2.4,
+        color=price_color,
+        solid_capstyle="round",
+        zorder=3,
+    )
+
+    ax_price.fill_between(
         df.index,
         close,
         ref_price,
         where=close >= ref_price,
-        alpha=0.18,
         interpolate=True,
+        alpha=0.14,
+        color="#E53935",
+        zorder=1,
     )
 
-    ax_p.fill_between(
+    ax_price.fill_between(
         df.index,
         close,
         ref_price,
         where=close < ref_price,
-        alpha=0.12,
         interpolate=True,
+        alpha=0.12,
+        color="#1E9F5A",
+        zorder=1,
     )
 
-    ax_p.set_title(f"{stock_id} {stock_name} 即時走勢", fontsize=13, fontweight="bold")
+    # 昨收虛線
+    ax_price.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.1,
+        color="#888888",
+        alpha=0.85,
+        zorder=2,
+    )
 
-    _set_tw_stock_intraday_axis(ax_p, df)
-    _set_centered_price_axis(ax_p, df)
+    # 最新價虛線
+    ax_price.axhline(
+        latest_price,
+        linestyle=":",
+        linewidth=1.0,
+        color=price_color,
+        alpha=0.75,
+        zorder=2,
+    )
 
-    ax_p.grid(True, linestyle=":", alpha=0.55)
-    ax_p.legend(loc="best", fontsize=8)
+    # 最新點
+    ax_price.scatter(
+        df.index[-1],
+        latest_price,
+        s=34,
+        color=price_color,
+        zorder=4,
+    )
 
-    # ===== 下方成交量 =====
-    volumes = df["Volume"].fillna(0).astype(float)
+    # 最新價標籤
+    ax_price.annotate(
+        f"{latest_price:.2f}",
+        xy=(df.index[-1], latest_price),
+        xytext=(8, 0),
+        textcoords="offset points",
+        va="center",
+        ha="left",
+        fontsize=10.5,
+        color=price_color,
+        bbox=dict(
+            boxstyle="round,pad=0.22",
+            fc="white",
+            ec=price_color,
+            lw=0.9,
+            alpha=0.95,
+        ),
+        **font_kwargs,
+    )
 
-    prev_close = close.shift(1)
-    colors = [
-        "#FF3B30" if i == 0 or close.iloc[i] >= prev_close.iloc[i] else "#34C759"
-        for i in range(len(close))
-    ]
+    _set_tw_stock_intraday_axis(ax_price, df)
+    _set_centered_price_axis(ax_price, df)
 
-    ax_v.bar(df.index, volumes, color=colors, width=0.0009)
+    ax_price.grid(True, linestyle=":", alpha=0.25)
+    ax_price.tick_params(axis="x", labelsize=10)
+    ax_price.tick_params(axis="y", labelsize=10)
 
-    _set_tw_stock_intraday_axis(ax_v, df)
+    ax_price.spines["top"].set_visible(False)
+    ax_price.spines["right"].set_visible(False)
 
-    ax_v.grid(True, linestyle=":", alpha=0.45)
-    ax_v.set_ylabel("Volume", fontsize=8)
+    # ===== 成交量 =====
+    prev_close = close.shift(1).fillna(ref_price)
+    vol_colors = ["#E53935" if c >= p else "#1E9F5A" for c, p in zip(close, prev_close)]
 
-    plt.setp(ax_p.get_xticklabels(), visible=False)
+    ax_vol.bar(
+        df.index,
+        volume,
+        width=0.0032,
+        color=vol_colors,
+        edgecolor="none",
+        alpha=0.95,
+    )
 
-    fig.tight_layout()
+    ax_vol.set_ylabel(
+        "成交量",
+        fontsize=10,
+        color="#555555",
+        **font_kwargs,
+    )
+
+    ax_vol.grid(True, axis="y", linestyle=":", alpha=0.22)
+    ax_vol.tick_params(axis="x", labelsize=10)
+    ax_vol.tick_params(axis="y", labelsize=9)
+
+    ax_vol.spines["top"].set_visible(False)
+    ax_vol.spines["right"].set_visible(False)
+
+    # X軸時間格式
+    ax_vol.xaxis.set_major_locator(mdates.MinuteLocator(byminute=[0, 30]))
+    ax_vol.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    # 隱藏上圖 X 軸標籤
+    plt.setp(ax_price.get_xticklabels(), visible=False)
+
+    fig.subplots_adjust(
+        top=0.96,
+        bottom=0.08,
+        left=0.09,
+        right=0.92,
+        hspace=0.06,
+    )
 
     return publish_figure(fig, f"{stock_id}_instant")
     
