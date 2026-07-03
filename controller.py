@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df
+from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, get_stock_intraday_kbars
 from services.market_margin_service import get_market_margin_snapshot
 
 from typing import Any
@@ -752,38 +752,118 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         },
     }
 
-def _get_history_df_tf(meta, requested_tf: str):
+def _get_history_df_tf(meta, requested_tf):
     """
-    相容不同版本的 get_history()。
-
-    可能回傳：
-    1. df
-    2. df, tf
-    3. (df, tf), something   # 防止巢狀 tuple
+    取得個股行情資料。
+    優先順序：
+    - 1m / 5m：先用 Shioaji kbars，避免 yfinance rate limit。
+    - Shioaji 失敗時，才 fallback 原本 get_history()。
+    - D / W / M：維持原本 get_history()。
     """
-    result = get_history(meta, requested_tf)
-    tf = normalize_time_frame(requested_tf)
+    import time
 
-    # 防止 get_history 回傳 tuple 或巢狀 tuple
-    while isinstance(result, tuple):
-        if len(result) >= 2 and result[1]:
-            try:
-                tf = normalize_time_frame(result[1])
-            except Exception:
-                pass
+    t0 = time.perf_counter()
 
-        result = result[0] if len(result) >= 1 else result
+    tf = str(requested_tf or "D").strip()
 
-    df = result
+    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
 
-    print(
-        "_get_history_df_tf | "
-        f"requested_tf={requested_tf} | tf={tf} | "
-        f"df_type={type(df)}",
-        flush=True,
-    )
+    if tf in {"1m", "5m"}:
+        try:
+            t_shioaji0 = time.perf_counter()
 
-    return df, tf
+            df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
+
+            t_shioaji1 = time.perf_counter()
+
+            if df is not None and not df.empty:
+                print(
+                    "_get_history_df_tf | source=shioaji_kbars",
+                    "| stock_id =",
+                    stock_id,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| rows=",
+                    len(df),
+                    "| sec=",
+                    round(t_shioaji1 - t_shioaji0, 3),
+                    "| total_sec=",
+                    round(time.perf_counter() - t0, 3),
+                    flush=True,
+                )
+
+                return df, tf
+
+            print(
+                "_get_history_df_tf | source=shioaji_kbars_empty",
+                "| stock_id =",
+                stock_id,
+                "| requested_tf=" + str(requested_tf),
+                "| tf=" + tf,
+                "| sec=",
+                round(t_shioaji1 - t_shioaji0, 3),
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "_get_history_df_tf | source=shioaji_kbars_failed",
+                "| stock_id =",
+                stock_id,
+                "| requested_tf=" + str(requested_tf),
+                "| tf=" + tf,
+                "| error=",
+                repr(exc),
+                flush=True,
+            )
+
+    t_yf0 = time.perf_counter()
+
+    try:
+        result = get_history(meta, requested_tf)
+
+        t_yf1 = time.perf_counter()
+
+        if isinstance(result, tuple):
+            df, tf = result
+        else:
+            df = result
+            tf = requested_tf
+
+        print(
+            "_get_history_df_tf | source=get_history",
+            "| stock_id =",
+            stock_id,
+            "| requested_tf=" + str(requested_tf),
+            "| tf=" + str(tf),
+            "| df_type=" + str(type(df)),
+            "| rows=",
+            0 if df is None else len(df),
+            "| sec=",
+            round(t_yf1 - t_yf0, 3),
+            "| total_sec=",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return df, tf
+
+    except Exception as exc:
+        print(
+            "_get_history_df_tf | source=get_history_failed",
+            "| stock_id =",
+            stock_id,
+            "| requested_tf=" + str(requested_tf),
+            "| error=",
+            repr(exc),
+            "| sec=",
+            round(time.perf_counter() - t_yf0, 3),
+            "| total_sec=",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        raise
     
 def _price_color(change: float) -> str:
     if change > 0:
