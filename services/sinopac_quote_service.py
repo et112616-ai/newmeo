@@ -541,7 +541,226 @@ def get_futures_snapshot(
         )
 
         return data
-
+    
     except Exception as exc:
         _debug("futures snapshot failed", fid, yyyymm, exc)
+        return None
+
+def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 1):
+    """
+    使用 Shioaji kbars 取得個股盤中 1m / 5m K線。
+    回傳欄位格式會整理成 chart_service / stock_service 常用格式：
+    Open, High, Low, Close, Volume
+    index = DatetimeIndex
+
+    time_frame:
+    - "1m": 回傳 1分K
+    - "5m": 由 1分K resample 成 5分K
+    """
+    import time
+    from datetime import timedelta
+
+    t0 = time.perf_counter()
+
+    stock_id = str(stock_id or "").strip()
+    tf = str(time_frame or "1m").strip()
+
+    if not stock_id:
+        print(
+            "DEBUG shioaji kbars | empty stock_id",
+            flush=True,
+        )
+        return None
+
+    if tf not in {"1m", "5m"}:
+        print(
+            "DEBUG shioaji kbars | unsupported tf =",
+            tf,
+            flush=True,
+        )
+        return None
+
+    try:
+        api = get_api()
+
+        if api is None:
+            print(
+                "DEBUG shioaji kbars | api none",
+                "| stock =",
+                stock_id,
+                flush=True,
+            )
+            return None
+
+        try:
+            contract = api.Contracts.Stocks[stock_id]
+        except Exception:
+            try:
+                contract = getattr(api.Contracts.Stocks, stock_id)
+            except Exception:
+                contract = None
+
+        if contract is None:
+            print(
+                "DEBUG shioaji kbars | contract none",
+                "| stock =",
+                stock_id,
+                flush=True,
+            )
+            return None
+
+        now = pd.Timestamp.now(tz="Asia/Taipei")
+        end_date = now.date()
+        start_date = end_date - timedelta(days=max(0, int(days) - 1))
+
+        kbars = api.kbars(
+            contract=contract,
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+        )
+
+        raw_df = pd.DataFrame({**kbars})
+
+        if raw_df is None or raw_df.empty:
+            print(
+                "DEBUG shioaji kbars | empty",
+                "| stock =",
+                stock_id,
+                "| tf =",
+                tf,
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+            return None
+
+        # Shioaji kbars 常見欄位：
+        # ts, Open, High, Low, Close, Volume, Amount
+        # 保險處理大小寫。
+        rename_map = {}
+
+        for col in raw_df.columns:
+            lower = str(col).lower()
+
+            if lower == "ts":
+                rename_map[col] = "ts"
+            elif lower == "open":
+                rename_map[col] = "Open"
+            elif lower == "high":
+                rename_map[col] = "High"
+            elif lower == "low":
+                rename_map[col] = "Low"
+            elif lower == "close":
+                rename_map[col] = "Close"
+            elif lower == "volume":
+                rename_map[col] = "Volume"
+            elif lower == "amount":
+                rename_map[col] = "Amount"
+
+        df = raw_df.rename(columns=rename_map).copy()
+
+        if "ts" not in df.columns:
+            print(
+                "DEBUG shioaji kbars | missing ts",
+                "| stock =",
+                stock_id,
+                "| cols =",
+                list(df.columns),
+                flush=True,
+            )
+            return None
+
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+
+        if getattr(df["ts"].dt, "tz", None) is not None:
+            try:
+                df["ts"] = df["ts"].dt.tz_convert("Asia/Taipei").dt.tz_localize(None)
+            except Exception:
+                pass
+
+        df = df.dropna(subset=["ts"])
+        df = df.set_index("ts")
+        df = df.sort_index()
+
+        required = ["Open", "High", "Low", "Close", "Volume"]
+
+        for col in required:
+            if col not in df.columns:
+                df[col] = 0
+
+        df = df[required].copy()
+
+        for col in required:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        df = df[df["Close"] > 0]
+
+        if df.empty:
+            print(
+                "DEBUG shioaji kbars | no valid close",
+                "| stock =",
+                stock_id,
+                "| tf =",
+                tf,
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+            return None
+
+        for col in ["Open", "High", "Low"]:
+            df.loc[df[col] <= 0, col] = df.loc[df[col] <= 0, "Close"]
+
+        df["High"] = df[["High", "Open", "Close"]].max(axis=1)
+        df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
+
+        if tf == "5m":
+            df = (
+                df.resample("5min")
+                .agg(
+                    {
+                        "Open": "first",
+                        "High": "max",
+                        "Low": "min",
+                        "Close": "last",
+                        "Volume": "sum",
+                    }
+                )
+                .dropna(subset=["Open", "High", "Low", "Close"])
+            )
+
+            df = df[df["Close"] > 0]
+
+        print(
+            "DEBUG shioaji kbars",
+            "| stock =",
+            stock_id,
+            "| tf =",
+            tf,
+            "| rows =",
+            len(df),
+            "| first =",
+            df.index[0] if len(df) else "",
+            "| last =",
+            df.index[-1] if len(df) else "",
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return df
+
+    except Exception as exc:
+        print(
+            "DEBUG shioaji kbars failed",
+            "| stock =",
+            stock_id,
+            "| tf =",
+            tf,
+            "| error =",
+            repr(exc),
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
         return None
