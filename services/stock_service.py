@@ -765,7 +765,70 @@ def get_stock_name(meta: StockMeta) -> str:
         return meta.stock_name
 
     return meta.stock_id
-    
+
+def _get_previous_close_from_df_attrs(df) -> float:
+    """
+    從 DataFrame attrs / 欄位取得真正昨收。
+    Yahoo direct 會把 previousClose 存在 df.attrs["previous_close"]。
+    """
+    if df is None:
+        return 0.0
+
+    attr_keys = [
+        "previous_close",
+        "chart_previous_close",
+        "regular_market_previous_close",
+        "prev_close",
+        "reference_price",
+        "ref_price",
+    ]
+
+    for key in attr_keys:
+        try:
+            value = getattr(df, "attrs", {}).get(key)
+
+            if value is None:
+                continue
+
+            value = float(value)
+
+            if value > 0:
+                return value
+
+        except Exception:
+            continue
+
+    column_keys = [
+        "previous_close",
+        "PreviousClose",
+        "prev_close",
+        "PrevClose",
+        "reference_price",
+        "ReferencePrice",
+        "ref_price",
+        "RefPrice",
+    ]
+
+    for col in column_keys:
+        try:
+            if col not in df.columns:
+                continue
+
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+            if values.empty:
+                continue
+
+            value = float(values.iloc[-1])
+
+            if value > 0:
+                return value
+
+        except Exception:
+            continue
+
+    return 0.0
+
 def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
     """
     價格資訊。
@@ -783,13 +846,63 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
     latest = float(df["Close"].iloc[-1])
 
     if tf in {"1m", "5m"}:
-        ref_price = df.attrs.get("reference_price")
+        prev = 0.0
 
-        try:
-            prev = float(ref_price)
-        except Exception:
-            prev = 0.0
+        # 優先讀 Yahoo direct 存進 df.attrs 的真正昨收
+        for key in [
+            "previous_close",
+            "chart_previous_close",
+            "regular_market_previous_close",
+            "prev_close",
+            "reference_price",
+            "ref_price",
+        ]:
+            try:
+                value = df.attrs.get(key)
 
+                if value is None:
+                    continue
+
+                value = float(value)
+    
+                if value > 0:
+                    prev = value
+                    break
+
+            except Exception:
+                continue
+
+        # 如果 attrs 沒有，再檢查欄位
+        if not prev:
+            for col in [
+                "previous_close",
+                "PreviousClose",
+                "prev_close",
+                "PrevClose",
+                "reference_price",
+                "ReferencePrice",
+                "ref_price",
+                "RefPrice",
+            ]:
+                try:
+                    if col not in df.columns:
+                        continue
+
+                    values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+                    if values.empty:
+                        continue
+
+                    value = float(values.iloc[-1])
+
+                    if value > 0:
+                        prev = value
+                        break
+
+                except Exception:
+                    continue
+
+        # 最後 fallback，避免程式壞掉，但這不是最準
         if not prev:
             try:
                 prev = float(df["Open"].iloc[0])
@@ -800,6 +913,23 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
         pct = (change / prev * 100) if prev else 0.0
 
         stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
+
+        print(
+            "DEBUG build_price_meta intraday",
+            "| tf =", tf,
+            "| latest =", latest,
+            "| prev =", prev,
+            "| change =", change,
+            "| pct =", pct,
+            "| attrs =",
+            {
+                "previous_close": df.attrs.get("previous_close"),
+                "reference_price": df.attrs.get("reference_price"),
+                "symbol": df.attrs.get("symbol"),
+                "source": df.attrs.get("source"),
+            },
+            flush=True,
+        )
 
         return PriceMeta(
             price_info=f"{latest:.2f}",
