@@ -980,3 +980,105 @@ def get_stock_intraday_yahoo_direct(
     )
 
     return None
+
+def is_shioaji_api_ready() -> bool:
+    """
+    只檢查 Shioaji API 是否已經在目前 Render process 裡建立。
+    注意：這個函式不會呼叫 get_api()，所以不會觸發冷登入。
+    """
+    candidate_names = [
+        "_api",
+        "api",
+        "_SJ_API",
+        "SJ_API",
+        "_SHIOAJI_API",
+        "SHIOAJI_API",
+        "_shioaji_api",
+        "shioaji_api",
+    ]
+
+    for name in candidate_names:
+        value = globals().get(name)
+
+        if value is None:
+            continue
+
+        # 避免把 imported module / function 誤判成 api instance。
+        if callable(value):
+            continue
+
+        module_name = str(getattr(value, "__module__", "") or "").lower()
+        class_name = str(value.__class__.__name__ or "").lower()
+
+        if "shioaji" in module_name or "shioaji" in class_name or "shioaji" in str(type(value)).lower():
+            return True
+
+        # 有些 Shioaji instance type 字串不明顯，但通常會有 Contracts。
+        if hasattr(value, "Contracts"):
+            return True
+
+    return False
+
+
+def append_stock_snapshot_to_intraday_df_fast(
+    df,
+    stock_id: str,
+    allow_cold_login: bool = False,
+):
+    """
+    快速版 append snapshot。
+
+    allow_cold_login=False：
+    - 若 Shioaji 還沒登入，直接跳過，不觸發 get_api()。
+    - 避免使用者查第一檔股票時等 10~20 秒。
+
+    allow_cold_login=True：
+    - 行為接近原本 append_stock_snapshot_to_intraday_df()。
+    - 可用於 warmup 或你真的想強制拿永豐最新 snapshot 的情境。
+    """
+    import time
+
+    t0 = time.perf_counter()
+
+    stock_id = str(stock_id or "").strip()
+
+    if not allow_cold_login and not is_shioaji_api_ready():
+        print(
+            "DEBUG shioaji fast append skip",
+            "| stock =",
+            stock_id,
+            "| reason = cold_api",
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return df
+
+    try:
+        result = append_stock_snapshot_to_intraday_df(df, stock_id)
+
+        print(
+            "DEBUG shioaji fast append done",
+            "| stock =",
+            stock_id,
+            "| allow_cold_login =",
+            allow_cold_login,
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "DEBUG shioaji fast append failed",
+            "| stock =",
+            stock_id,
+            "| error =",
+            repr(exc),
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return df
