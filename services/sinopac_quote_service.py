@@ -866,6 +866,17 @@ def get_stock_intraday_yahoo_direct(
                 continue
 
             item = result[0]
+
+            meta_data = item.get("meta") or {}
+
+            yahoo_previous_close = (
+                meta_data.get("previousClose")
+                or meta_data.get("chartPreviousClose")
+                or meta_data.get("regularMarketPreviousClose")
+            )
+
+            yahoo_regular_price = meta_data.get("regularMarketPrice")
+
             timestamps = item.get("timestamp") or []
             indicators = item.get("indicators") or {}
             quote_data = (indicators.get("quote") or [{}])[0]
@@ -940,7 +951,19 @@ def get_stock_intraday_yahoo_direct(
             if df.empty:
                 last_error = "empty_after_resample"
                 continue
+            try:
+                if yahoo_previous_close is not None:
+                    df.attrs["previous_close"] = float(yahoo_previous_close)
 
+                if yahoo_regular_price is not None:
+                    df.attrs["regular_market_price"] = float(yahoo_regular_price)
+
+                df.attrs["symbol"] = symbol
+                df.attrs["source"] = "yahoo_direct"
+
+            except Exception:
+                pass
+            
             print(
                 "DEBUG yahoo_direct intraday",
                 "| stock =",
