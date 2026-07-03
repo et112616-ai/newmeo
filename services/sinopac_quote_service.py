@@ -764,3 +764,219 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
             flush=True,
         )
         return None
+
+def get_stock_intraday_yahoo_direct(
+    stock_id: str,
+    yf_symbol: str = "",
+    time_frame: str = "1m",
+    timeout: int = 5,
+):
+    """
+    使用 Yahoo chart API direct 抓個股盤中 1m / 5m 資料。
+
+    這不是 yfinance library，因此不會走 yfinance 的 cookie / crumb 流程，
+    可避開常見的 YFRateLimitError。
+
+    回傳：
+    - DataFrame
+    - index = DatetimeIndex
+    - columns = Open, High, Low, Close, Volume
+    """
+    import time
+    from urllib.parse import quote
+
+    import pandas as pd
+    import requests
+
+    t0 = time.perf_counter()
+
+    stock_id = str(stock_id or "").strip()
+    yf_symbol = str(yf_symbol or "").strip()
+    tf = str(time_frame or "1m").strip()
+
+    if tf not in {"1m", "5m"}:
+        print(
+            "DEBUG yahoo_direct intraday | unsupported tf =",
+            tf,
+            flush=True,
+        )
+        return None
+
+    symbols = []
+
+    if yf_symbol:
+        symbols.append(yf_symbol)
+
+    if stock_id:
+        symbols.extend([f"{stock_id}.TW", f"{stock_id}.TWO"])
+
+    clean_symbols = []
+
+    for symbol in symbols:
+        symbol = str(symbol or "").strip().upper()
+
+        if symbol and symbol not in clean_symbols:
+            clean_symbols.append(symbol)
+
+    if not clean_symbols:
+        return None
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    last_error = ""
+
+    for symbol in clean_symbols:
+        try:
+            url = "https://query1.finance.yahoo.com/v8/finance/chart/" + quote(symbol, safe="")
+
+            params = {
+                "range": "1d",
+                "interval": "1m",
+                "includePrePost": "false",
+                "events": "history",
+            }
+
+            resp = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            )
+
+            if resp.status_code != 200:
+                last_error = f"status={resp.status_code}"
+                continue
+
+            payload = resp.json()
+
+            chart = payload.get("chart") or {}
+            error = chart.get("error")
+
+            if error:
+                last_error = str(error)
+                continue
+
+            result = chart.get("result") or []
+
+            if not result:
+                last_error = "empty_result"
+                continue
+
+            item = result[0]
+            timestamps = item.get("timestamp") or []
+            indicators = item.get("indicators") or {}
+            quote_data = (indicators.get("quote") or [{}])[0]
+
+            if not timestamps or not quote_data:
+                last_error = "empty_timestamp_or_quote"
+                continue
+
+            length = len(timestamps)
+
+            def _same_len(values):
+                values = values or []
+
+                if len(values) != length:
+                    return [None] * length
+
+                return values
+
+            df = pd.DataFrame(
+                {
+                    "Open": _same_len(quote_data.get("open")),
+                    "High": _same_len(quote_data.get("high")),
+                    "Low": _same_len(quote_data.get("low")),
+                    "Close": _same_len(quote_data.get("close")),
+                    "Volume": _same_len(quote_data.get("volume")),
+                },
+                index=pd.to_datetime(timestamps, unit="s", utc=True)
+                .tz_convert("Asia/Taipei")
+                .tz_localize(None),
+            )
+
+            df = df.sort_index()
+
+            required = ["Open", "High", "Low", "Close", "Volume"]
+
+            for col in required:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = df.dropna(subset=["Close"])
+            df = df[df["Close"] > 0]
+
+            if df.empty:
+                last_error = "empty_valid_close"
+                continue
+
+            for col in ["Open", "High", "Low"]:
+                df[col] = df[col].fillna(df["Close"])
+                df.loc[df[col] <= 0, col] = df.loc[df[col] <= 0, "Close"]
+
+            df["Volume"] = df["Volume"].fillna(0)
+
+            df["High"] = df[["High", "Open", "Close"]].max(axis=1)
+            df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
+
+            if tf == "5m":
+                df = (
+                    df.resample("5min")
+                    .agg(
+                        {
+                            "Open": "first",
+                            "High": "max",
+                            "Low": "min",
+                            "Close": "last",
+                            "Volume": "sum",
+                        }
+                    )
+                    .dropna(subset=["Open", "High", "Low", "Close"])
+                )
+
+                df = df[df["Close"] > 0]
+
+            if df.empty:
+                last_error = "empty_after_resample"
+                continue
+
+            print(
+                "DEBUG yahoo_direct intraday",
+                "| stock =",
+                stock_id,
+                "| symbol =",
+                symbol,
+                "| tf =",
+                tf,
+                "| rows =",
+                len(df),
+                "| first =",
+                df.index[0] if len(df) else "",
+                "| last =",
+                df.index[-1] if len(df) else "",
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+
+            return df
+
+        except Exception as exc:
+            last_error = repr(exc)
+            continue
+
+    print(
+        "DEBUG yahoo_direct intraday failed",
+        "| stock =",
+        stock_id,
+        "| symbols =",
+        clean_symbols,
+        "| error =",
+        last_error,
+        "| sec =",
+        round(time.perf_counter() - t0, 3),
+        flush=True,
+    )
+
+    return None
