@@ -4,6 +4,9 @@ from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
 from services.sinopac_quote_service import get_stock_snapshot
 from services.sinopac_quote_service import get_api
+from services.market_index_service import get_market_index_snapshot
+from services.market_future_service import get_market_future_snapshot
+from services.sinopac_quote_service import get_api, get_stock_snapshot
 
 import base64
 import hashlib
@@ -142,12 +145,11 @@ def warmup_all():
     """
     預熱 LINE Bot 常用資料。
 
-    這個 endpoint 是給 UptimeRobot / cron-job.org / Render Cron 打的。
-    目標不是回覆使用者，而是讓：
-    - Render 不冷啟動
-    - Shioaji get_api() / contracts 先載入
-    - 大盤 K 線圖先產好
-    - 常用股票 snapshot 先查過
+    目標：
+    - 讓 Render 不冷啟動
+    - 先執行 Shioaji get_api()，把 login / contracts 成本提前
+    - 預先生大盤 K 線圖
+    - 預先查台指期與常用股票 snapshot
     """
 
     token = request.args.get("token", "")
@@ -170,6 +172,10 @@ def warmup_all():
         "items": {},
         "stocks": {},
     }
+
+    # -------------------------
+    # 0. Shioaji 明確登入 / contracts 預載
+    # -------------------------
     try:
         t = time.perf_counter()
 
@@ -185,6 +191,7 @@ def warmup_all():
             "ok": False,
             "error": str(exc),
         }
+
     # -------------------------
     # 1. 大盤：即時 + K線圖
     # -------------------------
@@ -292,8 +299,12 @@ def warmup_all():
         "DEBUG warmup_all",
         "| total_seconds =",
         result["total_seconds"],
+        "| shioaji_login =",
+        result["items"].get("shioaji_login"),
         "| market_index =",
         result["items"].get("market_index"),
+        "| market_future_day =",
+        result["items"].get("market_future_day"),
         "| stocks_count =",
         len(stock_ids),
         flush=True,
