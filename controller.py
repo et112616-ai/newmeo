@@ -2425,7 +2425,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
                     t0 = time.perf_counter()
 
-                    snapshot = (with_chart=True)
+                    snapshot = get_market_index_snapshot(with_chart=True)
 
                     t1 = time.perf_counter()
 
