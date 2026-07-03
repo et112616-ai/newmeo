@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, get_stock_intraday_kbars
+from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, get_stock_intraday_kbars, get_stock_intraday_yahoo_direct
 from services.market_margin_service import get_market_margin_snapshot
 
 from typing import Any
@@ -755,38 +755,53 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
 def _get_history_df_tf(meta, requested_tf):
     """
     取得個股行情資料。
-    優先順序：
-    - 1m / 5m：先用 Shioaji kbars，避免 yfinance rate limit。
-    - Shioaji 失敗時，才 fallback 原本 get_history()。
-    - D / W / M：維持原本 get_history()。
+
+    1m / 5m 優先順序：
+    1. Yahoo chart API direct
+    2. Shioaji kbars
+    3. 原本 get_history() / yfinance
+
+    D / W / M：
+    維持原本 get_history()。
     """
+    import os
     import time
 
     t0 = time.perf_counter()
 
     tf = str(requested_tf or "D").strip()
-
     stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+    yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
 
     if tf in {"1m", "5m"}:
+        # -------------------------
+        # 1. Yahoo chart API direct
+        # -------------------------
         try:
-            t_shioaji0 = time.perf_counter()
+            t_yahoo0 = time.perf_counter()
 
-            df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
+            df = get_stock_intraday_yahoo_direct(
+                stock_id=stock_id,
+                yf_symbol=yf_symbol,
+                time_frame=tf,
+                timeout=int(os.getenv("YAHOO_DIRECT_TIMEOUT_SECONDS", "5")),
+            )
 
-            t_shioaji1 = time.perf_counter()
+            t_yahoo1 = time.perf_counter()
 
             if df is not None and not df.empty:
                 print(
-                    "_get_history_df_tf | source=shioaji_kbars",
+                    "_get_history_df_tf | source=yahoo_direct",
                     "| stock_id =",
                     stock_id,
+                    "| yf_symbol =",
+                    yf_symbol,
                     "| requested_tf=" + str(requested_tf),
                     "| tf=" + tf,
                     "| rows=",
                     len(df),
                     "| sec=",
-                    round(t_shioaji1 - t_shioaji0, 3),
+                    round(t_yahoo1 - t_yahoo0, 3),
                     "| total_sec=",
                     round(time.perf_counter() - t0, 3),
                     flush=True,
@@ -795,21 +810,25 @@ def _get_history_df_tf(meta, requested_tf):
                 return df, tf
 
             print(
-                "_get_history_df_tf | source=shioaji_kbars_empty",
+                "_get_history_df_tf | source=yahoo_direct_empty",
                 "| stock_id =",
                 stock_id,
+                "| yf_symbol =",
+                yf_symbol,
                 "| requested_tf=" + str(requested_tf),
                 "| tf=" + tf,
                 "| sec=",
-                round(t_shioaji1 - t_shioaji0, 3),
+                round(t_yahoo1 - t_yahoo0, 3),
                 flush=True,
             )
 
         except Exception as exc:
             print(
-                "_get_history_df_tf | source=shioaji_kbars_failed",
+                "_get_history_df_tf | source=yahoo_direct_failed",
                 "| stock_id =",
                 stock_id,
+                "| yf_symbol =",
+                yf_symbol,
                 "| requested_tf=" + str(requested_tf),
                 "| tf=" + tf,
                 "| error=",
@@ -817,12 +836,69 @@ def _get_history_df_tf(meta, requested_tf):
                 flush=True,
             )
 
-    t_yf0 = time.perf_counter()
+        # -------------------------
+        # 2. Shioaji kbars fallback
+        # -------------------------
+        use_shioaji_kbars = str(os.getenv("USE_SHIOAJI_KBARS_FALLBACK", "1")).strip() != "0"
+
+        if use_shioaji_kbars:
+            try:
+                t_shioaji0 = time.perf_counter()
+
+                df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
+
+                t_shioaji1 = time.perf_counter()
+
+                if df is not None and not df.empty:
+                    print(
+                        "_get_history_df_tf | source=shioaji_kbars",
+                        "| stock_id =",
+                        stock_id,
+                        "| requested_tf=" + str(requested_tf),
+                        "| tf=" + tf,
+                        "| rows=",
+                        len(df),
+                        "| sec=",
+                        round(t_shioaji1 - t_shioaji0, 3),
+                        "| total_sec=",
+                        round(time.perf_counter() - t0, 3),
+                        flush=True,
+                    )
+
+                    return df, tf
+
+                print(
+                    "_get_history_df_tf | source=shioaji_kbars_empty",
+                    "| stock_id =",
+                    stock_id,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| sec=",
+                    round(t_shioaji1 - t_shioaji0, 3),
+                    flush=True,
+                )
+
+            except Exception as exc:
+                print(
+                    "_get_history_df_tf | source=shioaji_kbars_failed",
+                    "| stock_id =",
+                    stock_id,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| error=",
+                    repr(exc),
+                    flush=True,
+                )
+
+    # -------------------------
+    # 3. 原本 get_history() fallback
+    # -------------------------
+    t_history0 = time.perf_counter()
 
     try:
         result = get_history(meta, requested_tf)
 
-        t_yf1 = time.perf_counter()
+        t_history1 = time.perf_counter()
 
         if isinstance(result, tuple):
             df, tf = result
@@ -834,13 +910,15 @@ def _get_history_df_tf(meta, requested_tf):
             "_get_history_df_tf | source=get_history",
             "| stock_id =",
             stock_id,
+            "| yf_symbol =",
+            yf_symbol,
             "| requested_tf=" + str(requested_tf),
             "| tf=" + str(tf),
             "| df_type=" + str(type(df)),
             "| rows=",
             0 if df is None else len(df),
             "| sec=",
-            round(t_yf1 - t_yf0, 3),
+            round(t_history1 - t_history0, 3),
             "| total_sec=",
             round(time.perf_counter() - t0, 3),
             flush=True,
@@ -853,11 +931,13 @@ def _get_history_df_tf(meta, requested_tf):
             "_get_history_df_tf | source=get_history_failed",
             "| stock_id =",
             stock_id,
+            "| yf_symbol =",
+            yf_symbol,
             "| requested_tf=" + str(requested_tf),
             "| error=",
             repr(exc),
             "| sec=",
-            round(time.perf_counter() - t_yf0, 3),
+            round(time.perf_counter() - t_history0, 3),
             "| total_sec=",
             round(time.perf_counter() - t0, 3),
             flush=True,
