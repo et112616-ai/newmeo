@@ -2735,11 +2735,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     == "1"
                 )
 
+                df_attrs_backup = dict(getattr(df, "attrs", {}) or {})
+
                 df = append_stock_snapshot_to_intraday_df_fast(
                     df,
                     meta.stock_id,
                     allow_cold_login=allow_cold_login,
                 )
+
+                try:
+                    df.attrs.update(df_attrs_backup)
+                except Exception:
+                    pass
 
             t_append1 = time.perf_counter()
 
