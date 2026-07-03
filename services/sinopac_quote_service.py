@@ -795,6 +795,19 @@ def get_stock_intraday_yahoo_direct(
     tf = str(time_frame or "1m").strip()
 
     if tf not in {"1m", "5m"}:
+            try:
+                if yahoo_previous_close is not None:
+                    df.attrs["previous_close"] = float(yahoo_previous_close)
+
+                if yahoo_regular_price is not None:
+                    df.attrs["regular_market_price"] = float(yahoo_regular_price)
+
+                df.attrs["symbol"] = symbol
+                df.attrs["source"] = "yahoo_direct"
+
+            except Exception:
+                pass
+
         print(
             "DEBUG yahoo_direct intraday | unsupported tf =",
             tf,
