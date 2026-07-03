@@ -774,13 +774,10 @@ def get_stock_intraday_yahoo_direct(
     """
     使用 Yahoo chart API direct 抓個股盤中 1m / 5m 資料。
 
-    這不是 yfinance library，因此不會走 yfinance 的 cookie / crumb 流程，
-    可避開常見的 YFRateLimitError。
-
-    回傳：
-    - DataFrame
-    - index = DatetimeIndex
-    - columns = Open, High, Low, Close, Volume
+    重點：
+    - 不走 yfinance library 的 cookie / crumb 流程。
+    - 會把真正昨收存到 df.attrs["previous_close"]。
+    - 回傳欄位：Open, High, Low, Close, Volume。
     """
     import time
     from urllib.parse import quote
@@ -795,19 +792,6 @@ def get_stock_intraday_yahoo_direct(
     tf = str(time_frame or "1m").strip()
 
     if tf not in {"1m", "5m"}:
-            try:
-                if yahoo_previous_close is not None:
-                    df.attrs["previous_close"] = float(yahoo_previous_close)
-
-                if yahoo_regular_price is not None:
-                    df.attrs["regular_market_price"] = float(yahoo_regular_price)
-
-                df.attrs["symbol"] = symbol
-                df.attrs["source"] = "yahoo_direct"
-
-            except Exception:
-                pass
-
         print(
             "DEBUG yahoo_direct intraday | unsupported tf =",
             tf,
@@ -964,6 +948,7 @@ def get_stock_intraday_yahoo_direct(
             if df.empty:
                 last_error = "empty_after_resample"
                 continue
+
             try:
                 if yahoo_previous_close is not None:
                     df.attrs["previous_close"] = float(yahoo_previous_close)
@@ -976,7 +961,7 @@ def get_stock_intraday_yahoo_direct(
 
             except Exception:
                 pass
-            
+
             print(
                 "DEBUG yahoo_direct intraday",
                 "| stock =",
@@ -987,6 +972,8 @@ def get_stock_intraday_yahoo_direct(
                 tf,
                 "| rows =",
                 len(df),
+                "| previous_close =",
+                df.attrs.get("previous_close"),
                 "| first =",
                 df.index[0] if len(df) else "",
                 "| last =",
@@ -1016,6 +1003,8 @@ def get_stock_intraday_yahoo_direct(
     )
 
     return None
+
+
 
 def is_shioaji_api_ready() -> bool:
     """
@@ -1054,7 +1043,6 @@ def is_shioaji_api_ready() -> bool:
             return True
 
     return False
-
 
 def append_stock_snapshot_to_intraday_df_fast(
     df,
