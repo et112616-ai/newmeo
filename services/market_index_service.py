@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# market_index_service_full_v3.py
+# 完整版：Shioaji 即時大盤 + K線圖快取 + yfinance/Yahoo/TWSE fallback + stale snapshot fallback + get_api timing
+
 import os
 import time
 from dataclasses import dataclass
@@ -39,7 +42,7 @@ except Exception:
 # =========================
 # Cache settings
 # =========================
-MARKET_INDEX_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CACHE_TTL_SECONDS", "3"))
+MARKET_INDEX_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CACHE_TTL_SECONDS", "5"))
 MARKET_INDEX_CHART_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CHART_CACHE_TTL_SECONDS", "900"))
 
 _MARKET_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -273,17 +276,53 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
 
             return snapshot
 
+    t_api0 = time.perf_counter()
+
     api = get_api()
 
+    t_api1 = time.perf_counter()
+
     if api is None:
+        stale_snapshot = _get_stale_market_index_snapshot()
+
+        if stale_snapshot is not None:
+            _debug(
+                "snapshot fallback stale",
+                "| reason = api_none",
+                "| get_api_sec =",
+                round(t_api1 - t_api0, 3),
+                "| total_sec =",
+                round(time.perf_counter() - route_t0, 3),
+            )
+            return stale_snapshot
+
         return MarketIndexSnapshot(
             available=False,
             message="Shioaji 尚未登入，無法取得加權指數即時資料。",
         )
 
+    t_contract0 = time.perf_counter()
+
     contract = _get_taiex_contract(api)
 
+    t_contract1 = time.perf_counter()
+
     if contract is None:
+        stale_snapshot = _get_stale_market_index_snapshot()
+
+        if stale_snapshot is not None:
+            _debug(
+                "snapshot fallback stale",
+                "| reason = contract_none",
+                "| get_api_sec =",
+                round(t_api1 - t_api0, 3),
+                "| contract_sec =",
+                round(t_contract1 - t_contract0, 3),
+                "| total_sec =",
+                round(time.perf_counter() - route_t0, 3),
+            )
+            return stale_snapshot
+
         return MarketIndexSnapshot(
             available=False,
             message="找不到加權指數 contract：TSE001。",
@@ -357,6 +396,10 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             data["quote_time"],
             "| chart_url =",
             bool(data["chart_url"]),
+            "| get_api_sec =",
+            round(t_api1 - t_api0, 3),
+            "| contract_sec =",
+            round(t_contract1 - t_contract0, 3),
             "| shioaji_sec =",
             round(t_snapshot1 - t_snapshot0, 3),
             "| chart_sec =",
@@ -370,10 +413,49 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
     except Exception as exc:
         _debug("snapshot failed", exc)
 
+        stale_snapshot = _get_stale_market_index_snapshot()
+
+        if stale_snapshot is not None:
+            _debug(
+                "snapshot fallback stale",
+                "| reason = exception",
+                "| error =",
+                exc,
+                "| total_sec =",
+                round(time.perf_counter() - route_t0, 3),
+            )
+            return stale_snapshot
+
         return MarketIndexSnapshot(
             available=False,
             message=f"取得加權指數即時資料失敗：{exc}",
         )
+
+
+def _get_stale_market_index_snapshot() -> MarketIndexSnapshot | None:
+    """
+    Shioaji 暫時失敗時，若記憶體內還有舊的大盤資料，就先回舊資料。
+    這可以避免冷啟動或短暫 API 問題時整張卡片出不來。
+    """
+    cached = _MARKET_INDEX_CACHE.get("TAIEX")
+
+    if not cached:
+        return None
+
+    _, data = cached
+
+    if not data:
+        return None
+
+    snapshot = _snapshot_from_dict(data)
+
+    if not snapshot.available:
+        return None
+
+    if not snapshot.chart_url:
+        snapshot.chart_url = get_market_index_chart_url(snapshot)
+
+    return snapshot
 
 
 def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> str:
