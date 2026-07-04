@@ -784,27 +784,210 @@ def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[d
     # 回傳新到舊，最多 limit 筆。
     return output_asc[-limit:][::-1]
 
+def _tdcc_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+
+        text = str(value).replace(",", "").replace("%", "").strip()
+
+        if not text or text in {"--", "-"}:
+            return default
+
+        return float(text)
+
+    except Exception:
+        return default
+
+
+def _tdcc_get(row, *keys, default=None):
+    if row is None:
+        return default
+
+    if isinstance(row, dict):
+        for key in keys:
+            if key in row and row.get(key) is not None:
+                return row.get(key)
+        return default
+
+    for key in keys:
+        try:
+            value = getattr(row, key)
+
+            if value is not None:
+                return value
+
+        except Exception:
+            continue
+
+    return default
+
+
+def _tdcc_date_text(value):
+    text = str(value or "").strip()
+
+    if not text:
+        return "--"
+
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[5:10].replace("-", "/")
+
+    if len(text) >= 10 and text[4] == "/" and text[7] == "/":
+        return text[5:10]
+
+    if len(text) >= 5 and "/" in text:
+        return text[-5:]
+
+    return text
+
+
+def _tdcc_format_ratio(value):
+    number = _tdcc_float(value, default=0.0)
+
+    if number == 0:
+        return "--"
+
+    if 0 < abs(number) <= 1:
+        number = number * 100
+
+    return f"{number:.2f}%"
+
+
+def _tdcc_format_diff(value):
+    if value is None:
+        return "--"
+
+    number = _tdcc_float(value, default=0.0)
+
+    if number == 0:
+        return "--"
+
+    if 0 < abs(number) <= 1:
+        number = number * 100
+
+    return f"{number:+.2f}%"
+
+
+def _tdcc_ratio_value(row):
+    return _tdcc_get(
+        row,
+        "ratio",
+        "percentage",
+        "percent",
+        "pct",
+        "holding_ratio",
+        "holder_ratio",
+        "large_holder_ratio",
+        "large_holder_pct",
+        "over_1000_ratio",
+        "over_1000_pct",
+        "value",
+        default=None,
+    )
+
+
+def _tdcc_date_value(row):
+    return _tdcc_get(
+        row,
+        "date",
+        "week",
+        "data_date",
+        "trade_date",
+        "record_date",
+        default="",
+    )
+
+
+def _build_large_holder_5week_rows(raw_rows):
+    """
+    raw_rows：原始大戶持股資料，至少要包含 date + ratio。
+    回傳：最新 5 週，格式給 controller.py 使用：
+    [
+      {"date": "07/03", "ratio": "66.38%", "diff": "--"},
+      ...
+    ]
+    """
+    rows = list(raw_rows or [])
+
+    if not rows:
+        return []
+
+    rows = sorted(rows, key=lambda r: str(_tdcc_date_value(r) or ""))
+
+    result = []
+    latest_rows = list(reversed(rows[-5:]))
+
+    for row in latest_rows:
+        try:
+            idx = rows.index(row)
+        except Exception:
+            idx = -1
+
+        ratio = _tdcc_ratio_value(row)
+
+        diff = _tdcc_get(
+            row,
+            "diff",
+            "change",
+            "difference",
+            "ratio_change",
+            "pct_change",
+            "week_change",
+            "wow",
+            "delta",
+            default=None,
+        )
+
+        if diff is None and idx > 0:
+            this_ratio = _tdcc_float(_tdcc_ratio_value(row), default=0.0)
+            prev_ratio = _tdcc_float(_tdcc_ratio_value(rows[idx - 1]), default=0.0)
+
+            if this_ratio and prev_ratio:
+                diff = this_ratio - prev_ratio
+
+        result.append(
+            {
+                "date": _tdcc_date_text(_tdcc_date_value(row)),
+                "ratio": _tdcc_format_ratio(ratio),
+                "diff": _tdcc_format_diff(diff),
+            }
+        )
+
+    return result
+
 def get_large_holder_table(stock_id: str) -> list[dict]:
     """
     千張大戶持股比率。
 
-    現在流程：
+    流程：
     1. 先嘗試抓 TDCC 最新資料並寫入 Supabase。
     2. 再從 Supabase 撈最近 6 週歷史。
     3. 若 Supabase 沒資料，才直接回 TDCC 最新一週。
     """
     sid = _clean_stock_id(stock_id)
 
-    # 每次查詢時順手同步 TDCC 最新一週。
-    # 這樣就算忘了跑排程，也至少會補最新資料。
     sync_result = sync_tdcc_latest_large_holder(sid)
 
     history = _large_holder_from_supabase_history(sid, limit=6)
 
-    if history:
-        return history
+    print(
+        "DEBUG large_holder table",
+        "| stock_id =",
+        sid,
+        "| sync_ok =",
+        sync_result.get("ok"),
+        "| sync_trade_date =",
+        sync_result.get("trade_date"),
+        "| history_count =",
+        len(history or []),
+        "| history =",
+        history,
+        flush=True,
+    )
 
-    # 如果 Supabase 還沒成功，但 TDCC 有抓到，就至少顯示最新一週。
+    if history:
+        return history[-5:] if len(history) > 5 else history
+
     if sync_result.get("ok"):
         return [
             {
@@ -815,7 +998,8 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
         ]
 
     return _large_holder_unavailable("Supabase/TDCC皆無資料")
-    
+
+
 # ============================================================
 # 融資券
 # ============================================================
