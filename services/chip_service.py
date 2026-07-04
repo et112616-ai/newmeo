@@ -1048,31 +1048,308 @@ def _build_large_holder_5week_rows(raw_rows):
 
     return result
 
+def _finmind_large_holder_level(level) -> bool:
+    """
+    判斷 FinMind HoldingSharesLevel 是否屬於「千張大戶」。
+
+    FinMind 欄位是 HoldingSharesLevel，例如：
+    - 1-999
+    - 1000-5000
+    - ...
+    - 1000001以上
+
+    這裡的「千張」是 1,000,000 股以上，所以抓 1000001 以上的級距。
+    """
+    import re
+
+    text = str(level or "").replace(",", "").strip()
+
+    if not text:
+        return False
+
+    # 常見：1000001以上、1,000,001以上、1000001-
+    if "1000001" in text:
+        return True
+
+    nums = re.findall(r"\d+", text)
+
+    if not nums:
+        return False
+
+    try:
+        # 取區間第一個數字，例如 1000001以上 -> 1000001
+        first = int(nums[0])
+        return first >= 1000001
+    except Exception:
+        return False
+
+
+def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: str):
+    """
+    從 FinMind TaiwanStockHoldingSharesPer 抓股權分散表。
+    """
+    import os
+    import time
+
+    import pandas as pd
+    import requests
+
+    sid = _clean_stock_id(stock_id)
+    token = os.getenv("FINMIND_TOKEN", "").strip()
+
+    if not token:
+        print(
+            "DEBUG finmind large_holder",
+            "| stock_id =",
+            sid,
+            "| error = missing FINMIND_TOKEN",
+            flush=True,
+        )
+        return pd.DataFrame()
+
+    t0 = time.perf_counter()
+
+    url = "https://api.finmindtrade.com/api/v4/data"
+
+    params = {
+        "dataset": "TaiwanStockHoldingSharesPer",
+        "data_id": sid,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    try:
+        res = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+
+        payload = res.json()
+
+        data = payload.get("data") or []
+
+        if not data:
+            print(
+                "DEBUG finmind large_holder empty",
+                "| stock_id =",
+                sid,
+                "| status =",
+                res.status_code,
+                "| msg =",
+                payload.get("msg") or payload.get("message") or payload,
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        print(
+            "DEBUG finmind large_holder raw",
+            "| stock_id =",
+            sid,
+            "| rows =",
+            len(df),
+            "| columns =",
+            list(df.columns),
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return df
+
+    except Exception as exc:
+        print(
+            "DEBUG finmind large_holder failed",
+            "| stock_id =",
+            sid,
+            "| error =",
+            repr(exc),
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return pd.DataFrame()
+
+
+def _extract_finmind_large_holder_records(stock_id: str, weeks: int = 8) -> list[dict]:
+    """
+    使用 FinMind 股權分散表回補千張大戶近幾週資料。
+
+    回傳新到舊：
+    [
+        {"stock_id": "2317", "trade_date": "2026-07-03", "ratio": 66.38},
+        ...
+    ]
+    """
+    from datetime import date, timedelta
+
+    import pandas as pd
+
+    sid = _clean_stock_id(stock_id)
+
+    end_date = date.today()
+    # 抓寬一點，避免遇到假日或缺週。
+    start_date = end_date - timedelta(days=max(90, int(weeks) * 14))
+
+    df = _fetch_finmind_holding_shares_per(
+        sid,
+        start_date=start_date.strftime("%Y-%m-%d"),
+        end_date=end_date.strftime("%Y-%m-%d"),
+    )
+
+    if df is None or df.empty:
+        return []
+
+    required = {"date", "stock_id", "HoldingSharesLevel", "percent"}
+
+    if not required.issubset(set(df.columns)):
+        print(
+            "DEBUG finmind large_holder missing columns",
+            "| stock_id =",
+            sid,
+            "| columns =",
+            list(df.columns),
+            flush=True,
+        )
+        return []
+
+    work = df.copy()
+    work["stock_id"] = work["stock_id"].astype(str).str.strip()
+    work = work[work["stock_id"] == sid]
+
+    if work.empty:
+        return []
+
+    work = work[work["HoldingSharesLevel"].apply(_finmind_large_holder_level)]
+
+    if work.empty:
+        print(
+            "DEBUG finmind large_holder no large level",
+            "| stock_id =",
+            sid,
+            "| sample_levels =",
+            df["HoldingSharesLevel"].dropna().astype(str).unique().tolist()[:20],
+            flush=True,
+        )
+        return []
+
+    work["percent"] = pd.to_numeric(work["percent"], errors="coerce").fillna(0)
+
+    grouped = (
+        work.groupby("date", as_index=False)["percent"]
+        .sum()
+        .sort_values("date", ascending=False)
+    )
+
+    records = []
+
+    for _, row in grouped.head(max(1, int(weeks))).iterrows():
+        trade_date = str(row["date"]).strip()
+        ratio = _to_float(row["percent"])
+
+        if not trade_date or ratio <= 0:
+            continue
+
+        records.append(
+            {
+                "stock_id": sid,
+                "trade_date": trade_date,
+                "ratio": ratio,
+            }
+        )
+
+    print(
+        "DEBUG finmind large_holder records",
+        "| stock_id =",
+        sid,
+        "| records_count =",
+        len(records),
+        "| dates =",
+        [r["trade_date"] for r in records],
+        flush=True,
+    )
+
+    return records
+
+
+def sync_finmind_large_holder_history(stock_id: str, weeks: int = 8) -> dict:
+    """
+    用 FinMind TaiwanStockHoldingSharesPer 回補近幾週大戶資料到 Supabase。
+    """
+    sid = _clean_stock_id(stock_id)
+
+    records = _extract_finmind_large_holder_records(sid, weeks=weeks)
+
+    if not records:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "source": "FinMind",
+            "synced_count": 0,
+            "message": "FinMind 無資料或無權限",
+        }
+
+    synced_count = 0
+    failed_count = 0
+
+    for record in records:
+        ok = upsert_large_holder_history(
+            stock_id=record["stock_id"],
+            trade_date=record["trade_date"],
+            large_holder_ratio=record["ratio"],
+            source="FinMind",
+        )
+
+        if ok:
+            synced_count += 1
+        else:
+            failed_count += 1
+
+    return {
+        "stock_id": sid,
+        "ok": synced_count > 0,
+        "source": "FinMind",
+        "synced_count": synced_count,
+        "failed_count": failed_count,
+        "records_count": len(records),
+        "dates": [r["trade_date"] for r in records],
+        "message": "synced" if synced_count > 0 else "Supabase 寫入失敗",
+    }
+
+
 def get_large_holder_table(stock_id: str) -> list[dict]:
     """
     千張大戶持股比率。
 
-    流程：
-    1. 先嘗試抓 TDCC 最新資料並寫入 Supabase。
-    2. 從 Supabase 撈最近 6 週。
-    3. 如果 Supabase 不足 5 週，再嘗試同步 TDCC 可取得的多週資料。
-    4. 再撈一次 Supabase。
-    5. 若仍無資料，至少顯示最新一週。
+    新流程：
+    1. 先讀 Supabase，避免每次 LINE 查詢都打 TDCC / FinMind。
+    2. Supabase 足 5 週：直接回傳。
+    3. Supabase 不足 5 週：用 FinMind 回補歷史。
+    4. 回補後再讀 Supabase。
+    5. 若仍不足，才用 TDCC latest CSV 補最新一週。
     """
-    sid = _clean_stock_id(stock_id)
+    import time
 
-    sync_result = sync_tdcc_latest_large_holder(sid)
+    t0 = time.perf_counter()
+
+    sid = _clean_stock_id(stock_id)
 
     history = _large_holder_from_supabase_history(sid, limit=6)
 
     print(
-        "DEBUG large_holder table before_history_sync",
+        "DEBUG large_holder table supabase_first",
         "| stock_id =",
         sid,
-        "| sync_ok =",
-        sync_result.get("ok"),
-        "| sync_trade_date =",
-        sync_result.get("trade_date"),
         "| history_count =",
         len(history or []),
         "| history =",
@@ -1083,26 +1360,55 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
     if len(history or []) >= 5:
         return history[:5]
 
-    # Supabase 不足 5 週時，嘗試把 TDCC rows 裡所有可取得週別補進 Supabase。
-    history_sync = sync_tdcc_large_holder_history(sid, weeks=6)
+    finmind_sync = sync_finmind_large_holder_history(sid, weeks=8)
 
     history = _large_holder_from_supabase_history(sid, limit=6)
 
     print(
-        "DEBUG large_holder table after_history_sync",
+        "DEBUG large_holder table after_finmind",
         "| stock_id =",
         sid,
-        "| history_sync =",
-        history_sync,
+        "| finmind_sync =",
+        finmind_sync,
         "| history_count =",
         len(history or []),
         "| history =",
         history,
+        "| sec =",
+        round(time.perf_counter() - t0, 3),
         flush=True,
     )
 
     if history:
         return history[:5]
+
+    # 最後 fallback：TDCC latest CSV 只能補最新一週。
+    sync_func = globals().get("sync_tdcc_latest_large_holder")
+
+    sync_result = {}
+
+    if callable(sync_func):
+        sync_result = sync_func(sid)
+
+        history = _large_holder_from_supabase_history(sid, limit=6)
+
+        print(
+            "DEBUG large_holder table after_tdcc_latest",
+            "| stock_id =",
+            sid,
+            "| sync_result =",
+            sync_result,
+            "| history_count =",
+            len(history or []),
+            "| history =",
+            history,
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        if history:
+            return history[:5]
 
     if sync_result.get("ok"):
         return [
@@ -1113,7 +1419,8 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
             }
         ]
 
-    return _large_holder_unavailable("Supabase/TDCC皆無資料")
+    return _large_holder_unavailable("Supabase/FinMind/TDCC皆無資料")
+
 
 # ============================================================
 # 融資券
