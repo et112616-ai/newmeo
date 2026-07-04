@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from io import StringIO
 from typing import Any, Dict, List, Optional
 
+import os
 import pandas as pd
 import requests
 
@@ -20,6 +21,10 @@ TDCC_LATEST_CSV_URLS = [
     "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5",
 ]
 
+
+# ============================================================
+# 通用工具
+# ============================================================
 
 def _today() -> datetime.date:
     return datetime.utcnow().date()
@@ -38,84 +43,15 @@ def _clean_stock_id(stock_id: str) -> str:
     return str(stock_id or "").replace(".TW", "").replace(".TWO", "").strip()
 
 
-def _request_finmind(
-    dataset: str,
-    stock_id: str,
-    start_date: str,
-    end_date: Optional[str] = None,
-) -> list[dict]:
-    """
-    FinMind v4 通用查詢。
-    重要：不要在 log 印完整 URL，避免 token 外洩。
-    """
-    params = {
-        "dataset": dataset,
-        "data_id": _clean_stock_id(stock_id),
-        "start_date": start_date,
-    }
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
 
-    if end_date:
-        params["end_date"] = end_date
+    if value is None:
+        return default
 
-    if FINMIND_TOKEN:
-        params["token"] = FINMIND_TOKEN
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    try:
-        res = requests.get(FINMIND_URL, params=params, timeout=15)
 
-        if res.status_code >= 400:
-            print(
-                f"_request_finmind failed: "
-                f"dataset={dataset}, stock_id={stock_id}, status={res.status_code}, "
-                f"body={res.text[:200]}"
-            )
-            return []
-
-        payload = res.json()
-
-        if payload.get("status") not in (None, 200, "200", True):
-            print(
-                f"FinMind status warning: "
-                f"dataset={dataset}, status={payload.get('status')}, msg={payload.get('msg')}"
-            )
-
-        rows = payload.get("data") or []
-
-        return rows if isinstance(rows, list) else []
-
-    except Exception as exc:
-        print(f"_request_finmind failed: dataset={dataset}, stock_id={stock_id}, error={exc}")
-        return []
-
-def _extract_ratio(row: dict):
-    """
-    嘗試從 FinMind row 裡抓持股比率。
-    若資料源沒有提供，回傳 None，圖上會顯示 --。
-    """
-    for key in [
-        "holding_ratio",
-        "shareholding_ratio",
-        "foreign_investor_ratio",
-        "foreign_ratio",
-        "ratio",
-        "持股比率",
-        "持股比",
-        "percentage",
-        "percent",
-    ]:
-        if key in row and row.get(key) not in (None, "", "--"):
-            try:
-                return float(
-                    str(row.get(key))
-                    .replace("%", "")
-                    .replace(",", "")
-                    .strip()
-                )
-            except Exception:
-                pass
-
-    return None
-    
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -124,7 +60,7 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         if isinstance(value, str):
             value = value.replace(",", "").replace("%", "").strip()
 
-            if not value:
+            if not value or value in {"--", "-"}:
                 return default
 
         return float(value)
@@ -144,6 +80,7 @@ def _fmt_md(date_str: str) -> str:
     """
     2026-06-26 -> 06/26
     20260626 -> 06/26
+    07/03 -> 07/03
     """
     if not date_str:
         return "--"
@@ -154,13 +91,115 @@ def _fmt_md(date_str: str) -> str:
         if len(s) >= 10 and "-" in s:
             return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%m/%d")
 
+        if len(s) >= 10 and "/" in s:
+            return datetime.strptime(s[:10], "%Y/%m/%d").strftime("%m/%d")
+
         if len(s) >= 8 and s[:8].isdigit():
             return datetime.strptime(s[:8], "%Y%m%d").strftime("%m/%d")
+
+        if len(s) >= 5 and "/" in s:
+            return s[-5:]
 
         return s
 
     except Exception:
         return s
+
+
+def _normalize_date_for_db(date_str: str) -> str:
+    """
+    轉成 Supabase date 欄位需要的 YYYY-MM-DD。
+
+    支援：
+    - 20260626
+    - 2026-06-26
+    - 2026/06/26
+    """
+    s = str(date_str or "").strip()
+
+    if not s:
+        return ""
+
+    try:
+        if len(s) >= 10 and "-" in s:
+            return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+
+        if len(s) >= 10 and "/" in s:
+            return datetime.strptime(s[:10], "%Y/%m/%d").strftime("%Y-%m-%d")
+
+        if len(s) >= 8 and s[:8].isdigit():
+            return datetime.strptime(s[:8], "%Y%m%d").strftime("%Y-%m-%d")
+
+    except Exception:
+        return ""
+
+    return ""
+
+
+# ============================================================
+# FinMind 通用查詢
+# ============================================================
+
+def _request_finmind(
+    dataset: str,
+    stock_id: str,
+    start_date: str,
+    end_date: Optional[str] = None,
+) -> list[dict]:
+    """
+    FinMind v4 通用查詢。
+    注意：不要在 log 印完整 URL，避免 token 外洩。
+    """
+    params = {
+        "dataset": dataset,
+        "data_id": _clean_stock_id(stock_id),
+        "start_date": start_date,
+    }
+
+    if end_date:
+        params["end_date"] = end_date
+
+    if FINMIND_TOKEN:
+        params["token"] = FINMIND_TOKEN
+
+    try:
+        res = requests.get(FINMIND_URL, params=params, timeout=15)
+
+        if res.status_code >= 400:
+            print(
+                "_request_finmind failed:",
+                f"dataset={dataset}",
+                f"stock_id={stock_id}",
+                f"status={res.status_code}",
+                f"body={res.text[:200]}",
+                flush=True,
+            )
+            return []
+
+        payload = res.json()
+
+        if payload.get("status") not in (None, 200, "200", True):
+            print(
+                "FinMind status warning:",
+                f"dataset={dataset}",
+                f"status={payload.get('status')}",
+                f"msg={payload.get('msg')}",
+                flush=True,
+            )
+
+        rows = payload.get("data") or []
+
+        return rows if isinstance(rows, list) else []
+
+    except Exception as exc:
+        print(
+            "_request_finmind failed:",
+            f"dataset={dataset}",
+            f"stock_id={stock_id}",
+            f"error={exc}",
+            flush=True,
+        )
+        return []
 
 
 # ============================================================
@@ -200,9 +239,6 @@ def _mock_institutional() -> Dict[str, List[dict]]:
 
 
 def _normalize_institution_name(name: str) -> str | None:
-    """
-    將 FinMind 的法人類別名稱轉成本系統三大類。
-    """
     text = str(name or "").strip()
 
     key_map = {
@@ -231,15 +267,42 @@ def _normalize_institution_name(name: str) -> str | None:
     return key_map.get(text)
 
 
+def _extract_ratio(row: dict):
+    """
+    嘗試從 FinMind row 裡抓持股比率。
+    若資料源沒有提供，回傳 None，圖上會顯示 --。
+    """
+    for key in [
+        "holding_ratio",
+        "shareholding_ratio",
+        "foreign_investor_ratio",
+        "foreign_ratio",
+        "ratio",
+        "持股比率",
+        "持股比",
+        "percentage",
+        "percent",
+    ]:
+        if key in row and row.get(key) not in (None, "", "--"):
+            try:
+                return float(
+                    str(row.get(key))
+                    .replace("%", "")
+                    .replace(",", "")
+                    .strip()
+                )
+            except Exception:
+                pass
+
+    return None
+
+
 def _extract_buy_sell_value(row: dict) -> float:
     """
     抓法人買賣超，並統一轉成「張」。
 
     FinMind 的法人買賣超常見單位是「股」，
     所以這裡統一除以 1000，轉成「張」。
-
-    例：
-    -20,610,326 股 -> -20,610 張
     """
     value_shares = 0.0
 
@@ -257,8 +320,8 @@ def _extract_buy_sell_value(row: dict) -> float:
                 value_shares = _to_float(row.get(key))
                 break
 
-    # 股 -> 張
     return value_shares / 1000.0
+
 
 def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
     """
@@ -301,14 +364,12 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         "dealer": [],
     }
 
-    # temp 用來依日期彙總買賣超
     temp: dict[str, dict[str, float]] = {
         "foreign": {},
         "trust": {},
         "dealer": {},
     }
 
-    # temp_ratio 用來依日期存持股比
     temp_ratio: dict[str, dict[str, Any]] = {
         "foreign": {},
         "trust": {},
@@ -336,7 +397,6 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
 
         value = _extract_buy_sell_value(r)
 
-        # 同一日期、同一法人類別可能有多筆，這裡彙總
         temp[section][date] = temp[section].get(date, 0.0) + value
 
         ratio = _extract_ratio(r)
@@ -350,7 +410,7 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         result[section] = [
             {
                 "date": _fmt_md(d),
-                "buy_sell": int(round(v)),  # 已經是「張」
+                "buy_sell": int(round(v)),
                 "ratio": temp_ratio[section].get(d, "--"),
             }
             for d, v in items
@@ -360,21 +420,22 @@ def get_institutional_chips(stock_id: str) -> Dict[str, List[dict]]:
         return _mock_institutional()
 
     return result
-    
+
+
 # ============================================================
-# 大戶：FinMind + TDCC OpenData
+# 大戶：Supabase + TDCC latest CSV + optional FinMind sponsor
 # ============================================================
 
 def _is_large_holder_level(level_raw: Any) -> bool:
     """
     判斷是否為千張以上。
 
-    TDCC 股權分散表常見定義：
-    第 15 級 = 1,000,001 股以上
+    TDCC 股權分散表：
+    第 15 級 = 1,000,001 股以上。
 
     注意：
     這裡只能抓 level == 15。
-    不可以用 >= 15，否則會把其他特殊級距也加總，造成比例超過 100%。
+    不可以用 >= 15，否則會把其他特殊級距也加總，造成比例錯誤。
     """
     text = str(level_raw or "").replace(",", "").replace(" ", "").strip()
 
@@ -384,16 +445,16 @@ def _is_large_holder_level(level_raw: Any) -> bool:
     if "合計" in text or "total" in text.lower():
         return False
 
-    # 文字型級距：1,000,001以上 / 1000001以上
     if "1000001" in text and ("以上" in text or "up" in text.lower()):
         return True
 
-    # 數字型級距：15 = 1,000,001 股以上
     try:
         level_num = int(float(text))
         return level_num == 15
     except Exception:
         return False
+
+
 def _extract_holder_percent(row: dict) -> float:
     candidates = [
         "percentage",
@@ -411,6 +472,7 @@ def _extract_holder_percent(row: dict) -> float:
             return _to_float(row.get(key))
 
     return 0.0
+
 
 def _large_holder_from_finmind_rows(rows: list[dict]) -> list[dict]:
     by_date: dict[str, float] = {}
@@ -456,7 +518,7 @@ def _large_holder_from_finmind_rows(rows: list[dict]) -> list[dict]:
             {
                 "date": _fmt_md(date),
                 "ratio": f"{ratio:.2f}%",
-                "diff": f"{diff:+.2f}%",
+                "diff": f"{diff:+.2f}%" if diff else "--",
             }
         )
 
@@ -501,7 +563,7 @@ def _read_tdcc_csv(text: str) -> pd.DataFrame:
         return df.fillna("")
 
     except Exception as exc:
-        print(f"_read_tdcc_csv failed: {exc}")
+        print(f"_read_tdcc_csv failed: {exc}", flush=True)
         return pd.DataFrame()
 
 
@@ -509,6 +571,10 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
     """
     抓 TDCC 最新一週全市場集保戶股權分散表 CSV。
     這個來源不用 FinMind token。
+
+    注意：
+    這份 open data CSV 通常只包含一個資料日期。
+    回傳的 17 筆是同一天的 17 個持股分級，不是 17 週。
     """
     sid = _clean_stock_id(stock_id)
 
@@ -525,14 +591,14 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
             res = requests.get(url, headers=headers, timeout=25)
 
             if res.status_code >= 400:
-                print(f"_request_tdcc_latest_rows failed: status={res.status_code}, url={url}")
+                print(f"_request_tdcc_latest_rows failed: status={res.status_code}, url={url}", flush=True)
                 continue
 
             text = res.content.decode("utf-8-sig", errors="ignore")
             df = _read_tdcc_csv(text)
 
             if df.empty:
-                print(f"_request_tdcc_latest_rows empty csv: url={url}")
+                print(f"_request_tdcc_latest_rows empty csv: url={url}", flush=True)
                 continue
 
             df.columns = [str(c).strip() for c in df.columns]
@@ -545,172 +611,36 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
             ]
 
             if not all(c in df.columns for c in required):
-                print(f"_request_tdcc_latest_rows missing columns: {list(df.columns)}")
+                print(f"_request_tdcc_latest_rows missing columns: {list(df.columns)}", flush=True)
                 continue
 
             df["證券代號"] = df["證券代號"].astype(str).str.strip()
             target = df[df["證券代號"] == sid]
 
             if target.empty:
-                print(f"_request_tdcc_latest_rows no stock: stock_id={sid}, url={url}")
+                print(f"_request_tdcc_latest_rows no stock: stock_id={sid}, url={url}", flush=True)
                 continue
 
             return target.to_dict("records")
 
         except Exception as exc:
-            print(f"_request_tdcc_latest_rows failed: stock_id={sid}, error={exc}")
+            print(f"_request_tdcc_latest_rows failed: stock_id={sid}, error={exc}", flush=True)
 
     return []
 
 
-def _large_holder_from_tdcc_latest_rows(rows: list[dict]) -> list[dict]:
-    """
-    TDCC OpenData CSV 通常只有最新一週，
-    因此這裡只能回最新日期一筆。
-    """
-    if not rows:
-        return []
-
-    by_date: dict[str, float] = {}
-
-    for r in rows:
-        date = str(r.get("資料日期", "")).strip()
-        level = r.get("持股分級", "")
-
-        if not date:
-            continue
-
-        if not _is_large_holder_level(level):
-            continue
-
-        ratio = _to_float(r.get("占集保庫存數比例%"))
-
-        by_date[date] = by_date.get(date, 0.0) + ratio
-
-    items = sorted(by_date.items())
-
-    if not items:
-        return []
-
-    date, ratio = items[-1]
-
-    return [
-        {
-            "date": _fmt_md(date),
-            "ratio": f"{ratio:.2f}%",
-            "diff": "--",
-        }
-    ]
-
-
-def _large_holder_unavailable(reason: str = "資料未取得") -> list[dict]:
-    return [
-        {
-            "date": "--",
-            "ratio": "資料未取得",
-            "diff": reason,
-        }
-    ]
-
-def _normalize_date_for_db(date_str: str) -> str:
-    """
-    轉成 Supabase date 欄位需要的 YYYY-MM-DD。
-
-    支援：
-    20260626
-    2026-06-26
-    """
-    s = str(date_str or "").strip()
-
-    if not s:
-        return ""
-
-    try:
-        if len(s) >= 10 and "-" in s:
-            return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
-
-        if len(s) >= 8 and s[:8].isdigit():
-            return datetime.strptime(s[:8], "%Y%m%d").strftime("%Y-%m-%d")
-
-    except Exception:
-        return ""
-
-    return ""
-
-
-def _extract_tdcc_latest_large_holder_record(stock_id: str) -> dict | None:
-    """
-    從 TDCC 最新 CSV 抓出某檔股票的千張大戶比例。
-    回傳：
-    {
-        "stock_id": "2344",
-        "trade_date": "2026-06-26",
-        "ratio": 65.42
-    }
-    """
-    sid = _clean_stock_id(stock_id)
-    rows = _request_tdcc_latest_rows(sid)
-
-    if not rows:
-        return None
-
-    by_date: dict[str, float] = {}
-
-    for r in rows:
-        raw_date = str(r.get("資料日期", "")).strip()
-        trade_date = _normalize_date_for_db(raw_date)
-        level = r.get("持股分級", "")
-
-        if not trade_date:
-            continue
-
-        if not _is_large_holder_level(level):
-            continue
-
-        ratio = _to_float(r.get("占集保庫存數比例%"))
-
-        by_date[trade_date] = by_date.get(trade_date, 0.0) + ratio
-
-    if not by_date:
-        return None
-
-    trade_date, ratio = sorted(by_date.items())[-1]
-
-    return {
-        "stock_id": sid,
-        "trade_date": trade_date,
-        "ratio": ratio,
-    }
-
-
 def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
     """
-    從 TDCC rows 抓出某檔股票所有可取得日期的千張大戶比例。
+    從 TDCC latest CSV 抓出可取得日期的千張大戶比例。
 
-    回傳新到舊：
-    [
-        {
-            "stock_id": "2344",
-            "trade_date": "2026-07-03",
-            "ratio": 65.42,
-        },
-        {
-            "stock_id": "2344",
-            "trade_date": "2026-06-27",
-            "ratio": 64.80,
-        },
-        ...
-    ]
-
-    若 _request_tdcc_latest_rows() 只回最新一週，這裡也只會有 1 筆。
+    因為 latest CSV 通常只包含最新一個日期，所以這裡通常只會回 1 筆。
     """
     sid = _clean_stock_id(stock_id)
-
     rows = _request_tdcc_latest_rows(sid)
 
     if not rows:
         print(
-            "DEBUG large_holder records",
+            "DEBUG large_holder tdcc records",
             "| stock_id =",
             sid,
             "| rows_count = 0",
@@ -746,7 +676,7 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
     ]
 
     print(
-        "DEBUG large_holder records",
+        "DEBUG large_holder tdcc records",
         "| stock_id =",
         sid,
         "| rows_count =",
@@ -762,9 +692,6 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
 
 
 def _extract_tdcc_latest_large_holder_record(stock_id: str) -> dict | None:
-    """
-    從 TDCC 抓出某檔股票最新一週千張大戶比例。
-    """
     records = _extract_tdcc_large_holder_records(stock_id)
 
     if not records:
@@ -772,13 +699,149 @@ def _extract_tdcc_latest_large_holder_record(stock_id: str) -> dict | None:
 
     return records[0]
 
+
+def _large_holder_from_tdcc_latest_rows(rows: list[dict]) -> list[dict]:
+    """
+    TDCC latest CSV 通常只有最新一週，
+    因此這裡只能回最新日期一筆。
+    """
+    if not rows:
+        return []
+
+    by_date: dict[str, float] = {}
+
+    for r in rows:
+        raw_date = str(r.get("資料日期", "")).strip()
+        trade_date = _normalize_date_for_db(raw_date)
+        level = r.get("持股分級", "")
+
+        if not trade_date:
+            continue
+
+        if not _is_large_holder_level(level):
+            continue
+
+        ratio = _to_float(r.get("占集保庫存數比例%"))
+
+        by_date[trade_date] = by_date.get(trade_date, 0.0) + ratio
+
+    items = sorted(by_date.items())
+
+    if not items:
+        return []
+
+    date, ratio = items[-1]
+
+    return [
+        {
+            "date": _fmt_md(date),
+            "ratio": f"{ratio:.2f}%",
+            "diff": "--",
+        }
+    ]
+
+
+def _large_holder_unavailable(reason: str = "資料未取得") -> list[dict]:
+    return [
+        {
+            "date": "--",
+            "ratio": "資料未取得",
+            "diff": reason,
+        }
+    ]
+
+
+def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[dict]:
+    """
+    從 Supabase 撈最近幾週大戶資料。
+    """
+    sid = _clean_stock_id(stock_id)
+
+    rows = get_large_holder_history_rows(sid, limit=limit + 1)
+
+    if not rows:
+        return []
+
+    normalized = []
+
+    for r in rows:
+        date = str(r.get("trade_date", "")).strip()
+        ratio = _to_float(r.get("large_holder_ratio"))
+
+        if not date:
+            continue
+
+        normalized.append(
+            {
+                "date": date,
+                "ratio": ratio,
+            }
+        )
+
+    if not normalized:
+        return []
+
+    normalized = sorted(normalized, key=lambda x: x["date"])
+
+    output_asc = []
+
+    for i, item in enumerate(normalized):
+        ratio = item["ratio"]
+
+        if i > 0:
+            prev_ratio = normalized[i - 1]["ratio"]
+            diff = ratio - prev_ratio
+            diff_text = f"{diff:+.2f}%" if diff else "--"
+        else:
+            diff_text = "--"
+
+        output_asc.append(
+            {
+                "date": _fmt_md(item["date"]),
+                "ratio": f"{ratio:.2f}%",
+                "diff": diff_text,
+            }
+        )
+
+    return output_asc[-limit:][::-1]
+
+
+def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
+    """
+    同步單檔 TDCC latest CSV 的最新一週千張大戶資料。
+    """
+    sid = _clean_stock_id(stock_id)
+    record = _extract_tdcc_latest_large_holder_record(sid)
+
+    if not record:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "message": "TDCC 最新資料未取得",
+        }
+
+    ok = upsert_large_holder_history(
+        stock_id=record["stock_id"],
+        trade_date=record["trade_date"],
+        large_holder_ratio=record["ratio"],
+        source="TDCC",
+    )
+
+    return {
+        "stock_id": sid,
+        "ok": bool(ok),
+        "trade_date": record.get("trade_date"),
+        "ratio": record.get("ratio"),
+        "message": "synced" if ok else "Supabase 寫入失敗",
+    }
+
+
 def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     """
-    嘗試把 TDCC 可取得的近 weeks 週大戶資料寫入 Supabase。
+    相容舊函式名稱。
 
     注意：
-    若 _request_tdcc_latest_rows() 只提供最新一週，
-    這裡 synced_count 仍然只會是 1。
+    TDCC latest CSV 本身通常只有最新一週，所以這裡不保證能補歷史。
     """
     sid = _clean_stock_id(stock_id)
 
@@ -819,247 +882,83 @@ def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     }
 
 
-
-def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[dict]:
+def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
     """
-    從 Supabase 撈最近 6 週大戶資料。
-    若資料庫目前只有 1 週，就只顯示 1 週。
+    批次同步多檔 TDCC 千張大戶資料。
+
+    app.py 會 import 這個函式，所以名稱必須保留。
     """
-    sid = _clean_stock_id(stock_id)
+    import time
 
-    # 多撈 1 筆，方便計算最舊一筆變化。
-    rows = get_large_holder_history_rows(sid, limit=limit + 1)
+    t0 = time.perf_counter()
 
-    if not rows:
-        return []
+    if stock_ids is None:
+        stock_ids = os.getenv("TDCC_SYNC_STOCKS", "")
 
-    normalized = []
+    if isinstance(stock_ids, str):
+        raw_items = stock_ids.replace("，", ",").split(",")
+    else:
+        raw_items = list(stock_ids or [])
 
-    for r in rows:
-        date = str(r.get("trade_date", "")).strip()
-        ratio = _to_float(r.get("large_holder_ratio"))
+    clean_ids = []
 
-        if not date:
-            continue
+    for item in raw_items:
+        sid = _clean_stock_id(str(item or "").strip())
 
-        normalized.append(
-            {
-                "date": date,
-                "ratio": ratio,
-            }
-        )
+        if sid and sid not in clean_ids:
+            clean_ids.append(sid)
 
-    if not normalized:
-        return []
+    result = {
+        "ok": True,
+        "total": len(clean_ids),
+        "success": 0,
+        "failed": 0,
+        "items": [],
+    }
 
-    # Supabase 撈出來是新到舊，這裡先轉成舊到新計算 diff。
-    normalized = sorted(normalized, key=lambda x: x["date"])
-
-    output_asc = []
-
-    for i, item in enumerate(normalized):
-        ratio = item["ratio"]
-
-        if i > 0:
-            prev_ratio = normalized[i - 1]["ratio"]
-            diff_text = f"{ratio - prev_ratio:+.2f}%"
-        else:
-            diff_text = "--"
-
-        output_asc.append(
-            {
-                "date": _fmt_md(item["date"]),
-                "ratio": f"{ratio:.2f}%",
-                "diff": diff_text,
-            }
-        )
-
-    # 回傳新到舊，最多 limit 筆。
-    return output_asc[-limit:][::-1]
-
-def _tdcc_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-
-        text = str(value).replace(",", "").replace("%", "").strip()
-
-        if not text or text in {"--", "-"}:
-            return default
-
-        return float(text)
-
-    except Exception:
-        return default
-
-
-def _tdcc_get(row, *keys, default=None):
-    if row is None:
-        return default
-
-    if isinstance(row, dict):
-        for key in keys:
-            if key in row and row.get(key) is not None:
-                return row.get(key)
-        return default
-
-    for key in keys:
+    for sid in clean_ids:
         try:
-            value = getattr(row, key)
+            item = sync_tdcc_latest_large_holder(sid)
 
-            if value is not None:
-                return value
+            if item.get("ok"):
+                result["success"] += 1
+            else:
+                result["failed"] += 1
 
-        except Exception:
-            continue
+            result["items"].append(item)
 
-    return default
+        except Exception as exc:
+            result["failed"] += 1
+            result["items"].append(
+                {
+                    "stock_id": sid,
+                    "ok": False,
+                    "error": repr(exc),
+                }
+            )
 
+    result["ok"] = result["failed"] == 0
+    result["seconds"] = round(time.perf_counter() - t0, 3)
 
-def _tdcc_date_text(value):
-    text = str(value or "").strip()
-
-    if not text:
-        return "--"
-
-    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
-        return text[5:10].replace("-", "/")
-
-    if len(text) >= 10 and text[4] == "/" and text[7] == "/":
-        return text[5:10]
-
-    if len(text) >= 5 and "/" in text:
-        return text[-5:]
-
-    return text
-
-
-def _tdcc_format_ratio(value):
-    number = _tdcc_float(value, default=0.0)
-
-    if number == 0:
-        return "--"
-
-    if 0 < abs(number) <= 1:
-        number = number * 100
-
-    return f"{number:.2f}%"
-
-
-def _tdcc_format_diff(value):
-    if value is None:
-        return "--"
-
-    number = _tdcc_float(value, default=0.0)
-
-    if number == 0:
-        return "--"
-
-    if 0 < abs(number) <= 1:
-        number = number * 100
-
-    return f"{number:+.2f}%"
-
-
-def _tdcc_ratio_value(row):
-    return _tdcc_get(
-        row,
-        "ratio",
-        "percentage",
-        "percent",
-        "pct",
-        "holding_ratio",
-        "holder_ratio",
-        "large_holder_ratio",
-        "large_holder_pct",
-        "over_1000_ratio",
-        "over_1000_pct",
-        "value",
-        default=None,
+    print(
+        "DEBUG tdcc sync many",
+        "| total =",
+        result["total"],
+        "| success =",
+        result["success"],
+        "| failed =",
+        result["failed"],
+        "| seconds =",
+        result["seconds"],
+        flush=True,
     )
-
-
-def _tdcc_date_value(row):
-    return _tdcc_get(
-        row,
-        "date",
-        "week",
-        "data_date",
-        "trade_date",
-        "record_date",
-        default="",
-    )
-
-
-def _build_large_holder_5week_rows(raw_rows):
-    """
-    raw_rows：原始大戶持股資料，至少要包含 date + ratio。
-    回傳：最新 5 週，格式給 controller.py 使用：
-    [
-      {"date": "07/03", "ratio": "66.38%", "diff": "--"},
-      ...
-    ]
-    """
-    rows = list(raw_rows or [])
-
-    if not rows:
-        return []
-
-    rows = sorted(rows, key=lambda r: str(_tdcc_date_value(r) or ""))
-
-    result = []
-    latest_rows = list(reversed(rows[-5:]))
-
-    for row in latest_rows:
-        try:
-            idx = rows.index(row)
-        except Exception:
-            idx = -1
-
-        ratio = _tdcc_ratio_value(row)
-
-        diff = _tdcc_get(
-            row,
-            "diff",
-            "change",
-            "difference",
-            "ratio_change",
-            "pct_change",
-            "week_change",
-            "wow",
-            "delta",
-            default=None,
-        )
-
-        if diff is None and idx > 0:
-            this_ratio = _tdcc_float(_tdcc_ratio_value(row), default=0.0)
-            prev_ratio = _tdcc_float(_tdcc_ratio_value(rows[idx - 1]), default=0.0)
-
-            if this_ratio and prev_ratio:
-                diff = this_ratio - prev_ratio
-
-        result.append(
-            {
-                "date": _tdcc_date_text(_tdcc_date_value(row)),
-                "ratio": _tdcc_format_ratio(ratio),
-                "diff": _tdcc_format_diff(diff),
-            }
-        )
 
     return result
 
+
+# ---------- Optional FinMind sponsor-only large holder backfill ----------
+
 def _finmind_large_holder_level(level) -> bool:
-    """
-    判斷 FinMind HoldingSharesLevel 是否屬於「千張大戶」。
-
-    FinMind 欄位是 HoldingSharesLevel，例如：
-    - 1-999
-    - 1000-5000
-    - ...
-    - 1000001以上
-
-    這裡的「千張」是 1,000,000 股以上，所以抓 1000001 以上的級距。
-    """
     import re
 
     text = str(level or "").replace(",", "").strip()
@@ -1067,7 +966,6 @@ def _finmind_large_holder_level(level) -> bool:
     if not text:
         return False
 
-    # 常見：1000001以上、1,000,001以上、1000001-
     if "1000001" in text:
         return True
 
@@ -1077,27 +975,20 @@ def _finmind_large_holder_level(level) -> bool:
         return False
 
     try:
-        # 取區間第一個數字，例如 1000001以上 -> 1000001
         first = int(nums[0])
         return first >= 1000001
     except Exception:
         return False
 
 
-def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: str):
+def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
-    從 FinMind TaiwanStockHoldingSharesPer 抓股權分散表。
+    FinMind TaiwanStockHoldingSharesPer。
+    這個資料集通常需要 sponsor/backer 權限。
     """
-    import os
-    import time
-
-    import pandas as pd
-    import requests
-
     sid = _clean_stock_id(stock_id)
-    token = os.getenv("FINMIND_TOKEN", "").strip()
 
-    if not token:
+    if not FINMIND_TOKEN:
         print(
             "DEBUG finmind large_holder",
             "| stock_id =",
@@ -1107,32 +998,17 @@ def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: 
         )
         return pd.DataFrame()
 
-    t0 = time.perf_counter()
-
-    url = "https://api.finmindtrade.com/api/v4/data"
-
     params = {
         "dataset": "TaiwanStockHoldingSharesPer",
         "data_id": sid,
         "start_date": start_date,
         "end_date": end_date,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0",
+        "token": FINMIND_TOKEN,
     }
 
     try:
-        res = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=15,
-        )
-
+        res = requests.get(FINMIND_URL, params=params, timeout=15)
         payload = res.json()
-
         data = payload.get("data") or []
 
         if not data:
@@ -1144,8 +1020,6 @@ def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: 
                 res.status_code,
                 "| msg =",
                 payload.get("msg") or payload.get("message") or payload,
-                "| sec =",
-                round(time.perf_counter() - t0, 3),
                 flush=True,
             )
             return pd.DataFrame()
@@ -1160,8 +1034,6 @@ def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: 
             len(df),
             "| columns =",
             list(df.columns),
-            "| sec =",
-            round(time.perf_counter() - t0, 3),
             flush=True,
         )
 
@@ -1174,31 +1046,15 @@ def _fetch_finmind_holding_shares_per(stock_id: str, start_date: str, end_date: 
             sid,
             "| error =",
             repr(exc),
-            "| sec =",
-            round(time.perf_counter() - t0, 3),
             flush=True,
         )
         return pd.DataFrame()
 
 
 def _extract_finmind_large_holder_records(stock_id: str, weeks: int = 8) -> list[dict]:
-    """
-    使用 FinMind 股權分散表回補千張大戶近幾週資料。
-
-    回傳新到舊：
-    [
-        {"stock_id": "2317", "trade_date": "2026-07-03", "ratio": 66.38},
-        ...
-    ]
-    """
-    from datetime import date, timedelta
-
-    import pandas as pd
-
     sid = _clean_stock_id(stock_id)
 
-    end_date = date.today()
-    # 抓寬一點，避免遇到假日或缺週。
+    end_date = _today()
     start_date = end_date - timedelta(days=max(90, int(weeks) * 14))
 
     df = _fetch_finmind_holding_shares_per(
@@ -1283,9 +1139,6 @@ def _extract_finmind_large_holder_records(stock_id: str, weeks: int = 8) -> list
 
 
 def sync_finmind_large_holder_history(stock_id: str, weeks: int = 8) -> dict:
-    """
-    用 FinMind TaiwanStockHoldingSharesPer 回補近幾週大戶資料到 Supabase。
-    """
     sid = _clean_stock_id(stock_id)
 
     records = _extract_finmind_large_holder_records(sid, weeks=weeks)
@@ -1331,17 +1184,16 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
     """
     千張大戶持股比率。
 
-    新流程：
-    1. 先讀 Supabase，避免每次 LINE 查詢都打 TDCC / FinMind。
-    2. Supabase 足 5 週：直接回傳。
-    3. Supabase 不足 5 週：用 FinMind 回補歷史。
-    4. 回補後再讀 Supabase。
-    5. 若仍不足，才用 TDCC latest CSV 補最新一週。
+    重要設計：
+    1. 預設只讀 Supabase，避免每次 LINE 查詢都打 TDCC / FinMind。
+    2. 若 Supabase 有近 5 週，會顯示近 5 週。
+    3. 若 Supabase 只有 1 週，只能顯示 1 週。
+    4. TDCC latest CSV 只能同步最新一週，歷史需要每週排程累積。
+    5. 若設定 USE_FINMIND_LARGE_HOLDER_HISTORY=1，才會嘗試 FinMind sponsor-only dataset。
     """
     import time
 
     t0 = time.perf_counter()
-
     sid = _clean_stock_id(stock_id)
 
     history = _large_holder_from_supabase_history(sid, limit=6)
@@ -1360,36 +1212,32 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
     if len(history or []) >= 5:
         return history[:5]
 
-    finmind_sync = sync_finmind_large_holder_history(sid, weeks=8)
+    if _bool_env("USE_FINMIND_LARGE_HOLDER_HISTORY", default=False):
+        finmind_sync = sync_finmind_large_holder_history(sid, weeks=8)
+        history = _large_holder_from_supabase_history(sid, limit=6)
 
-    history = _large_holder_from_supabase_history(sid, limit=6)
+        print(
+            "DEBUG large_holder table after_finmind",
+            "| stock_id =",
+            sid,
+            "| finmind_sync =",
+            finmind_sync,
+            "| history_count =",
+            len(history or []),
+            "| history =",
+            history,
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
 
-    print(
-        "DEBUG large_holder table after_finmind",
-        "| stock_id =",
-        sid,
-        "| finmind_sync =",
-        finmind_sync,
-        "| history_count =",
-        len(history or []),
-        "| history =",
-        history,
-        "| sec =",
-        round(time.perf_counter() - t0, 3),
-        flush=True,
-    )
+        if len(history or []) >= 5:
+            return history[:5]
 
-    if history:
-        return history[:5]
-
-    # 最後 fallback：TDCC latest CSV 只能補最新一週。
-    sync_func = globals().get("sync_tdcc_latest_large_holder")
-
-    sync_result = {}
-
-    if callable(sync_func):
-        sync_result = sync_func(sid)
-
+    # 預設不在每次 LINE 查詢同步 TDCC，避免查一次大戶就等 5~10 秒。
+    # 若你想在查詢時自動補最新一週，設 LARGE_HOLDER_SYNC_ON_QUERY=1。
+    if _bool_env("LARGE_HOLDER_SYNC_ON_QUERY", default=False):
+        sync_result = sync_tdcc_latest_large_holder(sid)
         history = _large_holder_from_supabase_history(sid, limit=6)
 
         print(
@@ -1407,8 +1255,15 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
             flush=True,
         )
 
-        if history:
-            return history[:5]
+    if history:
+        return history[:5]
+
+    # 如果資料庫完全沒有資料，最後才即時抓 TDCC latest CSV 補一筆。
+    sync_result = sync_tdcc_latest_large_holder(sid)
+    history = _large_holder_from_supabase_history(sid, limit=6)
+
+    if history:
+        return history[:5]
 
     if sync_result.get("ok"):
         return [
@@ -1419,7 +1274,7 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
             }
         ]
 
-    return _large_holder_unavailable("Supabase/FinMind/TDCC皆無資料")
+    return _large_holder_unavailable("Supabase/TDCC皆無資料")
 
 
 # ============================================================
@@ -1512,151 +1367,3 @@ def get_margin_table(stock_id: str) -> list[dict]:
         )
 
     return output or _mock_margin_table()
-
-def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
-    """
-    同步單檔 TDCC 千張大戶資料。
-
-    相容模式：
-    - 若已有 sync_tdcc_large_holder_history()，優先同步近 6 週。
-    - 否則使用 _extract_tdcc_latest_large_holder_record() 同步最新一週。
-    """
-    sid = _clean_stock_id(stock_id)
-
-    # 1. 優先用歷史同步函式
-    history_func = globals().get("sync_tdcc_large_holder_history")
-
-    if callable(history_func):
-        try:
-            result = history_func(sid, weeks=6)
-
-            if isinstance(result, dict):
-                return result
-
-        except Exception as exc:
-            print(
-                "DEBUG tdcc sync latest via history failed",
-                "| stock_id =",
-                sid,
-                "| error =",
-                repr(exc),
-                flush=True,
-            )
-
-    # 2. fallback：同步最新一週
-    extract_func = globals().get("_extract_tdcc_latest_large_holder_record")
-    upsert_func = globals().get("upsert_large_holder_history")
-
-    if not callable(extract_func):
-        return {
-            "stock_id": sid,
-            "ok": False,
-            "message": "chip_service 缺少 _extract_tdcc_latest_large_holder_record()",
-        }
-
-    if not callable(upsert_func):
-        return {
-            "stock_id": sid,
-            "ok": False,
-            "message": "chip_service 缺少 upsert_large_holder_history()",
-        }
-
-    record = extract_func(sid)
-
-    if not record:
-        return {
-            "stock_id": sid,
-            "ok": False,
-            "message": "TDCC 最新資料未取得",
-        }
-
-    ok = upsert_func(
-        stock_id=record["stock_id"],
-        trade_date=record["trade_date"],
-        large_holder_ratio=record["ratio"],
-        source="TDCC",
-    )
-
-    return {
-        "stock_id": sid,
-        "ok": bool(ok),
-        "trade_date": record.get("trade_date"),
-        "ratio": record.get("ratio"),
-        "message": "synced" if ok else "Supabase 寫入失敗",
-    }
-
-
-def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
-    """
-    批次同步多檔 TDCC 千張大戶資料。
-
-    app.py 目前會 import 這個名稱，所以 chip_service.py 必須保留。
-    """
-    import os
-    import time
-
-    t0 = time.perf_counter()
-
-    if stock_ids is None:
-        stock_ids = os.getenv("TDCC_SYNC_STOCKS", "")
-
-    if isinstance(stock_ids, str):
-        raw_items = stock_ids.replace("，", ",").split(",")
-    else:
-        raw_items = list(stock_ids or [])
-
-    clean_ids = []
-
-    for item in raw_items:
-        sid = _clean_stock_id(str(item or "").strip())
-
-        if sid and sid not in clean_ids:
-            clean_ids.append(sid)
-
-    result = {
-        "ok": True,
-        "total": len(clean_ids),
-        "success": 0,
-        "failed": 0,
-        "items": [],
-    }
-
-    for sid in clean_ids:
-        try:
-            item = sync_tdcc_latest_large_holder(sid)
-
-            if item.get("ok"):
-                result["success"] += 1
-            else:
-                result["failed"] += 1
-
-            result["items"].append(item)
-
-        except Exception as exc:
-            result["failed"] += 1
-            result["items"].append(
-                {
-                    "stock_id": sid,
-                    "ok": False,
-                    "error": repr(exc),
-                }
-            )
-
-    result["ok"] = result["failed"] == 0
-    result["seconds"] = round(time.perf_counter() - t0, 3)
-
-    print(
-        "DEBUG tdcc sync many",
-        "| total =",
-        result["total"],
-        "| success =",
-        result["success"],
-        "| failed =",
-        result["failed"],
-        "| seconds =",
-        result["seconds"],
-        flush=True,
-    )
-
-    return result
-
