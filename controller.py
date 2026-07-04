@@ -1852,87 +1852,398 @@ def _build_chart_flex(
     }
 
 
-def _build_large_holder_flex(
-    stock_id: str,
-    stock_name: str,
-    rows: list[dict],
-    current_tf: str,
-) -> dict[str, Any]:
-    contents: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": f"{stock_id} {stock_name}",
-            "size": "xxl",
-            "weight": "bold",
-            "color": "#111111",
-            "wrap": True,
-        },
-        {
-            "type": "text",
-            "text": "大戶持股週報",
-            "size": "lg",
-            "weight": "bold",
-            "color": "#444444",
-            "margin": "sm",
-        },
-        {
-            "type": "separator",
-            "margin": "md",
-        },
-    ]
+def _lh_get(row, *keys, default=None):
+    if row is None:
+        return default
 
-    for r in rows[:8]:
-        date = str(r.get("date", "--"))
-        ratio = str(r.get("ratio", "--"))
-        diff = str(r.get("diff", "--"))
+    if isinstance(row, dict):
+        for key in keys:
+            if key in row and row.get(key) is not None:
+                return row.get(key)
+        return default
 
-        diff_color = UP_COLOR if diff.startswith("+") else DOWN_COLOR if diff.startswith("-") else FLAT_COLOR
+    for key in keys:
+        try:
+            value = getattr(row, key)
 
-        contents.append(
+            if value is not None:
+                return value
+
+        except Exception:
+            continue
+
+    return default
+
+
+def _lh_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+
+        text = str(value).replace(",", "").replace("%", "").strip()
+
+        if not text or text in {"--", "-"}:
+            return default
+
+        return float(text)
+
+    except Exception:
+        return default
+
+
+def _lh_date_text(value):
+    text = str(value or "").strip()
+
+    if not text:
+        return "--"
+
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[5:10].replace("-", "/")
+
+    if len(text) >= 10 and text[4] == "/" and text[7] == "/":
+        return text[5:10]
+
+    if len(text) >= 5 and "/" in text:
+        return text[-5:]
+
+    return text
+
+
+def _lh_pct_text(value):
+    number = _lh_float(value, default=0.0)
+
+    if number == 0:
+        return "--"
+
+    if 0 < abs(number) <= 1:
+        number = number * 100
+
+    return f"{number:.2f}%"
+
+
+def _lh_change_text(value):
+    if value is None:
+        return "--"
+
+    number = _lh_float(value, default=0.0)
+
+    if number == 0:
+        return "--"
+
+    if 0 < abs(number) <= 1:
+        number = number * 100
+
+    return f"{number:+.2f}%"
+
+
+def _lh_change_color(value):
+    number = _lh_float(value, default=0.0)
+
+    if 0 < abs(number) <= 1:
+        number = number * 100
+
+    if number > 0:
+        return "#E53935"
+
+    if number < 0:
+        return "#1E9F5A"
+
+    return "#00AA55"
+
+
+def _lh_ratio_from_row(row):
+    return _lh_get(
+        row,
+        "ratio",
+        "percentage",
+        "percent",
+        "pct",
+        "holding_ratio",
+        "holder_ratio",
+        "large_holder_ratio",
+        "large_holder_pct",
+        "over_1000_ratio",
+        "over_1000_pct",
+        "value",
+        default=None,
+    )
+
+
+def _lh_change_from_row(row):
+    return _lh_get(
+        row,
+        "change",
+        "diff",
+        "difference",
+        "ratio_change",
+        "pct_change",
+        "week_change",
+        "wow",
+        "delta",
+        default=None,
+    )
+
+
+def _lh_sort_key(row):
+    return str(
+        _lh_get(
+            row,
+            "date",
+            "week",
+            "data_date",
+            "trade_date",
+            "record_date",
+            default="",
+        )
+        or ""
+    )
+
+
+def _large_holder_week_row(date_text, ratio_text, change_text, change_color):
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "sm",
+        "contents": [
+            {
+                "type": "text",
+                "text": date_text,
+                "size": "md",
+                "color": "#555555",
+                "flex": 3,
+            },
+            {
+                "type": "text",
+                "text": ratio_text,
+                "size": "md",
+                "weight": "bold",
+                "color": "#333333",
+                "align": "end",
+                "flex": 4,
+            },
+            {
+                "type": "text",
+                "text": change_text,
+                "size": "md",
+                "weight": "bold",
+                "color": change_color,
+                "align": "end",
+                "flex": 3,
+            },
+        ],
+    }
+
+
+def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: str = "D"):
+    """
+    顯示個股大戶持股近 5 週。
+    """
+    raw_rows = list(rows or [])
+
+    print(
+        "DEBUG large_holder flex",
+        "| stock_id =",
+        stock_id,
+        "| rows_count =",
+        len(raw_rows),
+        "| sample =",
+        raw_rows[:2],
+        flush=True,
+    )
+
+    if not raw_rows:
+        body_contents = [
+            {
+                "type": "text",
+                "text": f"{stock_id} {stock_name}",
+                "weight": "bold",
+                "size": "xxl",
+                "color": "#111111",
+            },
+            {
+                "type": "text",
+                "text": "大戶持股近5週",
+                "weight": "bold",
+                "size": "xl",
+                "color": "#444444",
+                "margin": "md",
+            },
+            {"type": "separator", "margin": "lg"},
+            {
+                "type": "text",
+                "text": "目前查無大戶持股資料",
+                "size": "md",
+                "color": "#777777",
+                "margin": "lg",
+            },
+        ]
+    else:
+        sorted_rows = sorted(raw_rows, key=_lh_sort_key)
+        latest_rows = list(reversed(sorted_rows[-5:]))
+
+        computed_rows = []
+
+        for row in latest_rows:
+            date_raw = _lh_get(
+                row,
+                "date",
+                "week",
+                "data_date",
+                "trade_date",
+                "record_date",
+                default="",
+            )
+
+            ratio_value = _lh_ratio_from_row(row)
+            change_value = _lh_change_from_row(row)
+
+            if change_value is None:
+                try:
+                    idx = sorted_rows.index(row)
+
+                    if idx > 0:
+                        this_ratio = _lh_float(_lh_ratio_from_row(row), default=0.0)
+                        prev_ratio = _lh_float(_lh_ratio_from_row(sorted_rows[idx - 1]), default=0.0)
+
+                        if this_ratio and prev_ratio:
+                            change_value = this_ratio - prev_ratio
+
+                except Exception:
+                    pass
+
+            computed_rows.append(
+                {
+                    "date": _lh_date_text(date_raw),
+                    "ratio": _lh_pct_text(ratio_value),
+                    "change": _lh_change_text(change_value),
+                    "change_color": _lh_change_color(change_value),
+                }
+            )
+
+        row_boxes = [
+            _large_holder_week_row(
+                row["date"],
+                row["ratio"],
+                row["change"],
+                row["change_color"],
+            )
+            for row in computed_rows
+        ]
+
+        body_contents = [
+            {
+                "type": "text",
+                "text": f"{stock_id} {stock_name}",
+                "weight": "bold",
+                "size": "xxl",
+                "color": "#111111",
+            },
+            {
+                "type": "text",
+                "text": "大戶持股近5週",
+                "weight": "bold",
+                "size": "xl",
+                "color": "#444444",
+                "margin": "md",
+            },
+            {"type": "separator", "margin": "lg"},
             {
                 "type": "box",
                 "layout": "horizontal",
-                "margin": "sm",
+                "spacing": "sm",
+                "margin": "lg",
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"🗓 {date}",
-                        "size": "md",
+                        "text": "日期",
+                        "size": "sm",
+                        "color": "#888888",
                         "flex": 3,
-                        "color": "#333333",
                     },
                     {
                         "type": "text",
-                        "text": ratio,
-                        "size": "md",
-                        "flex": 3,
-                        "color": "#333333",
-                    },
-                    {
-                        "type": "text",
-                        "text": diff,
-                        "size": "md",
-                        "flex": 3,
-                        "color": diff_color,
+                        "text": "持股比",
+                        "size": "sm",
+                        "color": "#888888",
                         "align": "end",
+                        "flex": 4,
+                    },
+                    {
+                        "type": "text",
+                        "text": "週增減",
+                        "size": "sm",
+                        "color": "#888888",
+                        "align": "end",
+                        "flex": 3,
                     },
                 ],
-            }
-        )
+            },
+            *row_boxes,
+        ]
 
-    contents.extend(_mode_buttons(stock_id, "large_holder", current_tf))
+    body_contents.extend(
+        [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "xl",
+                "contents": [
+                    _postback_button(
+                        label="即時",
+                        data=f"{stock_id},instant,instant,{current_tf}",
+                        active=False,
+                    ),
+                    _postback_button(
+                        label="K線",
+                        data=f"{stock_id},k_line,k_line,{current_tf}",
+                        active=False,
+                    ),
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "sm",
+                "contents": [
+                    _postback_button(
+                        label="法人",
+                        data=f"{stock_id},chip,chip,{current_tf}",
+                        active=False,
+                    ),
+                    _postback_button(
+                        label="大戶",
+                        data=f"{stock_id},large_holder,large_holder,{current_tf}",
+                        active=True,
+                    ),
+                    _postback_button(
+                        label="融資券",
+                        data=f"{stock_id},margin,margin,{current_tf}",
+                        active=False,
+                    ),
+                    _postback_button(
+                        label="期貨",
+                        data=f"{stock_id},futures,futures,{current_tf}",
+                        active=False,
+                    ),
+                ],
+            },
+        ]
+    )
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name} 大戶持股週報",
+        "altText": f"{stock_id} {stock_name} 大戶持股近5週",
         "contents": {
             "type": "bubble",
             "size": "mega",
             "body": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "14px",
-                "contents": contents,
+                "paddingAll": "20px",
+                "contents": body_contents,
             },
         },
     }
