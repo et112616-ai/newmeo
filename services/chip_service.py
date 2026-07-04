@@ -1205,3 +1205,151 @@ def get_margin_table(stock_id: str) -> list[dict]:
         )
 
     return output or _mock_margin_table()
+
+def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
+    """
+    同步單檔 TDCC 千張大戶資料。
+
+    相容模式：
+    - 若已有 sync_tdcc_large_holder_history()，優先同步近 6 週。
+    - 否則使用 _extract_tdcc_latest_large_holder_record() 同步最新一週。
+    """
+    sid = _clean_stock_id(stock_id)
+
+    # 1. 優先用歷史同步函式
+    history_func = globals().get("sync_tdcc_large_holder_history")
+
+    if callable(history_func):
+        try:
+            result = history_func(sid, weeks=6)
+
+            if isinstance(result, dict):
+                return result
+
+        except Exception as exc:
+            print(
+                "DEBUG tdcc sync latest via history failed",
+                "| stock_id =",
+                sid,
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
+
+    # 2. fallback：同步最新一週
+    extract_func = globals().get("_extract_tdcc_latest_large_holder_record")
+    upsert_func = globals().get("upsert_large_holder_history")
+
+    if not callable(extract_func):
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "message": "chip_service 缺少 _extract_tdcc_latest_large_holder_record()",
+        }
+
+    if not callable(upsert_func):
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "message": "chip_service 缺少 upsert_large_holder_history()",
+        }
+
+    record = extract_func(sid)
+
+    if not record:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "message": "TDCC 最新資料未取得",
+        }
+
+    ok = upsert_func(
+        stock_id=record["stock_id"],
+        trade_date=record["trade_date"],
+        large_holder_ratio=record["ratio"],
+        source="TDCC",
+    )
+
+    return {
+        "stock_id": sid,
+        "ok": bool(ok),
+        "trade_date": record.get("trade_date"),
+        "ratio": record.get("ratio"),
+        "message": "synced" if ok else "Supabase 寫入失敗",
+    }
+
+
+def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
+    """
+    批次同步多檔 TDCC 千張大戶資料。
+
+    app.py 目前會 import 這個名稱，所以 chip_service.py 必須保留。
+    """
+    import os
+    import time
+
+    t0 = time.perf_counter()
+
+    if stock_ids is None:
+        stock_ids = os.getenv("TDCC_SYNC_STOCKS", "")
+
+    if isinstance(stock_ids, str):
+        raw_items = stock_ids.replace("，", ",").split(",")
+    else:
+        raw_items = list(stock_ids or [])
+
+    clean_ids = []
+
+    for item in raw_items:
+        sid = _clean_stock_id(str(item or "").strip())
+
+        if sid and sid not in clean_ids:
+            clean_ids.append(sid)
+
+    result = {
+        "ok": True,
+        "total": len(clean_ids),
+        "success": 0,
+        "failed": 0,
+        "items": [],
+    }
+
+    for sid in clean_ids:
+        try:
+            item = sync_tdcc_latest_large_holder(sid)
+
+            if item.get("ok"):
+                result["success"] += 1
+            else:
+                result["failed"] += 1
+
+            result["items"].append(item)
+
+        except Exception as exc:
+            result["failed"] += 1
+            result["items"].append(
+                {
+                    "stock_id": sid,
+                    "ok": False,
+                    "error": repr(exc),
+                }
+            )
+
+    result["ok"] = result["failed"] == 0
+    result["seconds"] = round(time.perf_counter() - t0, 3)
+
+    print(
+        "DEBUG tdcc sync many",
+        "| total =",
+        result["total"],
+        "| success =",
+        result["success"],
+        "| failed =",
+        result["failed"],
+        "| seconds =",
+        result["seconds"],
+        flush=True,
+    )
+
+    return result
+
