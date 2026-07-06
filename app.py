@@ -24,6 +24,48 @@ from controller import handle_request
 from services.chip_service import sync_tdcc_latest_large_holder_many
 from utils.parser import parse_make_payload
 
+import time
+
+_LINE_EVENT_SEEN: dict[str, float] = {}
+_LINE_EVENT_SEEN_TTL_SECONDS = 180
+
+
+def _line_should_process_event(event: dict) -> bool:
+    """
+    避免同一個 webhookEventId 被重複處理。
+    但不要因為 isRedelivery=True 就直接丟掉。
+
+    LINE redelivery 的 webhookEventId 和 replyToken 會跟原事件相同；
+    所以用 webhookEventId 去重比較安全。
+    """
+    event_id = str(event.get("webhookEventId") or "").strip()
+
+    if not event_id:
+        return True
+
+    now = time.time()
+
+    expired_ids = [
+        k
+        for k, ts in list(_LINE_EVENT_SEEN.items())
+        if now - ts > _LINE_EVENT_SEEN_TTL_SECONDS
+    ]
+
+    for k in expired_ids:
+        _LINE_EVENT_SEEN.pop(k, None)
+
+    if event_id in _LINE_EVENT_SEEN:
+        print(
+            "LINE duplicate event ignored:",
+            event_id,
+            "| isRedelivery =",
+            event.get("deliveryContext", {}).get("isRedelivery"),
+            flush=True,
+        )
+        return False
+
+    _LINE_EVENT_SEEN[event_id] = now
+    return True
 
 app = Flask(__name__)
 
@@ -476,13 +518,18 @@ def line_webhook():
             return jsonify({"status": "ok", "message": "no events"}), 200
 
         for event in events:
-            if event.get("deliveryContext", {}).get("isRedelivery"):
+            is_redelivery = bool(event.get("deliveryContext", {}).get("isRedelivery"))
+
+            if not _line_should_process_event(event):
+                continue
+
+            if is_redelivery:
                 print(
-                    "LINE redelivery event ignored:",
+                    "LINE redelivery event received; processing:",
                     event.get("webhookEventId"),
                     flush=True,
                 )
-                continue
+
             reply_token = str(event.get("replyToken", "")).strip()
 
             bot_payload = {
