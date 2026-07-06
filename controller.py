@@ -2650,6 +2650,284 @@ def _margin_table_row(
         ],
     }
 
+def _fmt_stock_chip_int(value, signed: bool = True) -> str:
+    try:
+        num = int(round(float(value or 0)))
+
+        if signed:
+            sign = "+" if num > 0 else ""
+            return f"{sign}{num:,}"
+
+        return f"{num:,}"
+
+    except Exception:
+        return "--"
+
+
+def _stock_chip_color(value) -> str:
+    try:
+        num = float(value or 0)
+
+        if num > 0:
+            return "#FF2D2D"
+
+        if num < 0:
+            return "#00B050"
+
+    except Exception:
+        pass
+
+    return "#666666"
+
+
+def _stock_chip_dates(chip_rows: dict) -> list[str]:
+    """
+    依 get_institutional_chips() 回傳順序整理日期。
+    chip_service.py 目前每一類法人已經是舊到新排序的近 10 筆。
+    """
+    dates: list[str] = []
+
+    if not isinstance(chip_rows, dict):
+        return dates
+
+    for section in ["foreign", "trust", "dealer"]:
+        for item in list(chip_rows.get(section) or []):
+            date = str(item.get("date", "") or "").strip()
+
+            if date and date not in dates:
+                dates.append(date)
+
+    return dates[-10:]
+
+
+def _stock_chip_value(chip_rows: dict, section: str, date: str) -> float:
+    if not isinstance(chip_rows, dict):
+        return 0.0
+
+    for item in list(chip_rows.get(section) or []):
+        if str(item.get("date", "") or "").strip() == str(date or "").strip():
+            try:
+                return float(item.get("buy_sell") or 0)
+            except Exception:
+                return 0.0
+
+    return 0.0
+
+
+def _build_stock_chip_flex(
+    stock_id: str,
+    stock_name: str,
+    chip_rows: dict,
+    current_tf: str = "D",
+) -> dict[str, Any]:
+    """
+    個股法人 Flex 表格卡。
+    資料來源：get_institutional_chips()
+
+    顯示：
+    - 最新一日：外資、投信、自營商、三大法人合計
+    - 近10日：日期 | 外資 | 投信 | 自營商
+    """
+    dates_asc = _stock_chip_dates(chip_rows)
+    dates_desc = list(reversed(dates_asc))
+
+    latest_date = dates_desc[0] if dates_desc else "--"
+
+    latest_foreign = _stock_chip_value(chip_rows, "foreign", latest_date)
+    latest_trust = _stock_chip_value(chip_rows, "trust", latest_date)
+    latest_dealer = _stock_chip_value(chip_rows, "dealer", latest_date)
+    latest_total = latest_foreign + latest_trust + latest_dealer
+
+    def _summary_row(label: str, value) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#666666",
+                    "flex": 4,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": f"{_fmt_stock_chip_int(value)} 張",
+                    "size": "sm",
+                    "color": _stock_chip_color(value),
+                    "weight": "bold",
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def _cell(
+        text: str,
+        flex: int,
+        color: str = "#333333",
+        weight: str = "regular",
+        align: str = "end",
+    ) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "text": str(text),
+            "size": "xs",
+            "color": color,
+            "weight": weight,
+            "flex": flex,
+            "align": align,
+            "wrap": True,
+        }
+
+    def _table_header() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "backgroundColor": "#EEF1F4",
+            "cornerRadius": "sm",
+            "contents": [
+                _cell("日期", 2, "#555555", "bold", "start"),
+                _cell("外資", 3, "#555555", "bold", "end"),
+                _cell("投信", 3, "#555555", "bold", "end"),
+                _cell("自營商", 3, "#555555", "bold", "end"),
+            ],
+        }
+
+    def _table_row(date_text: str) -> dict[str, Any]:
+        foreign = _stock_chip_value(chip_rows, "foreign", date_text)
+        trust = _stock_chip_value(chip_rows, "trust", date_text)
+        dealer = _stock_chip_value(chip_rows, "dealer", date_text)
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "contents": [
+                _cell(str(date_text or "--"), 2, "#333333", "regular", "start"),
+                _cell(_fmt_stock_chip_int(foreign), 3, _stock_chip_color(foreign)),
+                _cell(_fmt_stock_chip_int(trust), 3, _stock_chip_color(trust)),
+                _cell(_fmt_stock_chip_int(dealer), 3, _stock_chip_color(dealer)),
+            ],
+        }
+
+    table_contents: list[dict[str, Any]] = [_table_header()]
+
+    if dates_desc:
+        for date_text in dates_desc[:10]:
+            table_contents.append(_table_row(date_text))
+    else:
+        table_contents.append(
+            {
+                "type": "text",
+                "text": "暫無近10日資料",
+                "size": "sm",
+                "color": "#999999",
+                "margin": "sm",
+            }
+        )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{stock_id} {stock_name}",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": "法人買賣超",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": f"最新日期：{latest_date}",
+            "size": "sm",
+            "color": "#666666",
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "最新一日",
+            "size": "md",
+            "weight": "bold",
+            "color": "#222222",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "margin": "sm",
+            "contents": [
+                _summary_row("外資", latest_foreign),
+                _summary_row("投信", latest_trust),
+                _summary_row("自營商", latest_dealer),
+                {
+                    "type": "separator",
+                    "margin": "sm",
+                },
+                _summary_row("三大法人合計", latest_total),
+            ],
+        },
+        {
+            "type": "text",
+            "text": "近10日買賣超",
+            "size": "md",
+            "weight": "bold",
+            "color": "#222222",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "xs",
+            "margin": "sm",
+            "paddingAll": "6px",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "md",
+            "contents": table_contents,
+        },
+        {
+            "type": "text",
+            "text": "單位：張；盤後資料，非即時逐筆。",
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_mode_buttons(stock_id, "chip", current_tf))
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 法人買賣超",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 def _build_margin_flex(
     stock_id: str,
     stock_name: str,
@@ -3575,60 +3853,37 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             if action == "chip":
+                import time
+
                 t_chip0 = time.perf_counter()
 
                 chip_rows = get_institutional_chips(meta.stock_id)
 
                 t_chip1 = time.perf_counter()
 
-                image_url = generate_chip_chart(meta.stock_id, stock_name, chip_rows)
-
-                t_chart1 = time.perf_counter()
-
-                print(
-                    "DEBUG stock timing chip_data_chart",
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| data_sec =", round(t_chip1 - t_chip0, 3),
-                    "| chart_sec =", round(t_chart1 - t_chip1, 3),
-                    "| image_url =", bool(image_url),
-                    flush=True,
-                )
-
-                t_flex0 = time.perf_counter()
-
-                flex = _build_chart_flex(
+                flex = _build_stock_chip_flex(
                     stock_id=meta.stock_id,
                     stock_name=stock_name,
-                    image_url=image_url,
-                    price_info=price_meta.price_info,
-                    change_info=price_meta.change_info,
-                    update_time=price_meta.time_stamp,
-                    price_change=price_meta.price_change,
-                    active_mode="chip",
+                    chip_rows=chip_rows,
                     current_tf=tf,
-                    image_aspect_ratio="4:5",
                 )
 
                 t_flex1 = time.perf_counter()
 
                 print(
-                    "DEBUG stock timing flex",
+                    "DEBUG stock timing chip_flex",
                     "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| action =", action,
-                    "| sec =", round(t_flex1 - t_flex0, 3),
-                    flush=True,
-                )
-
-                print(
-                    "DEBUG stock timing total",
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| action =", action,
+                    "| data_sec =", round(t_chip1 - t_chip0, 3),
+                    "| flex_sec =", round(t_flex1 - t_chip1, 3),
                     "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                    "| foreign_rows =", len((chip_rows or {}).get("foreign") or []),
+                    "| trust_rows =", len((chip_rows or {}).get("trust") or []),
+                    "| dealer_rows =", len((chip_rows or {}).get("dealer") or []),
                     flush=True,
                 )
 
                 return _reply_with_title(
-                    f"{stock_name} 法人籌碼",
+                    f"{stock_name} 法人",
                     flex,
                 )
 
