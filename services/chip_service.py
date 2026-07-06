@@ -1711,6 +1711,45 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
         flush=True,
     )
 
+    # 如果 Supabase 目前不足 2 週，第一次查詢時自動補歷史。
+    # 這樣不用先手動跑 /sync_tdcc_large_holder，第一次查某檔也會嘗試顯示 2 週以上。
+    # 缺點：第一次查詢會慢約 5~10 秒。
+    if len(history or []) < 2:
+        try:
+            start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
+            max_weeks = int(os.getenv("TDCC_HISTORY_MAX_WEEKS", "8"))
+
+            sync_result = sync_tdcc_large_holder_history_since(
+                sid,
+                start_date=start_date,
+                max_weeks=max_weeks,
+            )
+
+            history = _large_holder_from_supabase_history(sid, limit=6)
+
+            print(
+                "DEBUG large_holder table after_auto_history_sync",
+                "| stock_id =",
+                sid,
+                "| sync_result =",
+                sync_result,
+                "| history_count =",
+                len(history or []),
+                "| history =",
+                history,
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "DEBUG large_holder table auto_history_sync_failed",
+                "| stock_id =",
+                sid,
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
+    
     if len(history or []) >= 5:
         return history[:5]
 
