@@ -346,45 +346,43 @@ def sync_stock_futures_map_route():
         }
     ), 200
 
-@app.route("/sync_tdcc_large_holder", methods=["GET", "POST"])
+@app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
-    token = request.args.get("token", "").strip()
+    import os
 
-    if not token:
-        token = request.headers.get("X-Sync-Token", "").strip()
+    token = str(request.args.get("token", "") or "").strip()
+    expected_token = str(os.getenv("TDCC_SYNC_TOKEN", "") or "").strip()
 
-    if not TDCC_SYNC_TOKEN or token != TDCC_SYNC_TOKEN:
+    if expected_token and token != expected_token:
         return jsonify(
             {
-                "status": "forbidden",
+                "ok": False,
                 "message": "invalid token",
             }
         ), 403
 
-    stocks_param = request.args.get("stocks", "").strip()
+    stocks = str(request.args.get("stocks", "") or "").strip()
 
-    if not stocks_param and request.method == "POST":
-        payload = request.get_json(force=True, silent=True) or {}
-        stocks_param = str(payload.get("stocks", "")).strip()
+    if not stocks:
+        stocks = str(os.getenv("TDCC_SYNC_STOCKS", "") or "").strip()
 
-    if not stocks_param:
-        stocks_param = TDCC_SYNC_STOCKS
+    # 先預設你常查的股票；之後可改 TDCC_SYNC_STOCKS。
+    if not stocks:
+        stocks = "2317,2330,2327,3264"
 
-    stock_ids = [
-        s.strip()
-        for s in stocks_param.split(",")
-        if s.strip()
-    ]
+    start_date = str(request.args.get("start_date", "") or "").strip()
 
-    results = sync_tdcc_latest_large_holder_many(stock_ids)
+    if start_date:
+        os.environ["TDCC_HISTORY_START_DATE"] = start_date
 
-    return jsonify(
-        {
-            "status": "ok",
-            "count": len(results),
-            "results": results,
-        }
-    ), 200
+    max_weeks = str(request.args.get("max_weeks", "") or "").strip()
+
+    if max_weeks:
+        os.environ["TDCC_HISTORY_MAX_WEEKS"] = max_weeks
+
+    result = sync_tdcc_latest_large_holder_many(stocks)
+
+    return jsonify(result)
 
 
 @app.route("/get_chart", methods=["POST"])
