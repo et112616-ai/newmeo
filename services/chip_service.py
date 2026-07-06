@@ -882,8 +882,7 @@ def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     }
 
 TDCC_HISTORY_PAGE_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
-TDCC_HISTORY_AJAX_URL = "https://www.tdcc.com.tw/smWeb/QryStockAjax.do"
-
+TDCC_HISTORY_AJAX_URL = TDCC_HISTORY_PAGE_URL
 
 def _tdcc_history_headers() -> dict:
     return {
@@ -894,8 +893,9 @@ def _tdcc_history_headers() -> dict:
         ),
         "Referer": TDCC_HISTORY_PAGE_URL,
         "Origin": "https://www.tdcc.com.tw",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Content-Type": "application/x-www-form-urlencoded",
     }
-
 
 def _normalize_yyyymmdd(value: str) -> str:
     from datetime import datetime
@@ -1077,6 +1077,13 @@ def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) ->
 
 
 def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
+    """
+    用 TDCC 官網目前的 portal 頁面查單一股票、單一日期。
+
+    重要：
+    舊的 /smWeb/QryStockAjax.do 現在會回 404，
+    所以這裡改成 POST 到 /portal/zh/smWeb/qryStock 本頁。
+    """
     import re
     import requests
 
@@ -1092,7 +1099,7 @@ def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
     token = ""
 
     try:
-        page = session.get(TDCC_HISTORY_PAGE_URL, headers=headers, timeout=15)
+        page = session.get(TDCC_HISTORY_PAGE_URL, headers=headers, timeout=20)
         html = page.text or ""
 
         m = re.search(
@@ -1103,6 +1110,21 @@ def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
 
         if m:
             token = m.group(1).strip()
+
+        print(
+            "DEBUG tdcc history page",
+            "| stock_id =",
+            sid,
+            "| sca_date =",
+            date_text,
+            "| page_status =",
+            page.status_code,
+            "| token =",
+            bool(token),
+            "| html_len =",
+            len(html),
+            flush=True,
+        )
 
     except Exception as exc:
         print(
@@ -1118,6 +1140,28 @@ def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
 
     payloads = [
         {
+            "method": "submit",
+            "firDate": date_text,
+            "scaDate": date_text,
+            "sqlMethod": "StockNo",
+            "stockNo": sid,
+            "stockName": "",
+            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+            "SYNCHRONIZER_TOKEN": token,
+        },
+        {
+            "method": "submit",
+            "firDate": date_text,
+            "scaDate": date_text,
+            "sqlMethod": "StockNo",
+            "stockNo": sid,
+            "StockNo": sid,
+            "stockName": "",
+            "StockName": "",
+            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+            "SYNCHRONIZER_TOKEN": token,
+        },
+        {
             "scaDates": date_text,
             "scaDate": date_text,
             "SqlMethod": "StockNo",
@@ -1128,92 +1172,86 @@ def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
             "clkStockNo": sid,
             "clkStockName": "",
         },
-        {
-            "SYNCHRONIZER_TOKEN": token,
-            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
-            "method": "submit",
-            "firDate": date_text,
-            "scaDate": date_text,
-            "sqlMethod": "StockNo",
-            "stockNo": sid,
-            "stockName": "",
-        },
     ]
 
-    for i, payload in enumerate(payloads, start=1):
-        try:
-            res = session.post(
-                TDCC_HISTORY_AJAX_URL,
-                data=payload,
-                headers=headers,
-                timeout=20,
-            )
+    # 第一優先：POST 到目前官方 portal 頁面。
+    # 第二備援：若有人在環境變數指定其他 URL，就試那個。
+    urls = [TDCC_HISTORY_PAGE_URL]
 
-            if res.status_code >= 400:
+    # TDCC_HISTORY_AJAX_URL 現在應該等於 TDCC_HISTORY_PAGE_URL。
+    # 若你保留其他值，這裡也會當備援嘗試。
+    if TDCC_HISTORY_AJAX_URL not in urls:
+        urls.append(TDCC_HISTORY_AJAX_URL)
+
+    for url in urls:
+        for i, payload in enumerate(payloads, start=1):
+            try:
+                res = session.post(
+                    url,
+                    data=payload,
+                    headers=headers,
+                    timeout=25,
+                    allow_redirects=True,
+                )
+
+                text = res.text or ""
+
                 print(
-                    "DEBUG tdcc history ajax status",
+                    "DEBUG tdcc history post",
                     "| stock_id =",
                     sid,
                     "| sca_date =",
                     date_text,
+                    "| url =",
+                    url,
                     "| payload_no =",
                     i,
                     "| status =",
                     res.status_code,
-                    "| body =",
-                    (res.text or "")[:180],
+                    "| final_url =",
+                    getattr(res, "url", ""),
+                    "| body_head =",
+                    text[:80].replace("\n", " "),
                     flush=True,
                 )
-                continue
 
-            text = res.text or ""
+                if res.status_code >= 400:
+                    continue
 
-            rows = _parse_tdcc_history_html_to_rows(text, sid, date_text)
+                rows = _parse_tdcc_history_html_to_rows(text, sid, date_text)
 
-            if rows:
+                if rows:
+                    print(
+                        "DEBUG tdcc history post ok",
+                        "| stock_id =",
+                        sid,
+                        "| sca_date =",
+                        date_text,
+                        "| payload_no =",
+                        i,
+                        "| rows =",
+                        len(rows),
+                        flush=True,
+                    )
+                    return rows
+
+            except Exception as exc:
                 print(
-                    "DEBUG tdcc history ajax ok",
+                    "DEBUG tdcc history post failed",
                     "| stock_id =",
                     sid,
                     "| sca_date =",
                     date_text,
+                    "| url =",
+                    url,
                     "| payload_no =",
                     i,
-                    "| rows =",
-                    len(rows),
+                    "| error =",
+                    repr(exc),
                     flush=True,
                 )
-                return rows
-
-            print(
-                "DEBUG tdcc history ajax empty",
-                "| stock_id =",
-                sid,
-                "| sca_date =",
-                date_text,
-                "| payload_no =",
-                i,
-                "| body =",
-                text[:180],
-                flush=True,
-            )
-
-        except Exception as exc:
-            print(
-                "DEBUG tdcc history ajax failed",
-                "| stock_id =",
-                sid,
-                "| sca_date =",
-                date_text,
-                "| payload_no =",
-                i,
-                "| error =",
-                repr(exc),
-                flush=True,
-            )
 
     return []
-
 
 def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> dict | None:
     sid = _clean_stock_id(stock_id)
