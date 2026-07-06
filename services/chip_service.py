@@ -881,13 +881,462 @@ def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
         "message": "synced" if synced_count > 0 else "Supabase 寫入失敗",
     }
 
+TDCC_HISTORY_PAGE_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
+TDCC_HISTORY_AJAX_URL = "https://www.tdcc.com.tw/smWeb/QryStockAjax.do"
+
+
+def _tdcc_history_headers() -> dict:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": TDCC_HISTORY_PAGE_URL,
+        "Origin": "https://www.tdcc.com.tw",
+    }
+
+
+def _normalize_yyyymmdd(value: str) -> str:
+    from datetime import datetime
+
+    text = str(value or "").strip()
+
+    if not text:
+        return ""
+
+    try:
+        if len(text) >= 10 and "-" in text:
+            return datetime.strptime(text[:10], "%Y-%m-%d").strftime("%Y%m%d")
+
+        if len(text) >= 10 and "/" in text:
+            return datetime.strptime(text[:10], "%Y/%m/%d").strftime("%Y%m%d")
+
+        if len(text) >= 8 and text[:8].isdigit():
+            return text[:8]
+
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _yyyymmdd_to_db_date(value: str) -> str:
+    from datetime import datetime
+
+    text = _normalize_yyyymmdd(value)
+
+    if not text:
+        return ""
+
+    try:
+        return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _request_tdcc_available_dates_since(start_date: str = "20260626", max_dates: int = 8) -> list[str]:
+    import re
+    import requests
+
+    start_yyyymmdd = _normalize_yyyymmdd(start_date)
+
+    try:
+        res = requests.get(
+            TDCC_HISTORY_PAGE_URL,
+            headers=_tdcc_history_headers(),
+            timeout=15,
+        )
+
+        html = res.text or ""
+
+        dates = sorted(
+            {
+                d
+                for d in re.findall(r"20\d{6}", html)
+                if not start_yyyymmdd or d >= start_yyyymmdd
+            },
+            reverse=True,
+        )
+
+        dates = dates[: max(1, int(max_dates))]
+
+        print(
+            "DEBUG tdcc history dates",
+            "| start =",
+            start_yyyymmdd,
+            "| dates =",
+            dates,
+            flush=True,
+        )
+
+        return dates
+
+    except Exception as exc:
+        print(
+            "DEBUG tdcc history dates failed",
+            "| start =",
+            start_yyyymmdd,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return []
+
+
+def _find_col(columns, keywords: list[str]) -> str:
+    for col in columns:
+        text = str(col or "").replace(" ", "").replace("\n", "").strip()
+
+        if all(k in text for k in keywords):
+            return col
+
+    return ""
+
+
+def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) -> list[dict]:
+    from io import StringIO
+
+    import pandas as pd
+
+    sid = _clean_stock_id(stock_id)
+    date_text = _normalize_yyyymmdd(sca_date)
+
+    if not html or "持股" not in html:
+        return []
+
+    try:
+        tables = pd.read_html(StringIO(html))
+    except Exception as exc:
+        print(
+            "DEBUG tdcc history parse read_html failed",
+            "| stock_id =",
+            sid,
+            "| sca_date =",
+            date_text,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return []
+
+    output = []
+
+    for df in tables:
+        if df is None or df.empty:
+            continue
+
+        df = df.fillna("")
+        df.columns = [str(c).replace("\n", "").replace(" ", "").strip() for c in df.columns]
+
+        columns = list(df.columns)
+
+        level_col = (
+            _find_col(columns, ["持股", "分級"])
+            or _find_col(columns, ["單位數", "分級"])
+            or _find_col(columns, ["分級"])
+        )
+
+        percent_col = (
+            _find_col(columns, ["占集保", "比例"])
+            or _find_col(columns, ["庫存", "比例"])
+            or _find_col(columns, ["比例"])
+        )
+
+        if not level_col or not percent_col:
+            continue
+
+        for _, row in df.iterrows():
+            level = str(row.get(level_col, "")).strip()
+            percent = str(row.get(percent_col, "")).strip()
+
+            if not level or not percent:
+                continue
+
+            output.append(
+                {
+                    "資料日期": date_text,
+                    "證券代號": sid,
+                    "持股分級": level,
+                    "占集保庫存數比例%": percent,
+                }
+            )
+
+    print(
+        "DEBUG tdcc history parse",
+        "| stock_id =",
+        sid,
+        "| sca_date =",
+        date_text,
+        "| rows =",
+        len(output),
+        flush=True,
+    )
+
+    return output
+
+
+def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
+    import re
+    import requests
+
+    sid = _clean_stock_id(stock_id)
+    date_text = _normalize_yyyymmdd(sca_date)
+
+    if not sid or not date_text:
+        return []
+
+    session = requests.Session()
+    headers = _tdcc_history_headers()
+
+    token = ""
+
+    try:
+        page = session.get(TDCC_HISTORY_PAGE_URL, headers=headers, timeout=15)
+        html = page.text or ""
+
+        m = re.search(
+            r'name=["\']SYNCHRONIZER_TOKEN["\']\s+value=["\']([^"\']+)["\']',
+            html,
+            flags=re.I,
+        )
+
+        if m:
+            token = m.group(1).strip()
+
+    except Exception as exc:
+        print(
+            "DEBUG tdcc history page token failed",
+            "| stock_id =",
+            sid,
+            "| sca_date =",
+            date_text,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+
+    payloads = [
+        {
+            "scaDates": date_text,
+            "scaDate": date_text,
+            "SqlMethod": "StockNo",
+            "StockNo": sid,
+            "radioStockNo": sid,
+            "StockName": "",
+            "REQ_OPR": "SELECT",
+            "clkStockNo": sid,
+            "clkStockName": "",
+        },
+        {
+            "SYNCHRONIZER_TOKEN": token,
+            "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+            "method": "submit",
+            "firDate": date_text,
+            "scaDate": date_text,
+            "sqlMethod": "StockNo",
+            "stockNo": sid,
+            "stockName": "",
+        },
+    ]
+
+    for i, payload in enumerate(payloads, start=1):
+        try:
+            res = session.post(
+                TDCC_HISTORY_AJAX_URL,
+                data=payload,
+                headers=headers,
+                timeout=20,
+            )
+
+            if res.status_code >= 400:
+                print(
+                    "DEBUG tdcc history ajax status",
+                    "| stock_id =",
+                    sid,
+                    "| sca_date =",
+                    date_text,
+                    "| payload_no =",
+                    i,
+                    "| status =",
+                    res.status_code,
+                    "| body =",
+                    (res.text or "")[:180],
+                    flush=True,
+                )
+                continue
+
+            text = res.text or ""
+
+            rows = _parse_tdcc_history_html_to_rows(text, sid, date_text)
+
+            if rows:
+                print(
+                    "DEBUG tdcc history ajax ok",
+                    "| stock_id =",
+                    sid,
+                    "| sca_date =",
+                    date_text,
+                    "| payload_no =",
+                    i,
+                    "| rows =",
+                    len(rows),
+                    flush=True,
+                )
+                return rows
+
+            print(
+                "DEBUG tdcc history ajax empty",
+                "| stock_id =",
+                sid,
+                "| sca_date =",
+                date_text,
+                "| payload_no =",
+                i,
+                "| body =",
+                text[:180],
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "DEBUG tdcc history ajax failed",
+                "| stock_id =",
+                sid,
+                "| sca_date =",
+                date_text,
+                "| payload_no =",
+                i,
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
+
+    return []
+
+
+def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> dict | None:
+    sid = _clean_stock_id(stock_id)
+    rows = _request_tdcc_rows_by_date(sid, sca_date)
+
+    if not rows:
+        return None
+
+    trade_date = _yyyymmdd_to_db_date(sca_date)
+
+    ratio = 0.0
+
+    for r in rows:
+        level = r.get("持股分級", "")
+
+        if not _is_large_holder_level(level):
+            continue
+
+        ratio += _to_float(r.get("占集保庫存數比例%"))
+
+    if ratio <= 0:
+        print(
+            "DEBUG tdcc history no large holder ratio",
+            "| stock_id =",
+            sid,
+            "| sca_date =",
+            sca_date,
+            "| rows =",
+            rows[:3],
+            flush=True,
+        )
+        return None
+
+    return {
+        "stock_id": sid,
+        "trade_date": trade_date,
+        "ratio": ratio,
+    }
+
+
+def sync_tdcc_large_holder_history_since(
+    stock_id: str,
+    start_date: str = "20260626",
+    max_weeks: int = 8,
+) -> dict:
+    import time
+
+    t0 = time.perf_counter()
+    sid = _clean_stock_id(stock_id)
+
+    dates = _request_tdcc_available_dates_since(
+        start_date=start_date,
+        max_dates=max_weeks,
+    )
+
+    if not dates:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "source": "TDCC_HISTORY",
+            "synced_count": 0,
+            "message": "TDCC 官網日期清單未取得",
+        }
+
+    records = []
+
+    for sca_date in dates:
+        record = _extract_tdcc_large_holder_record_by_date(sid, sca_date)
+
+        if record:
+            records.append(record)
+
+    if not records:
+        return {
+            "stock_id": sid,
+            "ok": False,
+            "source": "TDCC_HISTORY",
+            "available_dates": dates,
+            "synced_count": 0,
+            "message": "TDCC 官網歷史查詢無資料",
+        }
+
+    synced_count = 0
+    failed_count = 0
+
+    for record in records:
+        ok = upsert_large_holder_history(
+            stock_id=record["stock_id"],
+            trade_date=record["trade_date"],
+            large_holder_ratio=record["ratio"],
+            source="TDCC_HISTORY",
+        )
+
+        if ok:
+            synced_count += 1
+        else:
+            failed_count += 1
+
+    result = {
+        "stock_id": sid,
+        "ok": synced_count > 0,
+        "source": "TDCC_HISTORY",
+        "start_date": start_date,
+        "available_dates": dates,
+        "synced_count": synced_count,
+        "failed_count": failed_count,
+        "records_count": len(records),
+        "dates": [r["trade_date"] for r in records],
+        "seconds": round(time.perf_counter() - t0, 3),
+        "message": "synced" if synced_count > 0 else "Supabase 寫入失敗",
+    }
+
+    print(
+        "DEBUG tdcc history sync since",
+        "| result =",
+        result,
+        flush=True,
+    )
+
+    return result
 
 def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
-    """
-    批次同步多檔 TDCC 千張大戶資料。
-
-    app.py 會 import 這個函式，所以名稱必須保留。
-    """
+    import os
     import time
 
     t0 = time.perf_counter()
@@ -908,8 +1357,13 @@ def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
         if sid and sid not in clean_ids:
             clean_ids.append(sid)
 
+    start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
+    max_weeks = int(os.getenv("TDCC_HISTORY_MAX_WEEKS", "8"))
+
     result = {
         "ok": True,
+        "source": "TDCC_HISTORY",
+        "start_date": start_date,
         "total": len(clean_ids),
         "success": 0,
         "failed": 0,
@@ -918,7 +1372,16 @@ def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
 
     for sid in clean_ids:
         try:
-            item = sync_tdcc_latest_large_holder(sid)
+            item = sync_tdcc_large_holder_history_since(
+                sid,
+                start_date=start_date,
+                max_weeks=max_weeks,
+            )
+
+            if not item.get("ok"):
+                fallback = sync_tdcc_latest_large_holder(sid)
+                fallback["fallback_from_history"] = item
+                item = fallback
 
             if item.get("ok"):
                 result["success"] += 1
@@ -942,6 +1405,10 @@ def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
 
     print(
         "DEBUG tdcc sync many",
+        "| source =",
+        result["source"],
+        "| start_date =",
+        result["start_date"],
         "| total =",
         result["total"],
         "| success =",
@@ -954,9 +1421,6 @@ def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
     )
 
     return result
-
-
-# ---------- Optional FinMind sponsor-only large holder backfill ----------
 
 def _finmind_large_holder_level(level) -> bool:
     import re
