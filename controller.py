@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from services.sinopac_quote_service import append_stock_snapshot_to_intraday_df, append_stock_snapshot_to_intraday_df_fast, get_stock_intraday_kbars, get_stock_intraday_yahoo_direct
+from services.sinopac_quote_service import (
+    append_stock_snapshot_to_intraday_df_fast,
+    get_stock_intraday_kbars,
+    get_stock_intraday_yahoo_direct,
+    get_stock_snapshot as get_shioaji_stock_snapshot,
+    is_shioaji_api_ready,
+)
 from services.market_margin_service import get_market_margin_snapshot
 
 from typing import Any
@@ -944,7 +950,268 @@ def _get_history_df_tf(meta, requested_tf):
         )
 
         raise
-    
+
+def _snap_get(snapshot: dict, *keys, default=None):
+    if not isinstance(snapshot, dict):
+        return default
+
+    for key in keys:
+        if key in snapshot and snapshot.get(key) not in (None, "", "--"):
+            return snapshot.get(key)
+
+    raw = snapshot.get("raw")
+
+    if isinstance(raw, dict):
+        for key in keys:
+            if key in raw and raw.get(key) not in (None, "", "--"):
+                return raw.get(key)
+
+    return default
+
+
+def _snap_float(snapshot: dict, *keys, default: float = 0.0) -> float:
+    value = _snap_get(snapshot, *keys, default=None)
+
+    try:
+        if value is None:
+            return default
+
+        text = str(value).replace(",", "").replace("%", "").strip()
+
+        if not text:
+            return default
+
+        return float(text)
+
+    except Exception:
+        return default
+
+
+def _snap_timestamp(snapshot: dict):
+    """
+    盡量從 Shioaji snapshot 取時間。
+    若取不到，就用台北目前時間。
+    """
+    import pandas as pd
+
+    value = _snap_get(
+        snapshot,
+        "ts",
+        "datetime",
+        "date_time",
+        "time",
+        "quote_time",
+        "timestamp",
+        default=None,
+    )
+
+    if value:
+        try:
+            ts = pd.to_datetime(value)
+
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_convert("Asia/Taipei").tz_localize(None)
+
+            return ts
+
+        except Exception:
+            pass
+
+    try:
+        return pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None)
+    except Exception:
+        return pd.Timestamp.now()
+
+
+def _append_realtime_snapshot_row(df, snapshot: dict):
+    """
+    把 Shioaji snapshot 補成 df 最後一列。
+    讓 build_price_meta() 看到最新價與最新時間。
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    close_price = _snap_float(
+        snapshot,
+        "close",
+        "price",
+        "last_price",
+        "last",
+        "Close",
+        default=0.0,
+    )
+
+    if close_price <= 0:
+        return df
+
+    result = df.copy()
+    attrs_backup = dict(getattr(df, "attrs", {}) or {})
+
+    ts = _snap_timestamp(snapshot)
+
+    try:
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert("Asia/Taipei").tz_localize(None)
+    except Exception:
+        pass
+
+    open_price = _snap_float(snapshot, "open", "Open", default=close_price) or close_price
+    high_price = _snap_float(snapshot, "high", "High", default=close_price) or close_price
+    low_price = _snap_float(snapshot, "low", "Low", default=close_price) or close_price
+
+    # snapshot 的 volume / total_volume 多半是累積量，
+    # 不適合直接塞到 1 分K當單根成交量，所以這裡用 0，
+    # 避免圖下方成交量突然爆大。
+    volume = 0
+
+    if "Open" not in result.columns:
+        result["Open"] = result["Close"] if "Close" in result.columns else close_price
+    if "High" not in result.columns:
+        result["High"] = result["Close"] if "Close" in result.columns else close_price
+    if "Low" not in result.columns:
+        result["Low"] = result["Close"] if "Close" in result.columns else close_price
+    if "Close" not in result.columns:
+        result["Close"] = close_price
+    if "Volume" not in result.columns:
+        result["Volume"] = 0
+
+    result.loc[ts, ["Open", "High", "Low", "Close", "Volume"]] = [
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+        volume,
+    ]
+
+    result = result.sort_index()
+
+    try:
+        result.attrs.update(attrs_backup)
+    except Exception:
+        pass
+
+    result.attrs["realtime_snapshot_source"] = "shioaji"
+    result.attrs["realtime_snapshot_price"] = close_price
+    result.attrs["realtime_snapshot_time"] = str(ts)
+
+    return result
+
+
+def _apply_shioaji_stock_realtime(df, stock_id: str):
+    """
+    個股即時修正：
+    1. 若 Shioaji API 已熱機，直接抓 snapshot。
+    2. 若環境變數 ALLOW_COLD_SHIOAJI_STOCK_APPEND=1，允許冷啟動登入。
+    3. 抓到 snapshot 後，補成 df 最新一列。
+    """
+    import os
+    import time
+
+    t0 = time.perf_counter()
+
+    sid = str(stock_id or "").strip()
+
+    if not sid:
+        return df
+
+    allow_cold_login = (
+        str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
+        == "1"
+    )
+
+    api_ready = False
+
+    try:
+        api_ready = bool(is_shioaji_api_ready())
+    except Exception:
+        api_ready = False
+
+    if not api_ready and not allow_cold_login:
+        print(
+            "DEBUG stock realtime snapshot skip",
+            "| stock_id =",
+            sid,
+            "| reason = cold_shioaji_api",
+            "| set ALLOW_COLD_SHIOAJI_STOCK_APPEND=1 or use /warmup_all",
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return df
+
+    try:
+        snapshot = get_shioaji_stock_snapshot(sid)
+
+        if not isinstance(snapshot, dict):
+            print(
+                "DEBUG stock realtime snapshot empty",
+                "| stock_id =",
+                sid,
+                "| snapshot_type =",
+                type(snapshot),
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+            return df
+
+        price = _snap_float(
+            snapshot,
+            "close",
+            "price",
+            "last_price",
+            "last",
+            "Close",
+            default=0.0,
+        )
+
+        if price <= 0:
+            print(
+                "DEBUG stock realtime snapshot no_price",
+                "| stock_id =",
+                sid,
+                "| snapshot =",
+                snapshot,
+                "| sec =",
+                round(time.perf_counter() - t0, 3),
+                flush=True,
+            )
+            return df
+
+        result = _append_realtime_snapshot_row(df, snapshot)
+
+        print(
+            "DEBUG stock realtime snapshot applied",
+            "| stock_id =",
+            sid,
+            "| price =",
+            price,
+            "| time =",
+            getattr(result, "attrs", {}).get("realtime_snapshot_time"),
+            "| api_ready =",
+            api_ready,
+            "| allow_cold_login =",
+            allow_cold_login,
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "DEBUG stock realtime snapshot failed",
+            "| stock_id =",
+            sid,
+            "| error =",
+            repr(exc),
+            "| sec =",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return df
+
 def _price_color(change: float) -> str:
     if change > 0:
         return UP_COLOR
@@ -3072,6 +3339,39 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             t_price0 = time.perf_counter()
 
+            if tf in {"1m", "5m"}:
+                import os
+
+                df_attrs_backup = dict(getattr(df, "attrs", {}) or {})
+
+                try:
+                    df = append_stock_snapshot_to_intraday_df_fast(
+                        df,
+                        meta.stock_id,
+                        allow_cold_login=(
+                            str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
+                            == "1"
+                        ),
+                    )
+                except Exception as exc:
+                    print(
+                        "DEBUG append_stock_snapshot_to_intraday_df_fast failed",
+                        "| stock_id =",
+                        meta.stock_id,
+                        "| error =",
+                        repr(exc),
+                        flush=True,
+                    )
+
+                try:
+                    df.attrs.update(df_attrs_backup)
+                except Exception:
+                    pass
+            
+                # 修正 Yahoo 盤中延遲的關鍵：
+                # 再用 Shioaji snapshot 強制補最後一列。
+                df = _apply_shioaji_stock_realtime(df, meta.stock_id)
+            
             price_meta = build_price_meta(df, tf)
 
             t_price1 = time.perf_counter()
