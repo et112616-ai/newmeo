@@ -340,7 +340,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
 
     ratio = float(getattr(snapshot, "margin_short_ratio", 0.0) or 0.0)
 
-    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
+    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-10:]
     recent_rows = list(reversed(recent_rows))
 
     table_contents: list[dict[str, Any]] = [_table_header()]
@@ -352,7 +352,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         table_contents.append(
             {
                 "type": "text",
-                "text": "暫無近5日資料",
+                "text": "暫無近10日資料",
                 "size": "sm",
                 "color": "#999999",
                 "margin": "sm",
@@ -654,7 +654,7 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
     dealer = float(getattr(snapshot, "dealer", 0.0) or 0.0)
     total = float(getattr(snapshot, "total", 0.0) or 0.0)
 
-    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
+    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-10:]
     recent_rows = list(reversed(recent_rows))
 
     table_contents: list[dict[str, Any]] = [_table_header()]
@@ -666,7 +666,7 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         table_contents.append(
             {
                 "type": "text",
-                "text": "暫無近5日資料",
+                "text": "暫無近10日資料",
                 "size": "sm",
                 "color": "#999999",
                 "margin": "sm",
@@ -711,7 +711,7 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": "近5日買賣超",
+            "text": "近10日買賣超",
             "size": "md",
             "weight": "bold",
             "color": "#222222",
@@ -2260,6 +2260,34 @@ def _lh_ratio_from_row(row):
         default=None,
     )
 
+def _lh_people_from_row(row):
+    return _lh_get(
+        row,
+        "people",
+        "large_holder_people",
+        "holder_people",
+        "holders",
+        "people_count",
+        "千張大戶人數",
+        "人數",
+        default=None,
+    )
+
+
+def _lh_people_text(value):
+    if value is None:
+        return "--"
+
+    text = str(value).replace(",", "").strip()
+
+    if not text or text in {"--", "-"}:
+        return "--"
+
+    try:
+        number = int(float(text))
+        return f"{number:,}"
+    except Exception:
+        return str(value)
 
 def _lh_change_from_row(row):
     return _lh_get(
@@ -2290,8 +2318,13 @@ def _lh_sort_key(row):
         or ""
     )
 
-
-def _large_holder_week_row(date_text, ratio_text, change_text, change_color):
+def _large_holder_week_row(
+    date_text: str,
+    people_text: str,
+    ratio_text: str,
+    change_text: str,
+    change_color: str,
+) -> dict[str, Any]:
     return {
         "type": "box",
         "layout": "horizontal",
@@ -2300,36 +2333,45 @@ def _large_holder_week_row(date_text, ratio_text, change_text, change_color):
         "contents": [
             {
                 "type": "text",
-                "text": date_text,
-                "size": "md",
-                "color": "#555555",
-                "flex": 3,
+                "text": str(date_text or "--"),
+                "size": "sm",
+                "color": "#333333",
+                "flex": 2,
             },
             {
                 "type": "text",
-                "text": ratio_text,
-                "size": "md",
-                "weight": "bold",
+                "text": str(people_text or "--"),
+                "size": "sm",
                 "color": "#333333",
                 "align": "end",
                 "flex": 4,
             },
             {
                 "type": "text",
-                "text": change_text,
-                "size": "md",
+                "text": str(ratio_text or "--"),
+                "size": "sm",
+                "color": "#111111",
                 "weight": "bold",
+                "align": "end",
+                "flex": 3,
+            },
+            {
+                "type": "text",
+                "text": str(change_text or "--"),
+                "size": "sm",
                 "color": change_color,
+                "weight": "bold",
                 "align": "end",
                 "flex": 3,
             },
         ],
     }
 
-
 def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: str = "D"):
     """
     顯示個股大戶持股近 5 週。
+    欄位：
+    日期 | 千張大戶人數 | 持股比 | 增減百分點
     """
     raw_rows = list(rows or [])
 
@@ -2389,6 +2431,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
 
             ratio_value = _lh_ratio_from_row(row)
             change_value = _lh_change_from_row(row)
+            people_value = _lh_people_from_row(row)
 
             if change_value is None:
                 try:
@@ -2407,6 +2450,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
             computed_rows.append(
                 {
                     "date": _lh_date_text(date_raw),
+                    "people": _lh_people_text(people_value),
                     "ratio": _lh_pct_text(ratio_value),
                     "change": _lh_change_text(change_value),
                     "change_color": _lh_change_color(change_value),
@@ -2416,6 +2460,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
         row_boxes = [
             _large_holder_week_row(
                 row["date"],
+                row["people"],
                 row["ratio"],
                 row["change"],
                 row["change_color"],
@@ -2449,22 +2494,30 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
                     {
                         "type": "text",
                         "text": "日期",
-                        "size": "sm",
+                        "size": "xs",
                         "color": "#888888",
-                        "flex": 3,
+                        "flex": 2,
                     },
                     {
                         "type": "text",
-                        "text": "持股比",
-                        "size": "sm",
+                        "text": "千張大戶人數",
+                        "size": "xs",
                         "color": "#888888",
                         "align": "end",
                         "flex": 4,
                     },
                     {
                         "type": "text",
-                        "text": "週增減",
-                        "size": "sm",
+                        "text": "持股比",
+                        "size": "xs",
+                        "color": "#888888",
+                        "align": "end",
+                        "flex": 3,
+                    },
+                    {
+                        "type": "text",
+                        "text": "增減百分點",
+                        "size": "xs",
                         "color": "#888888",
                         "align": "end",
                         "flex": 3,
@@ -2603,6 +2656,8 @@ def _build_margin_flex(
     rows: list[dict],
     current_tf: str,
 ) -> dict[str, Any]:
+    table_rows = list(rows or [])[:10]
+
     contents: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -2614,7 +2669,7 @@ def _build_margin_flex(
         },
         {
             "type": "text",
-            "text": "融資券10日動態",
+            "text": "融資券近10日",
             "size": "lg",
             "weight": "bold",
             "color": "#444444",
@@ -2638,7 +2693,7 @@ def _build_margin_flex(
                         f"{int(r.get('short', 0) or 0):,}",
                         str(r.get("ratio", "--")),
                     )
-                    for r in rows[:10]
+                    for r in table_rows
                 ],
             ],
         },
@@ -2648,7 +2703,7 @@ def _build_margin_flex(
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name} 融資券",
+        "altText": f"{stock_id} {stock_name} 融資券近10日",
         "contents": {
             "type": "bubble",
             "size": "mega",
