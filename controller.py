@@ -2189,25 +2189,51 @@ def _lh_pct_text(value):
 
 
 def _lh_change_text(value):
+    """
+    大戶持股週增減。
+
+    value 已經是「百分點」，例如：
+    -0.84%
+    +0.28%
+
+    不可以再乘以 100。
+    """
     if value is None:
         return "--"
 
-    number = _lh_float(value, default=0.0)
+    text = str(value).replace(",", "").replace("%", "").strip()
 
-    if number == 0:
+    if not text or text in {"--", "-"}:
         return "--"
 
-    if 0 < abs(number) <= 1:
-        number = number * 100
+    try:
+        number = float(text)
+    except Exception:
+        return str(value)
+
+    if abs(number) < 0.005:
+        return "--"
 
     return f"{number:+.2f}%"
-
-
+    
 def _lh_change_color(value):
-    number = _lh_float(value, default=0.0)
+    """
+    依週增減正負決定顏色。
 
-    if 0 < abs(number) <= 1:
-        number = number * 100
+    value 已經是百分點，不要乘以 100。
+    """
+    if value is None:
+        return "#666666"
+
+    try:
+        number = float(
+            str(value)
+            .replace(",", "")
+            .replace("%", "")
+            .strip()
+        )
+    except Exception:
+        return "#666666"
 
     if number > 0:
         return "#E53935"
@@ -2215,9 +2241,8 @@ def _lh_change_color(value):
     if number < 0:
         return "#1E9F5A"
 
-    return "#00AA55"
-
-
+    return "#666666"
+    
 def _lh_ratio_from_row(row):
     return _lh_get(
         row,
