@@ -1711,6 +1711,84 @@ def _build_market_future_placeholder_flex(
         },
     }
 
+def _parse_datetime_text(value):
+    from datetime import datetime
+
+    text = str(value or "").strip()
+
+    if not text or text in {"--", "-"}:
+        return None
+
+    # 只取 YYYY-MM-DD HH:MM:SS
+    text = text.replace("T", " ")[:19]
+
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+    ]:
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            pass
+
+    return None
+
+
+def _market_future_update_time_text(raw_time, action: str = "market_future_day") -> str:
+    """
+    台指期更新時間顯示修正。
+
+    - 日盤如果已經超過 13:45，顯示當日 13:45:00。
+    - 若 Shioaji snapshot 傳回舊日期，也會被修正成當日日盤收盤時間。
+    - 全盤先不強制修正，避免夜盤時間被誤判。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    text = str(raw_time or "").strip()
+
+    if not text:
+        text = "--"
+
+    action = str(action or "").strip()
+
+    if action != "market_future_day":
+        return text[:19] if text != "--" else "--"
+
+    try:
+        now = datetime.now(ZoneInfo("Asia/Taipei")).replace(tzinfo=None)
+    except Exception:
+        now = datetime.now()
+
+    # 非週一到週五，不強制把日期改成今天，避免週末誤導。
+    if now.weekday() > 4:
+        return text[:19] if text != "--" else "--"
+
+    close_dt = now.replace(hour=13, minute=45, second=0, microsecond=0)
+
+    # 尚未收盤前，尊重實際 quote_time。
+    if now < close_dt:
+        return text[:19] if text != "--" else "--"
+
+    parsed = _parse_datetime_text(text)
+
+    # 收盤後：
+    # 1. 如果 quote_time 沒有值
+    # 2. 或 quote_time 不是今天
+    # 3. 或 quote_time 早於 13:45
+    # 都顯示當日 13:45:00。
+    if parsed is None:
+        return close_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    if parsed.date() != now.date():
+        return close_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    if parsed < close_dt:
+        return close_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 def _build_market_future_realtime_flex(
     snapshot,
@@ -1847,7 +1925,7 @@ def _build_market_future_realtime_flex(
         ),
         ("時段", getattr(snapshot, "trading_session", session_text), "#222222"),
         ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
-        ("更新", str(getattr(snapshot, "quote_time", "") or "--")[:19], "#888888"),
+        ("更新", _market_future_update_time_text(getattr(snapshot, "quote_time", ""), action), "#888888"),
         ("開", _fmt_market_price(getattr(snapshot, "open_price", 0.0)), "#222222"),
         ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
         ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
