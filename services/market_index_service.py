@@ -1127,7 +1127,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
     work_df = df.copy()
 
-    # 先用完整資料計算均線，不要只用最近 60 根算。
+    # 用完整資料先算均線
     for period in [5, 20, 60, 120]:
         work_df[f"MA{period}"] = (
             work_df["Close"]
@@ -1136,7 +1136,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
             .mean()
         )
 
-    # 日 K 顯示最近約 3 個月。
+    # 顯示最近約 3 個月
     plot_df = work_df.tail(60).copy()
 
     if plot_df.empty:
@@ -1146,67 +1146,90 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     latest_close = float(latest["Close"])
     latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
-    ma_text_1 = (
-        f"5MA {_fmt_index_ma_value(latest.get('MA5'))}    "
-        f"20MA {_fmt_index_ma_value(latest.get('MA20'))}    "
-        f"60MA {_fmt_index_ma_value(latest.get('MA60'))}"
-    )
+    ma5 = _fmt_index_ma_value(latest.get("MA5"))
+    ma20 = _fmt_index_ma_value(latest.get("MA20"))
+    ma60 = _fmt_index_ma_value(latest.get("MA60"))
+    ma120 = _fmt_index_ma_value(latest.get("MA120"))
 
-    ma_text_2 = (
-        f"120MA {_fmt_index_ma_value(latest.get('MA120'))}"
-    )
+    fig = plt.figure(figsize=(8.4, 6.8), dpi=130, facecolor="white")
 
-    fig = plt.figure(figsize=(7.2, 6.25), dpi=130, facecolor="white")
-
-    # 三層：
-    # 1. 上方資訊區：標題 + MA 數字
-    # 2. K線
-    # 3. 成交量
+    # 上方資訊區 + K線 + 成交量
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.8, 3, 1],
-        hspace=0.06,
+        height_ratios=[1.0, 3.2, 1.1],
+        hspace=0.05,
     )
 
     ax_info = fig.add_subplot(gs[0])
     ax_k = fig.add_subplot(gs[1])
     ax_v = fig.add_subplot(gs[2], sharex=ax_k)
 
+    # ========= 上方資訊區 =========
     ax_info.set_facecolor("white")
     ax_info.axis("off")
 
     ax_info.text(
-        0.0,
-        0.78,
+        0.00,
+        0.82,
         f"加權指數日K｜{latest_date} 收 {latest_close:,.2f}",
-        fontsize=13,
+        fontsize=14,
         fontweight="bold",
         ha="left",
         va="center",
         transform=ax_info.transAxes,
+        color="#111111",
     )
 
+    # 第一排 MA
     ax_info.text(
-        0.0,
-        0.42,
-        ma_text_1,
-        fontsize=9,
+        0.00,
+        0.46,
+        f"5MA {ma5}",
+        fontsize=11,
+        fontweight="bold",
+        color="#111111",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.28,
+        0.46,
+        f"20MA {ma20}",
+        fontsize=11,
+        fontweight="bold",
+        color="#1F77B4",
         ha="left",
         va="center",
         transform=ax_info.transAxes,
     )
 
+    # 第二排 MA
     ax_info.text(
-        0.0,
+        0.00,
         0.12,
-        ma_text_2,
-        fontsize=9,
+        f"60MA {ma60}",
+        fontsize=11,
+        fontweight="bold",
+        color="#FF7F0E",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.28,
+        0.12,
+        f"120MA {ma120}",
+        fontsize=11,
+        fontweight="bold",
+        color="#9467BD",
         ha="left",
         va="center",
         transform=ax_info.transAxes,
     )
 
+    # ========= K線區 =========
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
@@ -1234,7 +1257,6 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
         lower = min(open_price, close_price)
         height = abs(close_price - open_price)
-
         if height <= 0:
             height = 0.01
 
@@ -1255,32 +1277,25 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
             align="center",
         )
 
+    # 均線
     ma_styles = {
-        "MA5": ("MA5", "#111111", 1.1),
-        "MA20": ("MA20", "#1F77B4", 1.1),
-        "MA60": ("MA60", "#FF7F0E", 1.1),
-        "MA120": ("MA120", "#9467BD", 1.1),
+        "MA5": ("#111111", 1.2),
+        "MA20": ("#1F77B4", 1.2),
+        "MA60": ("#FF7F0E", 1.2),
+        "MA120": ("#9467BD", 1.2),
     }
 
-    for col, (label, color, linewidth) in ma_styles.items():
+    for col, (line_color, linewidth) in ma_styles.items():
         if col in plot_df.columns:
             ax_k.plot(
                 x_values,
                 plot_df[col].values,
-                label=label,
                 linewidth=linewidth,
-                color=color,
+                color=line_color,
             )
 
-    ax_k.grid(True, linestyle=":", alpha=0.4)
-    ax_v.grid(True, linestyle=":", alpha=0.35)
-
-    ax_k.legend(
-        loc="upper left",
-        fontsize=8,
-        ncol=4,
-        frameon=False,
-    )
+    ax_k.grid(True, linestyle=":", alpha=0.35)
+    ax_v.grid(True, linestyle=":", alpha=0.30)
 
     labels = [idx.strftime("%m/%d") for idx in plot_df.index]
     step = max(1, len(labels) // 6)
@@ -1290,15 +1305,15 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ax_v.set_xticklabels(
         [labels[i] for i in ticks],
         rotation=0,
-        fontsize=8,
+        fontsize=9,
     )
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    ax_v.set_ylabel("成交量", fontsize=9)
+    ax_v.set_ylabel("成交量", fontsize=10)
 
-    ax_k.tick_params(axis="y", labelsize=8)
-    ax_v.tick_params(axis="y", labelsize=8)
+    ax_k.tick_params(axis="y", labelsize=9)
+    ax_v.tick_params(axis="y", labelsize=9)
 
     ax_k.spines["top"].set_visible(False)
     ax_k.spines["right"].set_visible(False)
