@@ -392,6 +392,33 @@ def _get_font_kwargs_safe() -> dict:
     except Exception:
         return {}
 
+def _setup_chinese_font():
+    """
+    設定中文字型，避免圖表中文字變方塊。
+    """
+    try:
+        from pathlib import Path
+
+        import matplotlib.font_manager as fm
+        import matplotlib.pyplot as plt
+
+        font_path = Path("assets/fonts/NotoSansTC-Regular.ttf")
+
+        if font_path.exists():
+            fm.fontManager.addfont(str(font_path))
+            font_prop = fm.FontProperties(fname=str(font_path))
+            plt.rcParams["font.family"] = font_prop.get_name()
+
+        plt.rcParams["axes.unicode_minus"] = False
+
+    except Exception as exc:
+        print(
+            "DEBUG chart font setup failed",
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+
 def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: str) -> str:
     if df is None or df.empty:
         return ""
