@@ -461,14 +461,14 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
         )
 
         # 顯示最近 120 根
-        plot_df = df.tail(120).copy()
+        plot_df = df.tail(60).copy()
 
-        fig = plt.figure(figsize=(8.8, 7.2), dpi=140, facecolor="white")
+        fig = plt.figure(figsize=(8.6, 6.9), dpi=140, facecolor="white")
 
         gs = gridspec.GridSpec(
             3,
             1,
-            height_ratios=[0.90, 3.2, 1],
+            height_ratios=[0.72, 3.2, 1],
             hspace=0.06,
         )
 
