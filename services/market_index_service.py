@@ -1108,7 +1108,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     for ma in [5, 20, 60, 120]:
         work_df[f"MA{ma}"] = work_df["Close"].rolling(ma).mean()
 
-    plot_df = work_df.tail(130).copy()
+    plot_df = work_df.tail(60).copy()
 
     if plot_df.empty:
         return ""
