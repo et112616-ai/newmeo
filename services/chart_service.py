@@ -392,168 +392,217 @@ def _get_font_kwargs_safe() -> dict:
     except Exception:
         return {}
 
-def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_frame: str) -> str:
-    tf = normalize_time_frame(time_frame)
-    font_kwargs = _get_font_kwargs_safe()
+def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: str) -> str:
+    if df is None or df.empty:
+        return ""
 
-    if df.empty:
-        return _empty_chart(f"{stock_id} {stock_name}", "暫無 K 線資料")
+    _setup_chinese_font()
 
-    df = df.copy()
+    work_df = df.copy()
 
-    # =========================
-    # 基本欄位整理
-    # =========================
-    required_cols = ["Open", "High", "Low", "Close"]
+    for period in [5, 20, 60, 120]:
+        work_df[f"MA{period}"] = (
+            work_df["Close"]
+            .astype(float)
+            .rolling(period, min_periods=1)
+            .mean()
+        )
 
-    for col in required_cols:
-        if col not in df.columns:
-            return _empty_chart(f"{stock_id} {stock_name}", f"Missing column: {col}")
+    # 顯示範圍
+    if tf == "D":
+        plot_df = work_df.tail(60).copy()   # 近 3 個月
+    elif tf == "W":
+        plot_df = work_df.tail(80).copy()
+    elif tf == "M":
+        plot_df = work_df.tail(80).copy()
+    else:
+        plot_df = work_df.tail(60).copy()
 
-    if "Volume" not in df.columns:
-        df["Volume"] = 0
+    if plot_df.empty:
+        return ""
 
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    latest = work_df.iloc[-1]
 
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    latest_close = float(latest["Close"])
+    latest_volume = float(latest["Volume"])
+    latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
-    if df.empty:
-        return _empty_chart(f"{stock_id} {stock_name}", "K 線資料為空")
+    prev_close = None
+    if len(work_df) >= 2:
+        prev_close = float(work_df["Close"].iloc[-2])
 
-    if not isinstance(df.index, pd.DatetimeIndex):
+    change = 0.0
+    pct = 0.0
+    if prev_close and prev_close != 0:
+        change = latest_close - prev_close
+        pct = change / prev_close * 100
+
+    ma5 = latest.get("MA5")
+    ma20 = latest.get("MA20")
+    ma60 = latest.get("MA60")
+    ma120 = latest.get("MA120")
+
+    def _fmt_price(v):
         try:
-            df.index = pd.to_datetime(df.index)
+            return f"{float(v):,.2f}"
         except Exception:
-            pass
+            return "--"
+
+    def _fmt_int(v):
+        try:
+            return f"{int(float(v)):,}"
+        except Exception:
+            return "--"
+
+    def _fmt_signed(v):
+        try:
+            return f"{float(v):+,.2f}"
+        except Exception:
+            return "--"
+
+    def _fmt_signed_pct(v):
+        try:
+            return f"{float(v):+,.2f}%"
+        except Exception:
+            return "--"
+
+    def _fmt_ma(v):
+        try:
+            return f"{float(v):.2f}"
+        except Exception:
+            return "--"
+
+    fig = plt.figure(figsize=(8.4, 6.9), dpi=130, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[1.15, 3.15, 1.1],
+        hspace=0.05,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax_k = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax_k)
 
     # =========================
-    # D / W / M 顯示 5T、12T、22T、60T、120T
+    # 上方資訊區
     # =========================
-    show_ma_summary = tf in {"D", "W", "M"}
+    ax_info.set_facecolor("white")
+    ax_info.axis("off")
 
-    if show_ma_summary:
-        ma_periods = [5, 12, 22, 60, 120]
-    else:
-        ma_periods = [5, 20]
+    title_text = f"{stock_id} {stock_name}｜{tf}K｜{latest_date}"
+    price_text = f"收 {_fmt_price(latest_close)}  {_fmt_signed(change)} ({_fmt_signed_pct(pct)})"
 
-    # 先用完整資料計算均線，再裁切顯示範圍
-    close_series = df["Close"].astype(float)
+    ax_info.text(
+        0.00,
+        0.82,
+        title_text,
+        fontsize=14,
+        fontweight="bold",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+        color="#111111",
+    )
 
-    for p in ma_periods:
-        df[f"MA{p}"] = close_series.rolling(p, min_periods=1).mean()
+    price_color = "#FF2D2D" if change > 0 else "#00B050" if change < 0 else "#666666"
 
-    latest = df.iloc[-1]
+    ax_info.text(
+        0.00,
+        0.63,
+        price_text,
+        fontsize=12,
+        fontweight="bold",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+        color=price_color,
+    )
+
+    # MA 顯示（字體改大：15）
+    ax_info.text(
+        0.00,
+        0.34,
+        f"5MA {_fmt_ma(ma5)}",
+        fontsize=15,
+        fontweight="bold",
+        color="#111111",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.28,
+        0.34,
+        f"20MA {_fmt_ma(ma20)}",
+        fontsize=15,
+        fontweight="bold",
+        color="#1F77B4",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.56,
+        0.34,
+        f"60MA {_fmt_ma(ma60)}",
+        fontsize=15,
+        fontweight="bold",
+        color="#FF7F0E",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.00,
+        0.08,
+        f"120MA {_fmt_ma(ma120)}",
+        fontsize=15,
+        fontweight="bold",
+        color="#9467BD",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+
+    ax_info.text(
+        0.35,
+        0.08,
+        f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_int(latest_volume)}",
+        fontsize=11,
+        color="#444444",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
 
     # =========================
-    # 建圖
+    # K線區
     # =========================
-    if show_ma_summary:
-        ma_text_1 = (
-            f"5T {_fmt_ma_value(latest.get('MA5'))}    "
-            f"12T {_fmt_ma_value(latest.get('MA12'))}    "
-            f"22T {_fmt_ma_value(latest.get('MA22'))}"
-        )
-
-        ma_text_2 = (
-            f"60T {_fmt_ma_value(latest.get('MA60'))}    "
-            f"120T {_fmt_ma_value(latest.get('MA120'))}"
-        )
-
-        # 顯示最近 120 根
-        plot_df = df.tail(60).copy()
-
-        fig = plt.figure(figsize=(8.6, 6.9), dpi=140, facecolor="white")
-
-        gs = gridspec.GridSpec(
-            3,
-            1,
-            height_ratios=[0.72, 3.2, 1],
-            hspace=0.06,
-        )
-
-        ax_info = fig.add_subplot(gs[0])
-        ax_k = fig.add_subplot(gs[1])
-        ax_v = fig.add_subplot(gs[2], sharex=ax_k)
-
-        ax_info.axis("off")
-
-        ax_info.text(
-            0.01,
-            0.78,
-            f"{stock_id} {stock_name} {tf} K線",
-            fontsize=17,
-            fontweight="bold",
-            color="#111111",
-            ha="left",
-            va="center",
-            **font_kwargs,
-        )
-
-        ax_info.text(
-            0.01,
-            0.38,
-            ma_text_1,
-            fontsize=15,
-            fontweight="bold",
-            color="#222222",
-            ha="left",
-            va="center",
-            **font_kwargs,
-        )
-
-        ax_info.text(
-            0.01,
-            0.08,
-            ma_text_2,
-            fontsize=15,
-            fontweight="bold",
-            color="#222222",
-            ha="left",
-            va="center",
-            **font_kwargs,
-        )
-
-    else:
-        plot_df = df.copy()
-
-        fig = plt.figure(figsize=(7, 5.5), dpi=120, facecolor="white")
-        gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
-
-        ax_k = fig.add_subplot(gs[0])
-        ax_v = fig.add_subplot(gs[1], sharex=ax_k)
-
-        ax_k.set_title(
-            f"{stock_id} {tf} K-Line",
-            fontsize=13,
-            fontweight="bold",
-        )
-
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    x = list(range(len(plot_df)))
-    width = 0.58
+    x_values = list(range(len(plot_df)))
+    candle_width = 0.58
 
-    # =========================
-    # 畫 K 棒與成交量
-    # 重點：不用 iterrows 拆包，避免 too many values to unpack
-    # =========================
     for i in range(len(plot_df)):
         row = plot_df.iloc[i]
 
-        o = float(row["Open"])
-        h = float(row["High"])
-        l = float(row["Low"])
-        c = float(row["Close"])
+        open_price = float(row["Open"])
+        high_price = float(row["High"])
+        low_price = float(row["Low"])
+        close_price = float(row["Close"])
+        volume = float(row["Volume"])
 
-        color = "#FF3B30" if c >= o else "#34C759"
+        color = "#FF2D2D" if close_price >= open_price else "#00B050"
 
-        ax_k.vlines(i, l, h, linewidth=1, color=color)
+        ax_k.vlines(i, low_price, high_price, linewidth=1.0, color=color)
 
-        lower = min(o, c)
-        height = abs(c - o)
-
+        lower = min(open_price, close_price)
+        height = abs(close_price - open_price)
         if height <= 0:
             height = 0.01
 
@@ -561,62 +610,44 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
             i,
             height,
             bottom=lower,
-            width=width,
+            width=candle_width,
             color=color,
             align="center",
         )
 
-        vol = float(row.get("Volume", 0) or 0)
-
         ax_v.bar(
             i,
-            vol,
-            width=width,
+            volume,
+            width=candle_width,
             color=color,
+            align="center",
         )
 
-    # =========================
-    # 畫均線
-    # =========================
-    for p in ma_periods:
-        col = f"MA{p}"
+    ma_styles = {
+        "MA5": ("#111111", 1.2),
+        "MA20": ("#1F77B4", 1.2),
+        "MA60": ("#FF7F0E", 1.2),
+        "MA120": ("#9467BD", 1.2),
+    }
 
-        if col not in plot_df.columns:
-            continue
+    for col, (line_color, linewidth) in ma_styles.items():
+        if col in plot_df.columns:
+            ax_k.plot(
+                x_values,
+                plot_df[col].values,
+                linewidth=linewidth,
+                color=line_color,
+            )
 
-        label = f"{p}T" if show_ma_summary else f"MA{p}"
+    ax_k.grid(True, linestyle=":", alpha=0.35)
+    ax_v.grid(True, linestyle=":", alpha=0.30)
 
-        ax_k.plot(
-            x,
-            plot_df[col].astype(float).values,
-            linewidth=1.25,
-            label=label,
-        )
-
-    ax_k.grid(True, linestyle=":", alpha=0.45)
-    ax_v.grid(True, linestyle=":", alpha=0.45)
-
-    ax_k.legend(loc="best", fontsize=9)
-    ax_v.set_ylabel("Volume", fontsize=9)
-
-    # =========================
-    # X 軸日期
-    # =========================
-    labels = []
-
-    for idx in plot_df.index:
-        try:
-            ts = pd.to_datetime(idx)
-
-            if tf in {"1m", "5m"}:
-                labels.append(ts.strftime("%H:%M"))
-            elif tf == "M":
-                labels.append(ts.strftime("%Y/%m"))
-            else:
-                labels.append(ts.strftime("%m/%d"))
-
-        except Exception:
-            labels.append(str(idx))
+    if tf == "D":
+        labels = [idx.strftime("%m/%d") for idx in plot_df.index]
+    elif tf == "W":
+        labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
+    else:
+        labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
 
     step = max(1, len(labels) // 6)
     ticks = list(range(0, len(labels), step))
@@ -630,9 +661,22 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, time_
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
+    ax_v.set_ylabel("成交量", fontsize=10)
+
+    ax_k.tick_params(axis="y", labelsize=9)
+    ax_v.tick_params(axis="y", labelsize=9)
+
+    ax_k.spines["top"].set_visible(False)
+    ax_k.spines["right"].set_visible(False)
+    ax_v.spines["top"].set_visible(False)
+    ax_v.spines["right"].set_visible(False)
+
     fig.tight_layout()
 
-    return publish_figure(fig, f"{stock_id}_{tf}_kline")
+    try:
+        return publish_figure(fig, f"{stock_id}_{tf}_kline")
+    finally:
+        plt.close(fig)
     
 def _fmt_chip_ratio(value) -> str:
     try:
