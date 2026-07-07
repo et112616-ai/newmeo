@@ -7,9 +7,7 @@ from supabase import create_client
 
 from config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 
-
 _client = None
-
 
 def get_supabase_client():
     global _client
@@ -30,9 +28,10 @@ def upsert_large_holder_history(
     trade_date: str,
     large_holder_ratio: float,
     source: str = "TDCC",
+    large_holder_people: int | None = None,
 ) -> bool:
     """
-    寫入或更新千張大戶持股比率。
+    寫入或更新千張大戶持股比率與千張大戶人數。
 
     trade_date 格式：
     2026-06-26
@@ -51,6 +50,9 @@ def upsert_large_holder_history(
             "updated_at": datetime.utcnow().isoformat(),
         }
 
+        if large_holder_people is not None:
+            data["large_holder_people"] = int(large_holder_people)
+
         client.table("tdcc_large_holder_history").upsert(
             data,
             on_conflict="stock_id,trade_date",
@@ -59,9 +61,15 @@ def upsert_large_holder_history(
         return True
 
     except Exception as exc:
-        print(f"upsert_large_holder_history failed: stock_id={stock_id}, error={exc}")
+        print(
+            "upsert_large_holder_history failed:"
+            f" stock_id={stock_id},"
+            f" trade_date={trade_date},"
+            f" large_holder_people={large_holder_people},"
+            f" error={exc}",
+            flush=True,
+        )
         return False
-
 
 def get_large_holder_history_rows(stock_id: str, limit: int = 7) -> list[dict[str, Any]]:
     """
@@ -76,7 +84,7 @@ def get_large_holder_history_rows(stock_id: str, limit: int = 7) -> list[dict[st
     try:
         res = (
             client.table("tdcc_large_holder_history")
-            .select("stock_id,trade_date,large_holder_ratio,source")
+            .select("stock_id,trade_date,large_holder_ratio,large_holder_people,source")
             .eq("stock_id", str(stock_id).strip())
             .order("trade_date", desc=True)
             .limit(limit)
@@ -88,5 +96,5 @@ def get_large_holder_history_rows(stock_id: str, limit: int = 7) -> list[dict[st
         return rows if isinstance(rows, list) else []
 
     except Exception as exc:
-        print(f"get_large_holder_history_rows failed: stock_id={stock_id}, error={exc}")
+        print(f"get_large_holder_history_rows failed: stock_id={stock_id}, error={exc}", flush=True)
         return []
