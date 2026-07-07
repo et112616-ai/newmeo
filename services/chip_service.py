@@ -1049,7 +1049,7 @@ def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) ->
 
     output = []
 
-    for df in tables:
+    for table_no, df in enumerate(tables, start=1):
         if df is None or df.empty:
             continue
 
@@ -1058,10 +1058,29 @@ def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) ->
 
         columns = list(df.columns)
 
+        print(
+            "DEBUG tdcc history table columns",
+            "| stock_id =",
+            sid,
+            "| sca_date =",
+            date_text,
+            "| table_no =",
+            table_no,
+            "| columns =",
+            columns,
+            flush=True,
+        )
+
         level_col = (
             _find_col(columns, ["持股", "分級"])
             or _find_col(columns, ["單位數", "分級"])
             or _find_col(columns, ["分級"])
+        )
+
+        people_col = (
+            _find_col(columns, ["人數"])
+            or _find_col(columns, ["人", "數"])
+            or _find_col(columns, ["持有人"])
         )
 
         percent_col = (
@@ -1080,11 +1099,17 @@ def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) ->
             if not level or not percent:
                 continue
 
+            people = "0"
+
+            if people_col:
+                people = str(row.get(people_col, "0")).strip()
+
             output.append(
                 {
                     "資料日期": date_text,
                     "證券代號": sid,
                     "持股分級": level,
+                    "人數": people,
                     "占集保庫存數比例%": percent,
                 }
             )
@@ -1097,11 +1122,12 @@ def _parse_tdcc_history_html_to_rows(html: str, stock_id: str, sca_date: str) ->
         date_text,
         "| rows =",
         len(output),
+        "| sample =",
+        output[:3],
         flush=True,
     )
 
     return output
-
 
 def _request_tdcc_rows_by_date(stock_id: str, sca_date: str) -> list[dict]:
     """
