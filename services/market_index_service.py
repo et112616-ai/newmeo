@@ -1169,24 +1169,12 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ax_info.set_facecolor("white")
     ax_info.axis("off")
 
-    ax_info.text(
-        0.00,
-        0.82,
-        f"加權指數日K｜{latest_date} 收 {latest_close:,.2f}",
-        fontsize=14,
-        fontweight="bold",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-        color="#111111",
-    )
-
     # 第一排 MA
     ax_info.text(
         0.00,
         0.46,
         f"5MA {ma5}",
-        fontsize=11,
+        fontsize=15,
         fontweight="bold",
         color="#111111",
         ha="left",
@@ -1197,7 +1185,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
         0.28,
         0.46,
         f"20MA {ma20}",
-        fontsize=11,
+        fontsize=15,
         fontweight="bold",
         color="#1F77B4",
         ha="left",
@@ -1210,7 +1198,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
         0.00,
         0.12,
         f"60MA {ma60}",
-        fontsize=11,
+        fontsize=15,
         fontweight="bold",
         color="#FF7F0E",
         ha="left",
@@ -1221,7 +1209,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
         0.28,
         0.12,
         f"120MA {ma120}",
-        fontsize=11,
+        fontsize=15,
         fontweight="bold",
         color="#9467BD",
         ha="left",
@@ -1305,7 +1293,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ax_v.set_xticklabels(
         [labels[i] for i in ticks],
         rotation=0,
-        fontsize=9,
+        fontsize=11,
     )
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
