@@ -3147,13 +3147,302 @@ def _build_stock_chip_flex(
         },
     }
 
+def _margin_get(row: dict, *keys, default=None):
+    for key in keys:
+        if key in row and row.get(key) not in [None, ""]:
+            return row.get(key)
+    return default
+
+
+def _margin_to_float(value, default: float = 0.0) -> float:
+    try:
+        text = str(value).replace(",", "").replace("%", "").strip()
+        if text in {"", "--", "-"}:
+            return default
+        return float(text)
+    except Exception:
+        return default
+
+
+def _margin_fmt_lots(value) -> str:
+    try:
+        return f"{int(round(float(value))):,} 張"
+    except Exception:
+        return "--"
+
+
+def _margin_fmt_signed_lots(value) -> str:
+    if value is None:
+        return "--"
+
+    try:
+        number = float(value)
+    except Exception:
+        return "--"
+
+    if abs(number) < 0.5:
+        return "0 張"
+
+    return f"{number:+,.0f} 張"
+
+
+def _margin_fmt_ratio(value) -> str:
+    if value in [None, ""]:
+        return "--"
+
+    text = str(value).strip()
+
+    if text in {"--", "-"}:
+        return "--"
+
+    if "%" in text:
+        return text
+
+    try:
+        return f"{float(text):.2f}%"
+    except Exception:
+        return text
+
+
+def _margin_change_color(value) -> str:
+    try:
+        number = float(value)
+    except Exception:
+        return "#666666"
+
+    if number > 0:
+        return "#E53935"
+
+    if number < 0:
+        return "#1E9F5A"
+
+    return "#666666"
+
+
+def _margin_short_date(value) -> str:
+    text = str(value or "--").strip()
+
+    if len(text) >= 10 and text[4:5] in {"-", "/"}:
+        return text[5:10].replace("-", "/")
+
+    if len(text) == 8 and text.isdigit():
+        return f"{text[4:6]}/{text[6:8]}"
+
+    return text
+
+
+def _margin_sort_key(row: dict):
+    from datetime import datetime
+
+    text = str(
+        _margin_get(
+            row,
+            "date",
+            "trade_date",
+            "日期",
+            default="",
+        )
+    ).strip()
+
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%m/%d"]:
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            pass
+
+    return datetime.min
+
+
+def _margin_metric_box(
+    title: str,
+    value: str,
+    sub_title: str = "",
+    sub_value: str = "",
+    sub_color: str = "#666666",
+) -> dict[str, Any]:
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": title,
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": value,
+            "size": "lg",
+            "weight": "bold",
+            "color": "#111111",
+            "margin": "xs",
+            "wrap": True,
+        },
+    ]
+
+    if sub_title or sub_value:
+        contents.append(
+            {
+                "type": "text",
+                "text": f"{sub_title} {sub_value}".strip(),
+                "size": "xs",
+                "weight": "bold",
+                "color": sub_color,
+                "margin": "xs",
+                "wrap": True,
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "backgroundColor": "#F8F9FA",
+        "cornerRadius": "12px",
+        "paddingAll": "10px",
+        "contents": contents,
+    }
+
+
+def _margin_table_row_v2(
+    date_text: str,
+    margin_text: str,
+    short_text: str,
+    ratio_text: str,
+    is_header: bool = False,
+) -> dict[str, Any]:
+    text_color = "#666666" if is_header else "#111111"
+    bg_color = "#F1F3F5" if is_header else "#FFFFFF"
+    weight = "bold" if is_header else "regular"
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "backgroundColor": bg_color,
+        "cornerRadius": "6px" if is_header else "0px",
+        "paddingAll": "5px" if is_header else "3px",
+        "contents": [
+            {
+                "type": "text",
+                "text": date_text,
+                "size": "xs",
+                "weight": weight,
+                "color": text_color,
+                "flex": 2,
+                "align": "start",
+            },
+            {
+                "type": "text",
+                "text": margin_text,
+                "size": "xs",
+                "weight": weight,
+                "color": text_color,
+                "flex": 3,
+                "align": "end",
+            },
+            {
+                "type": "text",
+                "text": short_text,
+                "size": "xs",
+                "weight": weight,
+                "color": text_color,
+                "flex": 3,
+                "align": "end",
+            },
+            {
+                "type": "text",
+                "text": ratio_text,
+                "size": "xs",
+                "weight": weight,
+                "color": text_color,
+                "flex": 2,
+                "align": "end",
+            },
+        ],
+    }
+
 def _build_margin_flex(
     stock_id: str,
     stock_name: str,
     rows: list[dict],
     current_tf: str,
 ) -> dict[str, Any]:
-    table_rows = list(rows or [])[:10]
+    all_rows = sorted(
+        list(rows or []),
+        key=_margin_sort_key,
+        reverse=True,
+    )
+
+    table_rows = all_rows[:10]
+
+    latest = table_rows[0] if table_rows else {}
+    previous = table_rows[1] if len(table_rows) >= 2 else {}
+
+    latest_date = _margin_get(
+        latest,
+        "date",
+        "trade_date",
+        "日期",
+        default="--",
+    )
+
+    latest_margin = _margin_to_float(
+        _margin_get(
+            latest,
+            "margin",
+            "margin_balance",
+            "融資",
+            "融資餘額",
+            default=0,
+        )
+    )
+
+    latest_short = _margin_to_float(
+        _margin_get(
+            latest,
+            "short",
+            "short_balance",
+            "融券",
+            "融券餘額",
+            default=0,
+        )
+    )
+
+    latest_ratio = _margin_get(
+        latest,
+        "ratio",
+        "short_margin_ratio",
+        "資券比",
+        "券資比",
+        default="--",
+    )
+
+    previous_margin = _margin_to_float(
+        _margin_get(
+            previous,
+            "margin",
+            "margin_balance",
+            "融資",
+            "融資餘額",
+            default=0,
+        )
+    )
+
+    previous_short = _margin_to_float(
+        _margin_get(
+            previous,
+            "short",
+            "short_balance",
+            "融券",
+            "融券餘額",
+            default=0,
+        )
+    )
+
+    margin_change = None
+    short_change = None
+
+    if previous:
+        margin_change = latest_margin - previous_margin
+        short_change = latest_short - previous_short
 
     contents: list[dict[str, Any]] = [
         {
@@ -3166,29 +3455,129 @@ def _build_margin_flex(
         },
         {
             "type": "text",
-            "text": "融資券近10日",
+            "text": f"融資券｜最新 {_margin_short_date(latest_date)}",
             "size": "lg",
             "weight": "bold",
             "color": "#444444",
             "margin": "sm",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                _margin_metric_box(
+                    "融資餘額",
+                    _margin_fmt_lots(latest_margin),
+                    "增減",
+                    _margin_fmt_signed_lots(margin_change),
+                    _margin_change_color(margin_change),
+                ),
+                _margin_metric_box(
+                    "融券餘額",
+                    _margin_fmt_lots(latest_short),
+                    "增減",
+                    _margin_fmt_signed_lots(short_change),
+                    _margin_change_color(short_change),
+                ),
+            ],
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "12px",
+            "paddingAll": "10px",
+            "margin": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "券資比",
+                    "size": "xs",
+                    "color": "#888888",
+                },
+                {
+                    "type": "text",
+                    "text": _margin_fmt_ratio(latest_ratio),
+                    "size": "lg",
+                    "weight": "bold",
+                    "color": "#111111",
+                    "margin": "xs",
+                },
+            ],
         },
         {
             "type": "separator",
             "margin": "md",
         },
         {
+            "type": "text",
+            "text": "近10日",
+            "size": "md",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "md",
+        },
+        {
             "type": "box",
             "layout": "vertical",
-            "margin": "md",
+            "margin": "sm",
             "spacing": "xs",
             "contents": [
-                _margin_table_row("日期", "融資", "融券", "資券比", is_header=True),
+                _margin_table_row_v2(
+                    "日期",
+                    "融資餘額",
+                    "融券餘額",
+                    "券資比",
+                    is_header=True,
+                ),
                 *[
-                    _margin_table_row(
-                        str(r.get("date", "--")),
-                        f"{int(r.get('margin', 0) or 0):,}",
-                        f"{int(r.get('short', 0) or 0):,}",
-                        str(r.get("ratio", "--")),
+                    _margin_table_row_v2(
+                        _margin_short_date(
+                            _margin_get(
+                                r,
+                                "date",
+                                "trade_date",
+                                "日期",
+                                default="--",
+                            )
+                        ),
+                        _margin_fmt_lots(
+                            _margin_to_float(
+                                _margin_get(
+                                    r,
+                                    "margin",
+                                    "margin_balance",
+                                    "融資",
+                                    "融資餘額",
+                                    default=0,
+                                )
+                            )
+                        ),
+                        _margin_fmt_lots(
+                            _margin_to_float(
+                                _margin_get(
+                                    r,
+                                    "short",
+                                    "short_balance",
+                                    "融券",
+                                    "融券餘額",
+                                    default=0,
+                                )
+                            )
+                        ),
+                        _margin_fmt_ratio(
+                            _margin_get(
+                                r,
+                                "ratio",
+                                "short_margin_ratio",
+                                "資券比",
+                                "券資比",
+                                default="--",
+                            )
+                        ),
                     )
                     for r in table_rows
                 ],
@@ -3196,11 +3585,23 @@ def _build_margin_flex(
         },
     ]
 
+    if not table_rows:
+        contents.append(
+            {
+                "type": "text",
+                "text": "目前查無融資券資料。",
+                "size": "sm",
+                "color": "#888888",
+                "margin": "md",
+                "wrap": True,
+            }
+        )
+
     contents.extend(_mode_buttons(stock_id, "margin", current_tf))
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name} 融資券近10日",
+        "altText": f"{stock_id} {stock_name} 融資券",
         "contents": {
             "type": "bubble",
             "size": "mega",
