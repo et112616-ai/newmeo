@@ -1255,6 +1255,7 @@ def _postback_button(
 
 
 def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
+    mode = _normalize_action(active_mode)
     tf = normalize_time_frame(current_tf)
 
     items = [
@@ -1270,6 +1271,14 @@ def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str,
     for label, value in items:
         is_active = tf == value
 
+        # 重要：
+        # 1分 / 5分 預設走即時圖
+        # 日 / 週 / 月 預設走 K 線圖
+        if value in {"1m", "5m"}:
+            target_action = "instant"
+        else:
+            target_action = "k_line"
+
         buttons.append(
             {
                 "type": "box",
@@ -1282,7 +1291,7 @@ def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str,
                 "action": {
                     "type": "postback",
                     "label": label,
-                    "data": f"{stock_id},{active_mode},{active_mode},{value}",
+                    "data": f"{stock_id},{target_action},{target_action},{value}",
                     "displayText": f"{stock_id} {label}",
                 },
                 "contents": [
@@ -1368,26 +1377,36 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
     for label, action_name in items:
         is_active = mode == action_name
 
+        # 重要：
+        # 從 K線切回即時，如果目前是 D/W/M，要自動改成 1m
+        # 從即時切回 K線，如果目前是 1m/5m，要自動改成 D
+        if action_name == "instant":
+            target_tf = tf if tf in {"1m", "5m"} else "1m"
+        elif action_name == "k_line":
+            target_tf = tf if tf in {"D", "W", "M"} else "D"
+        else:
+            target_tf = tf
+
         buttons.append(
             {
                 "type": "box",
                 "layout": "vertical",
-                "height": "36px",
-                "cornerRadius": "9px",
+                "height": "34px",
+                "cornerRadius": "8px",
                 "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
                 "justifyContent": "center",
                 "alignItems": "center",
                 "action": {
                     "type": "postback",
                     "label": label,
-                    "data": f"{stock_id},{action_name},{action_name},{tf}",
+                    "data": f"{stock_id},{action_name},{action_name},{target_tf}",
                     "displayText": f"{stock_id} {label}",
                 },
                 "contents": [
                     {
                         "type": "text",
                         "text": label,
-                        "size": "xs",
+                        "size": "xxs" if label == "融資券" else "xs",
                         "weight": "bold" if is_active else "regular",
                         "align": "center",
                         "gravity": "center",
