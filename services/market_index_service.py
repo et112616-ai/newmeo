@@ -79,6 +79,17 @@ class MarketIndexSnapshot:
 def _debug(*args):
     print("DEBUG market_index |", *args, flush=True)
 
+def _fmt_ma_value(value) -> str:
+    try:
+        num = float(value)
+
+        if num == 0:
+            return "--"
+
+        return f"{num:,.2f}"
+
+    except Exception:
+        return "--"
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -787,7 +798,6 @@ def _fetch_taiex_history_twse() -> pd.DataFrame:
 
     return df.tail(220)
 
-
 def _latest_month_starts(today, months: int = 12) -> list[pd.Timestamp]:
     current = pd.Timestamp(today).replace(day=1)
     result = []
@@ -1097,6 +1107,18 @@ def _append_snapshot_to_history(df: pd.DataFrame, snapshot: MarketIndexSnapshot)
 # =========================
 # Chart
 # =========================
+def _fmt_index_ma_value(value) -> str:
+    try:
+        num = float(value)
+
+        if num == 0:
+            return "--"
+
+        return f"{num:,.2f}"
+
+    except Exception:
+        return "--"
+
 def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     if df is None or df.empty:
         return ""
@@ -1105,19 +1127,85 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
     work_df = df.copy()
 
-    for ma in [5, 20, 60, 120]:
-        work_df[f"MA{ma}"] = work_df["Close"].rolling(ma).mean()
+    # 先用完整資料計算均線，不要只用最近 60 根算。
+    for period in [5, 20, 60, 120]:
+        work_df[f"MA{period}"] = (
+            work_df["Close"]
+            .astype(float)
+            .rolling(period, min_periods=1)
+            .mean()
+        )
 
+    # 日 K 顯示最近約 3 個月。
     plot_df = work_df.tail(60).copy()
 
     if plot_df.empty:
         return ""
 
-    fig = plt.figure(figsize=(7.2, 5.8), dpi=130, facecolor="white")
-    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.06)
+    latest = work_df.iloc[-1]
+    latest_close = float(latest["Close"])
+    latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
-    ax_k = fig.add_subplot(gs[0])
-    ax_v = fig.add_subplot(gs[1], sharex=ax_k)
+    ma_text_1 = (
+        f"5MA {_fmt_index_ma_value(latest.get('MA5'))}    "
+        f"20MA {_fmt_index_ma_value(latest.get('MA20'))}    "
+        f"60MA {_fmt_index_ma_value(latest.get('MA60'))}"
+    )
+
+    ma_text_2 = (
+        f"120MA {_fmt_index_ma_value(latest.get('MA120'))}"
+    )
+
+    fig = plt.figure(figsize=(7.2, 6.25), dpi=130, facecolor="white")
+
+    # 三層：
+    # 1. 上方資訊區：標題 + MA 數字
+    # 2. K線
+    # 3. 成交量
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.8, 3, 1],
+        hspace=0.06,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax_k = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax_k)
+
+    ax_info.set_facecolor("white")
+    ax_info.axis("off")
+
+    ax_info.text(
+        0.0,
+        0.78,
+        f"加權指數日K｜{latest_date} 收 {latest_close:,.2f}",
+        fontsize=13,
+        fontweight="bold",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+
+    ax_info.text(
+        0.0,
+        0.42,
+        ma_text_1,
+        fontsize=9,
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+
+    ax_info.text(
+        0.0,
+        0.12,
+        ma_text_2,
+        fontsize=9,
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+    )
 
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
@@ -1136,7 +1224,13 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
         color = "#FF2D2D" if close_price >= open_price else "#00B050"
 
-        ax_k.vlines(i, low_price, high_price, linewidth=1.0, color=color)
+        ax_k.vlines(
+            i,
+            low_price,
+            high_price,
+            linewidth=1.0,
+            color=color,
+        )
 
         lower = min(open_price, close_price)
         height = abs(close_price - open_price)
@@ -1178,19 +1272,15 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
                 color=color,
             )
 
-    latest_close = float(plot_df["Close"].iloc[-1])
-    latest_date = plot_df.index[-1].strftime("%Y-%m-%d")
-
-    ax_k.set_title(
-        f"加權指數日K｜{latest_date} 收 {latest_close:,.2f}",
-        fontsize=13,
-        fontweight="bold",
-    )
-
     ax_k.grid(True, linestyle=":", alpha=0.4)
     ax_v.grid(True, linestyle=":", alpha=0.35)
 
-    ax_k.legend(loc="upper left", fontsize=8, ncol=4, frameon=False)
+    ax_k.legend(
+        loc="upper left",
+        fontsize=8,
+        ncol=4,
+        frameon=False,
+    )
 
     labels = [idx.strftime("%m/%d") for idx in plot_df.index]
     step = max(1, len(labels) // 6)
