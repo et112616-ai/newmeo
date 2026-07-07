@@ -220,6 +220,11 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     ref_price = _get_reference_price(df)
 
     try:
+        ref_price = float(ref_price)
+    except Exception:
+        ref_price = latest
+
+    try:
         prev_close = float(df.attrs.get("previous_close") or ref_price or latest)
     except Exception:
         prev_close = latest
@@ -247,12 +252,24 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     # 成交量改成「張」
     volume_lots = total_volume / 1000.0
 
+    def _fmt_price(value) -> str:
+        try:
+            return f"{float(value):,.2f}"
+        except Exception:
+            return "--"
+
+    def _fmt_volume_lots(value) -> str:
+        try:
+            return f"{float(value):,.0f} 張"
+        except Exception:
+            return "--"
+
     # ===== 畫布：資訊列 + 主圖 + 成交量 =====
-    fig = plt.figure(figsize=(8.4, 7.8), dpi=140, facecolor="white")
+    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.95, 4.5, 1.35],
+        height_ratios=[0.95, 4.6, 1.45],
         hspace=0.05,
     )
 
@@ -264,39 +281,49 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     ax.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    # ===== 上方 2 排資訊列 =====
-    info_line_1 = (
-        f"昨收 {prev_close:.2f}    開盤 {open_price:.2f}    最高 {high_price:.2f}"
-    )
-    info_line_2 = (
-        f"最低 {low_price:.2f}    參考 {ref_price:.2f}    成交量 {volume_lots:,.0f} 張"
-    )
+    # ===== 上方資訊列：改成 2 排 x 3 欄 =====
+    info_items = [
+        ("昨收", _fmt_price(prev_close)),
+        ("開盤", _fmt_price(open_price)),
+        ("最高", _fmt_price(high_price)),
+        ("最低", _fmt_price(low_price)),
+        ("參考", _fmt_price(ref_price)),
+        ("成交量", _fmt_volume_lots(volume_lots)),
+    ]
 
-    ax_info.text(
-        0.01,
-        0.72,
-        info_line_1,
-        ha="left",
-        va="center",
-        fontsize=17,
-        color="#333333",
-        **_get_font_kwargs_safe(),
-    )
-    ax_info.text(
-        0.01,
-        0.22,
-        info_line_2,
-        ha="left",
-        va="center",
-        fontsize=17,
-        color="#333333",
-        **_get_font_kwargs_safe(),
-    )
+    positions = [
+        (0.00, 0.68),
+        (0.34, 0.68),
+        (0.68, 0.68),
+        (0.00, 0.25),
+        (0.34, 0.25),
+        (0.68, 0.25),
+    ]
+
+    for (label, value), (x, y) in zip(info_items, positions):
+        ax_info.text(
+            x,
+            y,
+            f"{label} {value}",
+            ha="left",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+            color="#333333",
+            transform=ax_info.transAxes,
+            **_get_font_kwargs_safe(),
+        )
 
     # ===== 主圖：即時折線 =====
     line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
 
-    ax.plot(df.index, close, linewidth=2.0, color=line_color, zorder=3)
+    ax.plot(
+        df.index,
+        close,
+        linewidth=2.6,
+        color=line_color,
+        zorder=3,
+    )
 
     ax.fill_between(
         df.index,
@@ -324,9 +351,9 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     ax.axhline(
         ref_price,
         linestyle="--",
-        linewidth=1.0,
+        linewidth=1.3,
         color="#7F8C8D",
-        alpha=0.8,
+        alpha=0.85,
         zorder=1,
     )
 
@@ -335,12 +362,13 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _set_centered_price_axis(ax, df)
 
     ax.grid(True, linestyle=":", alpha=0.35)
-    ax.tick_params(axis="x", labelsize=10)
-    ax.tick_params(axis="y", labelsize=10)
+    ax.tick_params(axis="x", labelsize=11)
+    ax.tick_params(axis="y", labelsize=11)
 
     # ===== 成交量圖 =====
     vol_colors = []
-    for i, (_, row) in enumerate(df.iterrows()):
+
+    for _, row in df.iterrows():
         try:
             o = float(row["Open"])
             c = float(row["Close"])
@@ -350,18 +378,22 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
 
     volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
 
+    # Matplotlib 日期座標的 width 單位是「天」
+    # 0.0025 約等於 3.6 分鐘，視覺上比較飽滿。
+    bar_width = 0.0025 if len(df) > 100 else 0.0045
+
     ax_v.bar(
         df.index,
         volume_lot_series,
-        width=0.0035 if len(df) > 100 else 0.006,
+        width=bar_width,
         color=vol_colors,
         edgecolor="none",
     )
 
-    ax_v.set_ylabel("成交量(張)", fontsize=10, **_get_font_kwargs_safe())
+    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
     ax_v.grid(True, linestyle=":", alpha=0.30)
-    ax_v.tick_params(axis="x", labelsize=9)
-    ax_v.tick_params(axis="y", labelsize=9)
+    ax_v.tick_params(axis="x", labelsize=10)
+    ax_v.tick_params(axis="y", labelsize=10)
 
     # X 軸格式
     ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
@@ -375,7 +407,10 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
 
     fig.tight_layout()
 
-    return publish_figure(fig, f"{stock_id}_instant")
+    try:
+        return publish_figure(fig, f"{stock_id}_instant")
+    finally:
+        plt.close(fig)
     
 def _fmt_ma_value(value) -> str:
     try:
@@ -502,11 +537,11 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=(8.4, 6.9), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=(9,7), dpi=130, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[1.15, 3.15, 1.1],
+        height_ratios=[0.78, 3.35, 1.05],
         hspace=0.05,
     )
 
