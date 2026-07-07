@@ -1254,40 +1254,49 @@ def _postback_button(
     }
 
 
-def _time_buttons(stock_id: str, current_mode: str, current_tf: str) -> dict[str, Any]:
-    """
-    上方時間按鈕。
-
-    即時圖只適合 1m / 5m。
-    如果按 D / W / M，直接切到 K 線模式。
-    """
-    current_mode = _normalize_action(current_mode)
-    current_tf = normalize_time_frame(current_tf)
+def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
+    tf = normalize_time_frame(current_tf)
 
     items = [
         ("1分", "1m"),
         ("5分", "5m"),
-        ("D", "D"),
-        ("W", "W"),
-        ("M", "M"),
+        ("日", "D"),
+        ("週", "W"),
+        ("月", "M"),
     ]
 
     buttons = []
 
-    for label, tf in items:
-        if tf in {"D", "W", "M"}:
-            action = "k_line"
-            mode = "k_line"
-        else:
-            action = current_mode if current_mode in {"instant", "k_line"} else "instant"
-            mode = action
+    for label, value in items:
+        is_active = tf == value
 
         buttons.append(
-            _postback_button(
-                label=label,
-                data=f"{stock_id},{action},{mode},{tf}",
-                active=(current_tf == tf),
-            )
+            {
+                "type": "box",
+                "layout": "vertical",
+                "height": "46px",
+                "cornerRadius": "12px",
+                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                "justifyContent": "center",
+                "alignItems": "center",
+                "action": {
+                    "type": "postback",
+                    "label": label,
+                    "data": f"{stock_id},{active_mode},{active_mode},{value}",
+                    "displayText": f"{stock_id} {label}",
+                },
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": label,
+                        "size": "md",
+                        "weight": "bold" if is_active else "regular",
+                        "align": "center",
+                        "gravity": "center",
+                        "color": "#FFFFFF" if is_active else "#111111",
+                    }
+                ],
+            }
         )
 
     return {
@@ -1342,58 +1351,61 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
     return [row1, row2]
 
 def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict[str, Any]]:
-    active_mode = _normalize_action(active_mode)
-    current_tf = normalize_time_frame(current_tf)
+    mode = _normalize_action(active_mode)
+    tf = normalize_time_frame(current_tf)
 
-    row1 = {
-        "type": "box",
-        "layout": "horizontal",
-        "spacing": "sm",
-        "margin": "lg",
-        "contents": [
-            _postback_button(
-                "即時",
-                f"{stock_id},instant,instant,1m",
-                active=active_mode == "instant",
-            ),
-            _postback_button(
-                "K線",
-                f"{stock_id},k_line,k_line,D",
-                active=active_mode == "k_line",
-            ),
-        ],
-    }
+    items = [
+        ("即時", "instant"),
+        ("K線", "k_line"),
+        ("法人", "chip"),
+        ("大戶", "large_holder"),
+        ("融資券", "margin"),
+        ("期貨", "futures"),
+    ]
 
-    row2 = {
-        "type": "box",
-        "layout": "horizontal",
-        "spacing": "sm",
-        "margin": "sm",
-        "contents": [
-            _postback_button(
-                "法人",
-                f"{stock_id},chip,chip,{current_tf}",
-                active=active_mode == "chip",
-            ),
-            _postback_button(
-                "大戶",
-                f"{stock_id},large_holder,large_holder,{current_tf}",
-                active=active_mode == "large_holder",
-            ),
-            _postback_button(
-                "融資券",
-                f"{stock_id},margin,margin,{current_tf}",
-                active=active_mode == "margin",
-            ),
-            _postback_button(
-                "期貨",
-                f"{stock_id},futures,futures,{current_tf}",
-                active=active_mode == "futures",
-            ),
-        ],
-    }
+    buttons = []
 
-    return [row1, row2]
+    for label, action_name in items:
+        is_active = mode == action_name
+
+        buttons.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "height": "36px",
+                "cornerRadius": "9px",
+                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                "justifyContent": "center",
+                "alignItems": "center",
+                "action": {
+                    "type": "postback",
+                    "label": label,
+                    "data": f"{stock_id},{action_name},{action_name},{tf}",
+                    "displayText": f"{stock_id} {label}",
+                },
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": label,
+                        "size": "xs",
+                        "weight": "bold" if is_active else "regular",
+                        "align": "center",
+                        "gravity": "center",
+                        "color": "#FFFFFF" if is_active else "#111111",
+                    }
+                ],
+            }
+        )
+
+    return [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "xs",
+            "margin": "md",
+            "contents": buttons,
+        }
+    ]
 
 def _futures_session_buttons(
     stock_id: str,
