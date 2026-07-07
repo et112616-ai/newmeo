@@ -254,27 +254,26 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
 
     volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
 
-def _to_lots(volume_value) -> float:
+def _to_lots(volume_value, volume_unit: str = "shares") -> float:
     """
     成交量統一轉成「張」。
 
-    不用數值大小判斷，改用 df.attrs["volume_unit"] 判斷。
-
-    預設：
-    - shares / 股：除以 1000
-    - lots / 張：直接使用
+    volume_unit:
+    - shares / share / 股：代表原始資料是股，除以 1000
+    - lots / lot / 張：代表原始資料已經是張，不除
     """
     try:
         value = float(volume_value)
     except Exception:
         return 0.0
 
-    if volume_unit in {"lots", "lot", "張"}:
+    unit = str(volume_unit or "shares").lower()
+
+    if unit in {"lots", "lot", "張"}:
         return value
 
     return value / 1000.0
-
-
+    
 def _fmt_lots(value) -> str:
     try:
         return f"{float(value):,.0f} 張"
@@ -491,6 +490,8 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     work_df = df.copy()
 
+    volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
+
     for period in [5, 20, 60, 120]:
         work_df[f"MA{period}"] = (
             work_df["Close"]
@@ -518,7 +519,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     latest_high = float(latest["High"])
     latest_low = float(latest["Low"])
     latest_close = float(latest["Close"])
-    latest_volume = _to_lots(latest["Volume"])
+    latest_volume = _to_lots(latest["Volume"], volume_unit)
     latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
     prev_close = None
@@ -657,7 +658,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         high_price = float(row["High"])
         low_price = float(row["Low"])
         close_price = float(row["Close"])
-        volume = _to_lots(row["Volume"])
+        volume = _to_lots(row["Volume"], volume_unit)
 
         color = "#FF2D2D" if close_price >= open_price else "#00B050"
 
