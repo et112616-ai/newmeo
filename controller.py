@@ -2136,66 +2136,164 @@ def _build_chart_flex(
     image_aspect_ratio: str = "4:3",
 ) -> dict[str, Any]:
     color = _price_color(price_change)
+    active_mode_norm = _normalize_action(active_mode)
+    tf_norm = normalize_time_frame(current_tf)
+
+    mode_title_map = {
+        "instant": "即時走勢",
+        "k_line": "K線圖",
+        "chip": "法人買賣超",
+        "large_holder": "大戶持股",
+        "margin": "融資券",
+        "futures": "個股期貨",
+    }
+
+    mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
+
+    # 讓更新時間不要太長。
+    # 例如 2026-07-06 14:30:00 -> 14:30:00
+    update_text = str(update_time or "--").strip()
+
+    if len(update_text) >= 19 and update_text[4:5] in {"-", "/"}:
+        update_short = update_text[11:19]
+    else:
+        update_short = update_text
+
+    price_text = str(price_info or "--").strip()
+    change_text = str(change_info or "--").strip()
 
     body_contents: list[dict[str, Any]] = [
         {
-            "type": "text",
-            "text": f"{stock_id} {stock_name}",
-            "size": "xxl",
-            "weight": "bold",
-            "wrap": True,
-            "color": "#111111",
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{stock_id} {stock_name}",
+                    "size": "xxl",
+                    "weight": "bold",
+                    "wrap": True,
+                    "color": "#111111",
+                    "flex": 7,
+                },
+                {
+                    "type": "text",
+                    "text": tf_norm,
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": "#666666",
+                    "align": "end",
+                    "gravity": "center",
+                    "flex": 2,
+                },
+            ],
         },
         {
             "type": "text",
-            "text": f"{price_info}  ({change_info})",
+            "text": mode_title,
             "size": "lg",
             "weight": "bold",
-            "color": color,
-            "margin": "sm",
+            "color": "#444444",
+            "margin": "xs",
             "wrap": True,
         },
         {
-            "type": "text",
-            "text": f"更新時間：{update_time}",
-            "size": "sm",
-            "color": "#888888",
-            "margin": "xs",
-            "wrap": True,
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "xs",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": price_text,
+                    "size": "xxl",
+                    "weight": "bold",
+                    "color": color,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": change_text,
+                    "size": "md",
+                    "weight": "bold",
+                    "color": color,
+                    "wrap": True,
+                },
+            ],
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "margin": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"更新 {update_short}",
+                    "size": "xs",
+                    "color": "#888888",
+                    "flex": 5,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": "資料僅供參考",
+                    "size": "xs",
+                    "color": "#AAAAAA",
+                    "align": "end",
+                    "flex": 4,
+                    "wrap": True,
+                },
+            ],
         },
         {
             "type": "separator",
             "margin": "md",
         },
-        _time_buttons(stock_id, active_mode, current_tf),
-        {
-            "type": "image",
-            "url": image_url,
-            "size": "full",
-            "aspectRatio": image_aspect_ratio,
-            "aspectMode": "fit",
-            "margin": "md",
-            "backgroundColor": "#FFFFFF",
-        },
+        _time_buttons(stock_id, active_mode_norm, tf_norm),
     ]
 
-    body_contents.extend(_mode_buttons(stock_id, active_mode, current_tf))
+    if image_url:
+        body_contents.append(
+            {
+                "type": "image",
+                "url": image_url,
+                "size": "full",
+                "aspectRatio": image_aspect_ratio,
+                "aspectMode": "fit",
+                "margin": "md",
+                "backgroundColor": "#FFFFFF",
+            }
+        )
+    else:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": "圖表產生中或暫無圖表。",
+                "size": "sm",
+                "color": "#888888",
+                "margin": "md",
+                "wrap": True,
+            }
+        )
+
+    body_contents.extend(_mode_buttons(stock_id, active_mode_norm, tf_norm))
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name}",
+        "altText": f"{stock_id} {stock_name} {mode_title}",
         "contents": {
             "type": "bubble",
             "size": "mega",
             "body": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "14px",
+                "paddingAll": "16px",
+                "spacing": "sm",
                 "contents": body_contents,
             },
         },
     }
-
 
 def _lh_get(row, *keys, default=None):
     if row is None:
