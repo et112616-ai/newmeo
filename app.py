@@ -67,6 +67,46 @@ def _line_should_process_event(event: dict) -> bool:
     _LINE_EVENT_SEEN[event_id] = now
     return True
 
+import time
+
+_LINE_EVENT_SEEN: dict[str, float] = {}
+_LINE_EVENT_SEEN_TTL_SECONDS = 180
+
+
+def _line_should_process_event(event: dict) -> bool:
+    """
+    用 webhookEventId 去重複事件。
+    不要因為 isRedelivery=True 就直接忽略。
+    """
+    event_id = str(event.get("webhookEventId") or "").strip()
+
+    if not event_id:
+        return True
+
+    now = time.time()
+
+    expired_ids = [
+        k
+        for k, ts in list(_LINE_EVENT_SEEN.items())
+        if now - ts > _LINE_EVENT_SEEN_TTL_SECONDS
+    ]
+
+    for k in expired_ids:
+        _LINE_EVENT_SEEN.pop(k, None)
+
+    if event_id in _LINE_EVENT_SEEN:
+        print(
+            "LINE duplicate event ignored:",
+            event_id,
+            "| isRedelivery =",
+            event.get("deliveryContext", {}).get("isRedelivery"),
+            flush=True,
+        )
+        return False
+
+    _LINE_EVENT_SEEN[event_id] = now
+    return True
+
 app = Flask(__name__)
 
 
@@ -532,6 +572,17 @@ def line_webhook():
 
             reply_token = str(event.get("replyToken", "")).strip()
 
+            if not reply_token:
+                print(
+                    "LINE event skipped: missing replyToken",
+                    "| event_type =",
+                    event.get("type"),
+                    "| event_id =",
+                    event.get("webhookEventId"),
+                    flush=True,
+                )
+                continue
+            
             bot_payload = {
                 "events": [event],
             }
