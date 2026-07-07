@@ -40,6 +40,18 @@ ACTIVE_COLOR = "#16C957"
 INACTIVE_COLOR = "#D9DDE3"
 import traceback
 
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+def _is_tw_stock_live_session() -> bool:
+    """
+    台股一般盤時間：
+    09:00 ~ 13:30
+    預留一點緩衝可抓到收盤最後資料。
+    """
+    now_tpe = datetime.now(ZoneInfo("Asia/Taipei")).time()
+    return time(9, 0) <= now_tpe <= time(13, 35)
+
 def _normalize_action(action: str | None) -> str:
     action = str(action or "").strip().lower()
 
@@ -3829,13 +3841,36 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         # 文字輸入預設是 instant，但 parser 可能給 D。
         # 即時圖只適合 1m / 5m，所以預設改成 1m。
-        if action == "instant" and requested_tf not in {"1m", "5m"}:
-            requested_tf = "1m"
+        # ===== 純文字輸入的預設入口邏輯 =====
+        # 例如使用者直接打：2327 / 聯電 / 國巨
+        raw_text = str(getattr(req, "raw_text", "") or "").strip()
 
-        # 如果使用者在即時模式按 D/W/M，改用 K 線。
-        if action == "instant" and requested_tf in {"D", "W", "M"}:
-            action = "k_line"
-            current_mode = "k_line"
+        is_plain_text_entry = (
+            bool(raw_text)
+            and action == "instant"
+            and requested_tf == "D"
+        )
+
+        if is_plain_text_entry:
+            if _is_tw_stock_live_session():
+                # 盤中：預設進即時 1分圖
+                action = "instant"
+                current_mode = "instant"
+                requested_tf = "1m"
+            else:
+                # 收盤後：預設進日K
+                action = "k_line"
+                current_mode = "k_line"
+            requested_tf = "D"
+
+        else:
+            # 非純文字入口，就維持你原本按鈕切換邏輯
+            if action == "instant" and requested_tf not in {"1m", "5m"}:
+                requested_tf = "1m"
+
+            if action == "instant" and requested_tf in {"D", "W", "M"}:
+                action = "k_line"
+                current_mode = "k_line"
 
         print(
             "DEBUG stock timing action_adjust",
