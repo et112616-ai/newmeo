@@ -75,6 +75,22 @@ def _to_int(value: Any, default: int = 0) -> int:
     except Exception:
         return default
 
+def _extract_holder_people(row: dict) -> int:
+    """
+    從 TDCC row 裡抓人數。
+    """
+    for key in [
+        "人數",
+        "people",
+        "holders",
+        "holder_people",
+        "large_holder_people",
+        "people_count",
+    ]:
+        if key in row:
+            return _to_int(row.get(key))
+
+    return 0
 
 def _fmt_md(date_str: str) -> str:
     """
@@ -631,7 +647,7 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
 
 def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
     """
-    從 TDCC latest CSV 抓出可取得日期的千張大戶比例。
+    從 TDCC latest CSV 抓出可取得日期的千張大戶比例與人數。
 
     因為 latest CSV 通常只包含最新一個日期，所以這裡通常只會回 1 筆。
     """
@@ -649,7 +665,7 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
         )
         return []
 
-    by_date: dict[str, float] = {}
+    by_date: dict[str, dict] = {}
 
     for r in rows:
         raw_date = str(r.get("資料日期", "")).strip()
@@ -663,16 +679,25 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
             continue
 
         ratio = _to_float(r.get("占集保庫存數比例%"))
+        people = _extract_holder_people(r)
 
-        by_date[trade_date] = by_date.get(trade_date, 0.0) + ratio
+        if trade_date not in by_date:
+            by_date[trade_date] = {
+                "ratio": 0.0,
+                "people": 0,
+            }
+
+        by_date[trade_date]["ratio"] += ratio
+        by_date[trade_date]["people"] += people
 
     records = [
         {
             "stock_id": sid,
             "trade_date": trade_date,
-            "ratio": ratio,
+            "ratio": item["ratio"],
+            "people": item["people"],
         }
-        for trade_date, ratio in sorted(by_date.items(), reverse=True)
+        for trade_date, item in sorted(by_date.items(), reverse=True)
     ]
 
     print(
@@ -683,13 +708,12 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
         len(rows),
         "| records_count =",
         len(records),
-        "| dates =",
-        [r["trade_date"] for r in records[:10]],
+        "| records =",
+        records[:10],
         flush=True,
     )
 
     return records
-
 
 def _extract_tdcc_latest_large_holder_record(stock_id: str) -> dict | None:
     records = _extract_tdcc_large_holder_records(stock_id)
@@ -775,6 +799,7 @@ def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[d
             {
                 "date": date,
                 "ratio": ratio,
+                "people": _to_int(r.get("large_holder_people")),
             }
         )
 
@@ -798,6 +823,7 @@ def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[d
         output_asc.append(
             {
                 "date": _fmt_md(item["date"]),
+                "people": item.get("people", 0),
                 "ratio": f"{ratio:.2f}%",
                 "diff": diff_text,
             }
@@ -824,6 +850,7 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
         stock_id=record["stock_id"],
         trade_date=record["trade_date"],
         large_holder_ratio=record["ratio"],
+        large_holder_people=record.get("people"),
         source="TDCC",
     )
 
@@ -832,9 +859,9 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
         "ok": bool(ok),
         "trade_date": record.get("trade_date"),
         "ratio": record.get("ratio"),
+        "people": record.get("people"),
         "message": "synced" if ok else "Supabase 寫入失敗",
     }
-
 
 def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     """
@@ -1263,6 +1290,7 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
     trade_date = _yyyymmdd_to_db_date(sca_date)
 
     ratio = 0.0
+    people = 0
 
     for r in rows:
         level = r.get("持股分級", "")
@@ -1271,6 +1299,7 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
             continue
 
         ratio += _to_float(r.get("占集保庫存數比例%"))
+        people += _extract_holder_people(r)
 
     if ratio <= 0:
         print(
@@ -1289,8 +1318,8 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
         "stock_id": sid,
         "trade_date": trade_date,
         "ratio": ratio,
+        "people": people,
     }
-
 
 def sync_tdcc_large_holder_history_since(
     stock_id: str,
@@ -1342,6 +1371,7 @@ def sync_tdcc_large_holder_history_since(
             stock_id=record["stock_id"],
             trade_date=record["trade_date"],
             large_holder_ratio=record["ratio"],
+            large_holder_people=record.get("people"),
             source="TDCC_HISTORY",
         )
 
