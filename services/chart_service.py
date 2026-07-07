@@ -252,7 +252,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     # 成交量改成「張」
     volume_lots = total_volume / 1000.0
 
-volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
+    volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
 
 def _to_lots(volume_value) -> float:
     """
