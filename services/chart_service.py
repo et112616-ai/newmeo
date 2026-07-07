@@ -252,6 +252,35 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     # 成交量改成「張」
     volume_lots = total_volume / 1000.0
 
+volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
+
+def _to_lots(volume_value) -> float:
+    """
+    成交量統一轉成「張」。
+
+    不用數值大小判斷，改用 df.attrs["volume_unit"] 判斷。
+
+    預設：
+    - shares / 股：除以 1000
+    - lots / 張：直接使用
+    """
+    try:
+        value = float(volume_value)
+    except Exception:
+        return 0.0
+
+    if volume_unit in {"lots", "lot", "張"}:
+        return value
+
+    return value / 1000.0
+
+
+def _fmt_lots(value) -> str:
+    try:
+        return f"{float(value):,.0f} 張"
+    except Exception:
+        return "--"
+    
     def _fmt_price(value) -> str:
         try:
             return f"{float(value):,.2f}"
@@ -489,7 +518,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     latest_high = float(latest["High"])
     latest_low = float(latest["Low"])
     latest_close = float(latest["Close"])
-    latest_volume = float(latest["Volume"])
+    latest_volume = _to_lots(latest["Volume"])
     latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
     prev_close = None
@@ -604,7 +633,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ax_info.text(
         0.35,
         0.08,
-        f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_int(latest_volume)}",
+        f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
         fontsize=13,
         color="#444444",
         ha="left",
@@ -628,7 +657,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         high_price = float(row["High"])
         low_price = float(row["Low"])
         close_price = float(row["Close"])
-        volume = float(row["Volume"])
+        volume = _to_lots(row["Volume"])
 
         color = "#FF2D2D" if close_price >= open_price else "#00B050"
 
