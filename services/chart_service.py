@@ -520,35 +520,6 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ax_info.set_facecolor("white")
     ax_info.axis("off")
 
-    title_text = f"{stock_id} {stock_name}｜{tf}K｜{latest_date}"
-    price_text = f"收 {_fmt_price(latest_close)}  {_fmt_signed(change)} ({_fmt_signed_pct(pct)})"
-
-    ax_info.text(
-        0.00,
-        0.82,
-        title_text,
-        fontsize=14,
-        fontweight="bold",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-        color="#111111",
-    )
-
-    price_color = "#FF2D2D" if change > 0 else "#00B050" if change < 0 else "#666666"
-
-    ax_info.text(
-        0.00,
-        0.63,
-        price_text,
-        fontsize=12,
-        fontweight="bold",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-        color=price_color,
-    )
-
     # MA 顯示（字體改大：15）
     ax_info.text(
         0.00,
@@ -599,7 +570,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         0.35,
         0.08,
         f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_int(latest_volume)}",
-        fontsize=11,
+        fontsize=13,
         color="#444444",
         ha="left",
         va="center",
