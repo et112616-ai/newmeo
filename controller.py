@@ -4014,16 +4014,46 @@ def _build_futures_flex(
     active_session: str = "day",
 ) -> dict[str, Any]:
     """
-    期貨 Flex 卡片。
+    個股股票期貨 Flex 卡片。
 
-    需要搭配：
-    - _futures_session_buttons()
-    - _mode_buttons()
-    - _fmt_price()
-    - _fmt_signed()
-    - _fmt_signed_pct()
-    - _fmt_int()
+    重點：
+    - 期貨價格拉到上方，像行情卡。
+    - 期現價差獨立成摘要區。
+    - 商品、契約、現貨、成交量等放在明細區。
+    - 保留日盤 / 全盤切換。
+    - 保留底部個股模式按鈕。
     """
+
+    def _f_num(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _f_int(value, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+    def _color_by_value(value) -> str:
+        num = _f_num(value)
+
+        if num > 0:
+            return "#FF2D2D"
+
+        if num < 0:
+            return "#00B050"
+
+        return "#666666"
+
+    def _fmt_date_short(value) -> str:
+        text = str(value or "--").strip()
+
+        if len(text) >= 10 and text[4:5] in {"-", "/"}:
+            return text[:10]
+
+        return text or "--"
 
     def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
         return {
@@ -4044,12 +4074,61 @@ def _build_futures_flex(
                     "text": str(value),
                     "size": "sm",
                     "color": color,
+                    "weight": "bold" if color != "#888888" else "regular",
                     "flex": 7,
                     "align": "end",
                     "wrap": True,
                 },
             ],
         }
+
+    def _metric_box(
+        title: str,
+        value: str,
+        sub_value: str = "",
+        value_color: str = "#111111",
+    ) -> dict[str, Any]:
+        box_contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": title,
+                "size": "xs",
+                "color": "#888888",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": value,
+                "size": "lg",
+                "weight": "bold",
+                "color": value_color,
+                "margin": "xs",
+                "wrap": True,
+            },
+        ]
+
+        if sub_value:
+            box_contents.append(
+                {
+                    "type": "text",
+                    "text": sub_value,
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "xs",
+                    "wrap": True,
+                }
+            )
+
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "12px",
+            "paddingAll": "10px",
+            "contents": box_contents,
+        }
+
+    session_label = "全盤" if str(active_session).lower() == "all" else "日盤"
 
     contents: list[dict[str, Any]] = [
         {
@@ -4062,31 +4141,23 @@ def _build_futures_flex(
         },
         {
             "type": "text",
-            "text": "股票期貨近月",
+            "text": f"股票期貨近月｜{session_label}",
             "size": "lg",
             "weight": "bold",
             "color": "#444444",
             "margin": "sm",
-        },
-        {
-            "type": "separator",
-            "margin": "md",
+            "wrap": True,
         },
     ]
-
-    # 日盤 / 全盤切換按鈕
-    contents.append(
-        _futures_session_buttons(
-            stock_id=stock_id,
-            active_session=active_session,
-            current_tf=current_tf,
-        )
-    )
 
     # 查不到期貨資料時
     if not getattr(snapshot, "available", False):
         contents.extend(
             [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
                 {
                     "type": "text",
                     "text": getattr(snapshot, "message", "查無股票期貨資料。"),
@@ -4102,6 +4173,14 @@ def _build_futures_flex(
             ]
         )
 
+        contents.append(
+            _futures_session_buttons(
+                stock_id=stock_id,
+                active_session=active_session,
+                current_tf=current_tf,
+            )
+        )
+
         contents.extend(_mode_buttons(stock_id, "futures", current_tf))
 
         return {
@@ -4113,15 +4192,108 @@ def _build_futures_flex(
                 "body": {
                     "type": "box",
                     "layout": "vertical",
+                    "paddingAll": "14px",
                     "spacing": "sm",
                     "contents": contents,
                 },
             },
         }
 
-    # 圖片
-    chart_url = getattr(snapshot, "chart_url", "")
+    future_price = _f_num(getattr(snapshot, "future_price", 0.0))
+    future_change = _f_num(getattr(snapshot, "future_change", 0.0))
+    future_change_pct = _f_num(getattr(snapshot, "future_change_pct", 0.0))
 
+    spot_price = _f_num(getattr(snapshot, "spot_price", 0.0))
+    basis = _f_num(getattr(snapshot, "basis", 0.0))
+    basis_pct = _f_num(getattr(snapshot, "basis_pct", 0.0))
+
+    volume = _f_int(getattr(snapshot, "volume", 0))
+    open_interest = _f_int(getattr(snapshot, "open_interest", 0))
+
+    change_color = _color_by_value(future_change)
+    basis_color = _color_by_value(basis)
+
+    price_text = _fmt_price(future_price)
+    change_text = (
+        f"{_fmt_signed(future_change)} "
+        f"({_fmt_signed_pct(future_change_pct)})"
+    )
+
+    basis_text = (
+        f"{_fmt_signed(basis)} "
+        f"({_fmt_signed_pct(basis_pct)})"
+    )
+
+    futures_name = str(getattr(snapshot, "futures_name", "") or f"{stock_name}期貨")
+    futures_id = str(getattr(snapshot, "futures_id", "") or "--")
+    contract_date = str(getattr(snapshot, "contract_date", "") or "--")
+    trade_date = _fmt_date_short(getattr(snapshot, "trade_date", "--"))
+    quote_source = str(getattr(snapshot, "quote_source", "") or "--")
+    quote_time = str(getattr(snapshot, "quote_time", "") or "").strip()
+    chart_url = str(getattr(snapshot, "chart_url", "") or "").strip()
+
+    # 價格摘要
+    contents.extend(
+        [
+            {
+                "type": "text",
+                "text": price_text,
+                "size": "xxl",
+                "weight": "bold",
+                "color": change_color,
+                "margin": "md",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": change_text,
+                "size": "md",
+                "weight": "bold",
+                "color": change_color,
+                "margin": "xs",
+                "wrap": True,
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#F8F9FA",
+                "cornerRadius": "12px",
+                "paddingAll": "10px",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "期現價差",
+                        "size": "xs",
+                        "color": "#888888",
+                    },
+                    {
+                        "type": "text",
+                        "text": basis_text,
+                        "size": "lg",
+                        "weight": "bold",
+                        "color": basis_color,
+                        "margin": "xs",
+                    },
+                ],
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+    )
+
+    # 日盤 / 全盤切換按鈕
+    contents.append(
+        _futures_session_buttons(
+            stock_id=stock_id,
+            active_session=active_session,
+            current_tf=current_tf,
+        )
+    )
+
+    # 圖片
     if chart_url:
         contents.append(
             {
@@ -4131,122 +4303,95 @@ def _build_futures_flex(
                 "aspectRatio": "4:3",
                 "aspectMode": "fit",
                 "margin": "md",
+                "backgroundColor": "#FFFFFF",
+            }
+        )
+    else:
+        contents.append(
+            {
+                "type": "text",
+                "text": "目前暫無股票期貨圖表。",
+                "size": "sm",
+                "color": "#888888",
+                "margin": "md",
+                "wrap": True,
             }
         )
 
-    future_change = getattr(snapshot, "future_change", 0.0)
-    future_change_pct = getattr(snapshot, "future_change_pct", 0.0)
-    basis = getattr(snapshot, "basis", 0.0)
-
-    change_color = "#FF2D2D" if future_change > 0 else "#00B050" if future_change < 0 else "#666666"
-    basis_color = "#FF2D2D" if basis > 0 else "#00B050" if basis < 0 else "#666666"
-
-    rows = [
-        (
-            "商品",
-            f"{getattr(snapshot, 'futures_name', '')} ({getattr(snapshot, 'futures_id', '')})",
-            "#222222",
-        ),
-        (
-            "契約",
-            getattr(snapshot, "contract_date", "--"),
-            "#222222",
-        ),
-        (
-            "時段",
-            getattr(snapshot, "trading_session", "--"),
-            "#222222",
-        ),
-        (
-            "日期",
-            getattr(snapshot, "trade_date", "--"),
-            "#888888",
-        ),
-    ]
-
-    quote_source = getattr(snapshot, "quote_source", "")
-    quote_time = getattr(snapshot, "quote_time", "")
-
-    if quote_source:
-        rows.append(
-            (
-                "資料",
-                quote_source,
-                "#888888",
-            )
-        )
-
-    if quote_time:
-        rows.append(
-            (
-                "更新",
-                str(quote_time)[:19],
-                "#888888",
-            )
-        )
-
-    rows.extend(
+    # 明細摘要：兩欄卡片
+    contents.extend(
         [
-            (
-                "期貨",
-                f"{_fmt_price(getattr(snapshot, 'future_price', 0.0))}  "
-                f"{_fmt_signed(getattr(snapshot, 'future_change', 0.0))} "
-                f"({_fmt_signed_pct(getattr(snapshot, 'future_change_pct', 0.0))})",
-                change_color,
-            ),
-            (
-                "現貨",
-                _fmt_price(getattr(snapshot, "spot_price", 0.0)),
-                "#222222",
-            ),
-            (
-                "期現價差",
-                f"{_fmt_signed(getattr(snapshot, 'basis', 0.0))} "
-                f"({_fmt_signed_pct(getattr(snapshot, 'basis_pct', 0.0))})",
-                basis_color,
-            ),
-            (
-                "成交量",
-                _fmt_int(getattr(snapshot, "volume", 0)),
-                "#222222",
-            ),
-            (
-                "未平倉",
-                _fmt_int(getattr(snapshot, "open_interest", 0)),
-                "#222222",
-            ),
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _metric_box(
+                        "現貨",
+                        _fmt_price(spot_price),
+                    ),
+                    _metric_box(
+                        "成交量",
+                        _fmt_int(volume),
+                    ),
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "sm",
+                "contents": [
+                    _metric_box(
+                        "契約",
+                        contract_date,
+                    ),
+                    _metric_box(
+                        "未平倉",
+                        _fmt_int(open_interest),
+                    ),
+                ],
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _info_row("商品", f"{futures_name} ({futures_id})", "#222222"),
+                    _info_row("時段", getattr(snapshot, "trading_session", session_label), "#222222"),
+                    _info_row("日期", trade_date, "#888888"),
+                    _info_row("資料", quote_source, "#888888"),
+                ],
+            },
         ]
     )
 
-    contents.append(
-        {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "margin": "md",
-            "contents": [
-                _info_row(label, value, color)
-                for label, value, color in rows
-            ],
-        }
-    )
+    if quote_time:
+        contents[-1]["contents"].append(
+            _info_row("更新", quote_time[:19], "#888888")
+        )
 
-    contents.append(
-        {
-            "type": "text",
-            "text": "規則：標準股票期貨、只抓近月；日盤只顯示日盤資料，全盤合併盤後與日盤資料。",
-            "size": "xs",
-            "color": "#888888",
-            "wrap": True,
-            "margin": "md",
-        }
-    )
-
-    contents.append(
-        {
-            "type": "separator",
-            "margin": "md",
-        }
+    contents.extend(
+        [
+            {
+                "type": "text",
+                "text": "期現價差＝股票期貨近月 − 現貨。期貨資料可能因交易時段與資料源更新頻率而短暫落差。",
+                "size": "xs",
+                "color": "#888888",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
     )
 
     contents.extend(_mode_buttons(stock_id, "futures", current_tf))
@@ -4260,6 +4405,7 @@ def _build_futures_flex(
             "body": {
                 "type": "box",
                 "layout": "vertical",
+                "paddingAll": "14px",
                 "spacing": "sm",
                 "contents": contents,
             },
