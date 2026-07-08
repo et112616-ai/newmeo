@@ -4390,8 +4390,26 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if action == "instant":
                 t_chart0 = time.perf_counter()
 
+                print(
+                    "DEBUG instant chart before generate",
+                    "| stock_id =", meta.stock_id,
+                    "| tf =", tf,
+                    "| df_is_none =", df is None,
+                    "| rows =", 0 if df is None else len(df),
+                    "| columns =", [] if df is None else list(df.columns),
+                    flush=True,
+                )
+
                 image_url = generate_instant_chart(df, meta.stock_id, stock_name)
 
+                print(
+                    "DEBUG instant chart after generate",
+                    "| stock_id =", meta.stock_id,
+                    "| tf =", tf,
+                    "| image_url =", image_url,
+                    flush=True,
+                )
+                
                 t_chart1 = time.perf_counter()
 
                 print(
