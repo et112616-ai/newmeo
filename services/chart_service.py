@@ -208,7 +208,7 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     return ref_price
 
 def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
-    if df.empty:
+    if df is None or df.empty:
         return _empty_chart(f"{stock_id}", "No intraday data")
 
     df = df.copy()
@@ -249,10 +249,160 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     except Exception:
         total_volume = 0.0
 
-    # 成交量改成「張」
+    # 即時分K這邊目前預設 Volume 是「股」，統一換算成「張」。
     volume_lots = total_volume / 1000.0
 
-    volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
+    def _fmt_price(value) -> str:
+        try:
+            return f"{float(value):,.2f}"
+        except Exception:
+            return "--"
+
+    def _fmt_volume_lots(value) -> str:
+        try:
+            return f"{float(value):,.0f} 張"
+        except Exception:
+            return "--"
+
+    # ===== 畫布：資訊列 + 主圖 + 成交量 =====
+    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.95, 4.6, 1.45],
+        hspace=0.05,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax)
+
+    ax_info.axis("off")
+    ax.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
+
+    # ===== 上方資訊列：2 排 x 3 欄 =====
+    info_items = [
+        ("昨收", _fmt_price(prev_close)),
+        ("開盤", _fmt_price(open_price)),
+        ("最高", _fmt_price(high_price)),
+        ("最低", _fmt_price(low_price)),
+        ("參考", _fmt_price(ref_price)),
+        ("成交量", _fmt_volume_lots(volume_lots)),
+    ]
+
+    positions = [
+        (0.00, 0.68),
+        (0.34, 0.68),
+        (0.68, 0.68),
+        (0.00, 0.25),
+        (0.34, 0.25),
+        (0.68, 0.25),
+    ]
+
+    for (label, value), (x, y) in zip(info_items, positions):
+        ax_info.text(
+            x,
+            y,
+            f"{label} {value}",
+            ha="left",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+            color="#333333",
+            transform=ax_info.transAxes,
+            **_get_font_kwargs_safe(),
+        )
+
+    # ===== 主圖：即時折線 =====
+    line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
+
+    ax.plot(
+        df.index,
+        close,
+        linewidth=2.6,
+        color=line_color,
+        zorder=3,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close >= ref_price,
+        alpha=0.12,
+        color="#E74C3C",
+        interpolate=True,
+        zorder=2,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close < ref_price,
+        alpha=0.10,
+        color="#27AE60",
+        interpolate=True,
+        zorder=2,
+    )
+
+    # 參考線 / 昨收線
+    ax.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.3,
+        color="#7F8C8D",
+        alpha=0.85,
+        zorder=1,
+    )
+
+    # 自動置中價格軸 + 右側漲跌幅
+    _set_tw_stock_intraday_axis(ax, df)
+    _set_centered_price_axis(ax, df)
+
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.tick_params(axis="x", labelsize=11)
+    ax.tick_params(axis="y", labelsize=11)
+
+    # ===== 成交量圖 =====
+    vol_colors = []
+
+    for _, row in df.iterrows():
+        try:
+            o = float(row["Open"])
+            c = float(row["Close"])
+            vol_colors.append("#E74C3C" if c >= o else "#27AE60")
+        except Exception:
+            vol_colors.append("#E74C3C")
+
+    volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
+
+    bar_width = 0.0025 if len(df) > 100 else 0.0045
+
+    ax_v.bar(
+        df.index,
+        volume_lot_series,
+        width=bar_width,
+        color=vol_colors,
+        edgecolor="none",
+    )
+
+    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
+    ax_v.grid(True, linestyle=":", alpha=0.30)
+    ax_v.tick_params(axis="x", labelsize=10)
+    ax_v.tick_params(axis="y", labelsize=10)
+
+    ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+        ax_v.spines[spine].set_visible(False)
+
+    fig.tight_layout()
 
     try:
         image_url = publish_figure(fig, f"{stock_id}_instant")
