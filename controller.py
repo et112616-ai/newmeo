@@ -832,6 +832,199 @@ def _is_yfinance_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+def _get_history_df_tf(meta, requested_tf):
+    """
+    取得個股行情資料。
+
+    1m / 5m 優先順序：
+    1. Yahoo chart API direct
+    2. Shioaji kbars
+    3. 原本 get_history() / yfinance
+
+    D / W / M：
+    維持原本 get_history()。
+    """
+    import os
+    import time
+
+    t0 = time.perf_counter()
+
+    tf = str(requested_tf or "D").strip()
+    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+    yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
+
+    if tf in {"1m", "5m"}:
+        # -------------------------
+        # 1. Yahoo chart API direct
+        # -------------------------
+        try:
+            t_yahoo0 = time.perf_counter()
+
+            df = get_stock_intraday_yahoo_direct(
+                stock_id=stock_id,
+                yf_symbol=yf_symbol,
+                time_frame=tf,
+                timeout=int(os.getenv("YAHOO_DIRECT_TIMEOUT_SECONDS", "5")),
+            )
+
+            t_yahoo1 = time.perf_counter()
+
+            if df is not None and not df.empty:
+                print(
+                    "_get_history_df_tf | source=yahoo_direct",
+                    "| stock_id =",
+                    stock_id,
+                    "| yf_symbol =",
+                    yf_symbol,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| rows=",
+                    len(df),
+                    "| sec=",
+                    round(t_yahoo1 - t_yahoo0, 3),
+                    "| total_sec=",
+                    round(time.perf_counter() - t0, 3),
+                    flush=True,
+                )
+
+                return df, tf
+
+            print(
+                "_get_history_df_tf | source=yahoo_direct_empty",
+                "| stock_id =",
+                stock_id,
+                "| yf_symbol =",
+                yf_symbol,
+                "| requested_tf=" + str(requested_tf),
+                "| tf=" + tf,
+                "| sec=",
+                round(t_yahoo1 - t_yahoo0, 3),
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "_get_history_df_tf | source=yahoo_direct_failed",
+                "| stock_id =",
+                stock_id,
+                "| yf_symbol =",
+                yf_symbol,
+                "| requested_tf=" + str(requested_tf),
+                "| tf=" + tf,
+                "| error=",
+                repr(exc),
+                flush=True,
+            )
+
+        # -------------------------
+        # 2. Shioaji kbars fallback
+        # -------------------------
+        use_shioaji_kbars = str(os.getenv("USE_SHIOAJI_KBARS_FALLBACK", "1")).strip() != "0"
+
+        if use_shioaji_kbars:
+            try:
+                t_shioaji0 = time.perf_counter()
+
+                df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
+
+                t_shioaji1 = time.perf_counter()
+
+                if df is not None and not df.empty:
+                    print(
+                        "_get_history_df_tf | source=shioaji_kbars",
+                        "| stock_id =",
+                        stock_id,
+                        "| requested_tf=" + str(requested_tf),
+                        "| tf=" + tf,
+                        "| rows=",
+                        len(df),
+                        "| sec=",
+                        round(t_shioaji1 - t_shioaji0, 3),
+                        "| total_sec=",
+                        round(time.perf_counter() - t0, 3),
+                        flush=True,
+                    )
+
+                    return df, tf
+
+                print(
+                    "_get_history_df_tf | source=shioaji_kbars_empty",
+                    "| stock_id =",
+                    stock_id,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| sec=",
+                    round(t_shioaji1 - t_shioaji0, 3),
+                    flush=True,
+                )
+
+            except Exception as exc:
+                print(
+                    "_get_history_df_tf | source=shioaji_kbars_failed",
+                    "| stock_id =",
+                    stock_id,
+                    "| requested_tf=" + str(requested_tf),
+                    "| tf=" + tf,
+                    "| error=",
+                    repr(exc),
+                    flush=True,
+                )
+
+    # -------------------------
+    # 3. 原本 get_history() fallback
+    # -------------------------
+    t_history0 = time.perf_counter()
+
+    try:
+        result = get_history(meta, requested_tf)
+
+        t_history1 = time.perf_counter()
+
+        if isinstance(result, tuple):
+            df, tf = result
+        else:
+            df = result
+            tf = requested_tf
+
+        print(
+            "_get_history_df_tf | source=get_history",
+            "| stock_id =",
+            stock_id,
+            "| yf_symbol =",
+            yf_symbol,
+            "| requested_tf=" + str(requested_tf),
+            "| tf=" + str(tf),
+            "| df_type=" + str(type(df)),
+            "| rows=",
+            0 if df is None else len(df),
+            "| sec=",
+            round(t_history1 - t_history0, 3),
+            "| total_sec=",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return df, tf
+
+    except Exception as exc:
+        print(
+            "_get_history_df_tf | source=get_history_failed",
+            "| stock_id =",
+            stock_id,
+            "| yf_symbol =",
+            yf_symbol,
+            "| requested_tf=" + str(requested_tf),
+            "| error=",
+            repr(exc),
+            "| sec=",
+            round(time.perf_counter() - t_history0, 3),
+            "| total_sec=",
+            round(time.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        raise
+
 def _get_history_df_tf_safe(meta, requested_tf: str):
     """
     安全版歷史資料取得。
@@ -933,6 +1126,9 @@ def _get_history_df_tf_safe(meta, requested_tf: str):
                 )
             else:
                 raise
+
+
+    return None, normalize_time_frame(requested_tf)
 
 def _snap_get(snapshot: dict, *keys, default=None):
     if not isinstance(snapshot, dict):
@@ -4211,38 +4407,41 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             flush=True,
         )
 
-        # 文字輸入預設是 instant，但 parser 可能給 D。
-        # 即時圖只適合 1m / 5m，所以預設改成 1m。
-        # ===== 純文字輸入的預設入口邏輯 =====
-        # 例如使用者直接打：2327 / 聯電 / 國巨
-        raw_text = str(getattr(req, "raw_text", "") or "").strip()
+        # -------------------------
+        # 1.5 模式 / 週期修正
+        # -------------------------
+        # 規則：
+        # - instant 只搭配 1m / 5m
+        # - k_line 只搭配 D / W / M
+        # - 使用者單純輸入股票代號時：
+        #   盤中預設即時 1分，盤後預設日K。
+        requested_tf = normalize_time_frame(requested_tf)
+        action = _normalize_action(action)
+        current_mode = _normalize_action(current_mode)
 
-        is_plain_text_entry = (
-            bool(raw_text)
-            and action == "instant"
-            and requested_tf == "D"
+        is_plain_stock_entry = (
+            action == "instant"
+            and current_mode == "instant"
+            and requested_tf in {"D", "", None}
         )
 
-        if is_plain_text_entry:
+        if is_plain_stock_entry:
             if _is_tw_stock_live_session():
-                # 盤中：預設進即時 1分圖
                 action = "instant"
                 current_mode = "instant"
                 requested_tf = "1m"
             else:
-                # 收盤後：預設進日K
                 action = "k_line"
                 current_mode = "k_line"
-            requested_tf = "D"
+                requested_tf = "D"
 
-        else:
-            # 非純文字入口，就維持你原本按鈕切換邏輯
-            if action == "instant" and requested_tf not in {"1m", "5m"}:
-                requested_tf = "1m"
+        elif action == "instant" and requested_tf in {"D", "W", "M"}:
+            action = "k_line"
+            current_mode = "k_line"
 
-            if action == "instant" and requested_tf in {"D", "W", "M"}:
-                action = "k_line"
-                current_mode = "k_line"
+        elif action == "k_line" and requested_tf in {"1m", "5m"}:
+            action = "instant"
+            current_mode = "instant"
 
         print(
             "DEBUG stock timing action_adjust",
@@ -4255,12 +4454,12 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         )
 
         # -------------------------
-        # 2. 即時 / K 線 / 法人圖
+        # 2. 即時 / K 線 / 法人
         # -------------------------
         if action in {"instant", "k_line", "chip"}:
             t_history0 = time.perf_counter()
 
-            df, tf = _get_history_df_tf(meta, requested_tf)
+            df, tf = _get_history_df_tf_safe(meta, requested_tf)
 
             t_history1 = time.perf_counter()
 
@@ -4275,34 +4474,46 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 flush=True,
             )
 
-                if df is None or len(df) == 0:
-                    return {
-                        "type": "text",
-                        "text": "目前暫時抓不到這檔股票的行情資料。若是 Yahoo/yfinance 限流，請稍後再試；也可以先查法人、大戶、融資券。"
-                    }
+            if df is None or len(df) == 0:
+                return text_message(
+                    "目前暫時抓不到這檔股票的行情資料。"
+                    "若是 Yahoo/yfinance 限流，請稍後再試；"
+                    "也可以先查法人、大戶、融資券。"
+                )
 
-                t_append0 = time.perf_counter()
+            t_append0 = time.perf_counter()
 
             if tf in {"1m", "5m"}:
                 import os
 
                 allow_cold_login = (
-                    str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
+                    str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "1")).strip()
                     == "1"
                 )
 
                 df_attrs_backup = dict(getattr(df, "attrs", {}) or {})
 
-                df = append_stock_snapshot_to_intraday_df_fast(
-                    df,
-                    meta.stock_id,
-                    allow_cold_login=allow_cold_login,
-                )
+                try:
+                    df = append_stock_snapshot_to_intraday_df_fast(
+                        df,
+                        meta.stock_id,
+                        allow_cold_login=allow_cold_login,
+                    )
+                except Exception as exc:
+                    print(
+                        "DEBUG append_stock_snapshot_to_intraday_df_fast failed",
+                        "| stock_id =", meta.stock_id,
+                        "| error =", repr(exc),
+                        flush=True,
+                    )
 
                 try:
                     df.attrs.update(df_attrs_backup)
                 except Exception:
                     pass
+
+                # 修正 Yahoo 盤中延遲：再用 Shioaji snapshot 強制補最後一列。
+                df = _apply_shioaji_stock_realtime(df, meta.stock_id)
 
             t_append1 = time.perf_counter()
 
@@ -4317,39 +4528,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             t_price0 = time.perf_counter()
 
-            if tf in {"1m", "5m"}:
-                import os
-
-                df_attrs_backup = dict(getattr(df, "attrs", {}) or {})
-
-                try:
-                    df = append_stock_snapshot_to_intraday_df_fast(
-                        df,
-                        meta.stock_id,
-                        allow_cold_login=(
-                            str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "1")).strip()
-                            == "1"
-                        ),
-                    )
-                except Exception as exc:
-                    print(
-                        "DEBUG append_stock_snapshot_to_intraday_df_fast failed",
-                        "| stock_id =",
-                        meta.stock_id,
-                        "| error =",
-                        repr(exc),
-                        flush=True,
-                    )
-
-                try:
-                    df.attrs.update(df_attrs_backup)
-                except Exception:
-                    pass
-            
-                # 修正 Yahoo 盤中延遲的關鍵：
-                # 再用 Shioaji snapshot 強制補最後一列。
-                df = _apply_shioaji_stock_realtime(df, meta.stock_id)
-            
             price_meta = build_price_meta(df, tf)
 
             t_price1 = time.perf_counter()
@@ -4361,77 +4539,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "| price_info =", getattr(price_meta, "price_info", ""),
                 "| change_info =", getattr(price_meta, "change_info", ""),
                 "| sec =", round(t_price1 - t_price0, 3),
-                flush=True,
-            )
-
-                    # 文字輸入預設是 instant，但 parser 可能給 D。
-        # 即時圖只適合 1m / 5m，所以預設改成 1m。
-        if action == "instant" and requested_tf not in {"1m", "5m"}:
-            requested_tf = "1m"
-
-        # 如果使用者在即時模式按 D/W/M，改用 K 線。
-        if action == "instant" and requested_tf in {"D", "W", "M"}:
-            action = "k_line"
-            current_mode = "k_line"
-
-        # 如果使用者在 K 線模式按 1m/5m，改用即時圖。
-        elif action == "k_line" and requested_tf in {"1m", "5m"}:
-            action = "instant"
-            current_mode = "instant"
-
-        # 即時 / K 線 / 法人圖都需要行情資料
-        if action in {"instant", "k_line", "chip"}:
-            df, tf = _get_history_df_tf(meta, requested_tf)
-
-            print(
-                "DEBUG stock timing history",
-                "| stock_id =", getattr(meta, "stock_id", ""),
-                "| action =", action,
-                "| requested_tf =", requested_tf,
-                "| final_tf =", tf,
-                "| rows =", 0 if df is None else len(df),
-                flush=True,
-            )
-
-            # 分K才需要補即時快照
-            if tf in {"1m", "5m"}:
-                t_append0 = time.perf_counter()
-
-                df = append_stock_snapshot_to_intraday_df_fast(df, meta.stock_id)
-
-                t_append1 = time.perf_counter()
-
-                print(
-                    "DEBUG stock timing append_snapshot",
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| tf =", tf,
-                    "| rows =", 0 if df is None else len(df),
-                    "| sec =", round(t_append1 - t_append0, 3),
-                    flush=True,
-                )
-            else:
-                print(
-                    "DEBUG stock timing append_snapshot"
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| tf =", tf,
-                    "| rows =", 0 if df is None else len(df),
-                    "| sec = 0.0",
-                    flush=True,
-                )
-
-            t_meta0 = time.perf_counter()
-
-            price_meta = build_price_meta(df, tf)
-
-            t_meta1 = time.perf_counter()
-
-            print(
-                "DEBUG stock timing price_meta",
-                "| stock_id =", getattr(meta, "stock_id", ""),
-                "| tf =", tf,
-                "| price_info =", getattr(price_meta, "price_info", ""),
-                "| change_info =", getattr(price_meta, "change_info", ""),
-                "| sec =", round(t_meta1 - t_meta0, 3),
                 flush=True,
             )
 
@@ -4580,58 +4687,32 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             if action == "chip":
-                t_chart0 = time.perf_counter()
+                t_chip0 = time.perf_counter()
 
                 chip_rows = get_institutional_chips(meta.stock_id)
-                image_url = generate_chip_chart(meta.stock_id, stock_name, chip_rows)
 
-                t_chart1 = time.perf_counter()
+                t_chip1 = time.perf_counter()
 
-                print(
-                    "DEBUG stock timing chart",
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| action =", action,
-                    "| tf =", tf,
-                    "| image_url =", bool(image_url),
-                    "| sec =", round(t_chart1 - t_chart0, 3),
-                    flush=True,
-                )
-
-                t_flex0 = time.perf_counter()
-
-                flex = _build_chart_flex(
-                    stock_id=meta.stock_id,
-                    stock_name=stock_name,
-                    image_url=image_url,
-                    price_info=price_meta.price_info,
-                    change_info=price_meta.change_info,
-                    update_time=price_meta.time_stamp,
-                    price_change=price_meta.price_change,
-                    active_mode="chip",
-                    current_tf=tf,
-                    image_aspect_ratio="4:5",
+                flex = _build_stock_chip_flex(
+                    meta.stock_id,
+                    stock_name,
+                    chip_rows,
+                    tf,
                 )
 
                 t_flex1 = time.perf_counter()
 
                 print(
-                    "DEBUG stock timing flex",
+                    "DEBUG stock timing chip_flex",
                     "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| action =", action,
-                    "| sec =", round(t_flex1 - t_flex0, 3),
-                    flush=True,
-                )
-
-                print(
-                    "DEBUG stock timing total",
-                    "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| action =", action,
+                    "| data_sec =", round(t_chip1 - t_chip0, 3),
+                    "| flex_sec =", round(t_flex1 - t_chip1, 3),
                     "| total_sec =", round(time.perf_counter() - stock_t0, 3),
                     flush=True,
                 )
 
                 return _reply_with_title(
-                    f"{stock_name} 法人籌碼",
+                    f"{stock_name} 法人",
                     flex,
                 )
 
