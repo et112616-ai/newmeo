@@ -2007,11 +2007,37 @@ def _build_market_future_realtime_flex(
 ) -> dict[str, Any]:
     """
     台指期 TXF 即時卡片。
-    加入：
-    - 現貨：加權指數
-    - 期現價差
-    - 基差率
+
+    版型目標：
+    - 上方顯示台指期價格、漲跌、漲跌幅。
+    - 期現價差獨立成摘要區。
+    - 日盤 / 全盤按鈕保留。
+    - 現貨、成交量、開高低、買賣、更新時間整理成資訊卡。
+    - 與個股期貨卡片視覺一致。
     """
+
+    def _to_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _to_int(value, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+    def _calc_color(value) -> str:
+        num = _to_float(value)
+
+        if num > 0:
+            return "#FF2D2D"
+
+        if num < 0:
+            return "#00B050"
+
+        return "#666666"
 
     def _info_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
         return {
@@ -2032,6 +2058,7 @@ def _build_market_future_realtime_flex(
                     "text": str(value),
                     "size": "sm",
                     "color": color,
+                    "weight": "bold" if color not in {"#888888", "#666666"} else "regular",
                     "flex": 7,
                     "align": "end",
                     "wrap": True,
@@ -2039,143 +2066,54 @@ def _build_market_future_realtime_flex(
             ],
         }
 
-    def _calc_color(value) -> str:
-        try:
-            num = float(value)
-
-            if num > 0:
-                return "#FF2D2D"
-
-            if num < 0:
-                return "#00B050"
-
-        except Exception:
-            pass
-
-        return "#666666"
-
-    session_text = "全盤" if action == "market_future_all" else "日盤"
-
-    if not getattr(snapshot, "available", False):
-        contents: list[dict[str, Any]] = [
+    def _metric_box(
+        title: str,
+        value: str,
+        sub_value: str = "",
+        value_color: str = "#111111",
+    ) -> dict[str, Any]:
+        box_contents: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": "台指期",
-                "size": "xxl",
-                "weight": "bold",
-                "color": "#111111",
+                "text": title,
+                "size": "xs",
+                "color": "#888888",
                 "wrap": True,
             },
             {
                 "type": "text",
-                "text": f"TXF 近月｜{session_text}",
+                "text": value,
                 "size": "lg",
                 "weight": "bold",
-                "color": "#444444",
-                "margin": "sm",
-            },
-            {
-                "type": "separator",
-                "margin": "md",
-            },
-            {
-                "type": "text",
-                "text": getattr(snapshot, "message", "查無台指期即時資料。"),
-                "size": "sm",
-                "color": "#666666",
+                "color": value_color,
+                "margin": "xs",
                 "wrap": True,
-                "margin": "md",
-            },
-            {
-                "type": "separator",
-                "margin": "md",
             },
         ]
 
-        contents.extend(_market_index_buttons(action))
-        contents.extend(_market_future_session_buttons(action))
+        if sub_value:
+            box_contents.append(
+                {
+                    "type": "text",
+                    "text": sub_value,
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "xs",
+                    "wrap": True,
+                }
+            )
 
         return {
-            "type": "flex",
-            "altText": "台指期",
-            "contents": {
-                "type": "bubble",
-                "size": "mega",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "spacing": "sm",
-                    "contents": contents,
-                },
-            },
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "12px",
+            "paddingAll": "10px",
+            "contents": box_contents,
         }
 
-    future_price = float(getattr(snapshot, "future_price", 0.0) or 0.0)
-    change = float(getattr(snapshot, "future_change", 0.0) or 0.0)
-    change_pct = float(getattr(snapshot, "future_change_pct", 0.0) or 0.0)
-
-    change_color = _calc_color(change)
-
-    price_text = _fmt_market_price(future_price)
-    change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
-
-    spot_price = 0.0
-
-    if index_snapshot is not None and getattr(index_snapshot, "available", False):
-        try:
-            spot_price = float(getattr(index_snapshot, "close_price", 0.0) or 0.0)
-        except Exception:
-            spot_price = 0.0
-
-    rows = [
-        (
-            "商品",
-            f"{getattr(snapshot, 'futures_name', '台指期近月')} ({getattr(snapshot, 'contract_code', 'TXFR1')})",
-            "#222222",
-        ),
-        ("時段", getattr(snapshot, "trading_session", session_text), "#222222"),
-        ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
-        ("更新", _market_future_update_time_text(getattr(snapshot, "quote_time", ""), action), "#888888"),
-        ("開", _fmt_market_price(getattr(snapshot, "open_price", 0.0)), "#222222"),
-        ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
-        ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
-        ("期貨", price_text, change_color),
-    ]
-
-    if spot_price > 0 and future_price > 0:
-        basis = future_price - spot_price
-        basis_pct = basis / spot_price * 100
-        basis_color = _calc_color(basis)
-
-        rows.extend(
-            [
-                ("現貨", _fmt_market_price(spot_price), "#222222"),
-                (
-                    "期現價差",
-                    f"{_fmt_signed(basis)} ({_fmt_signed_pct(basis_pct)})",
-                    basis_color,
-                ),
-            ]
-        )
-
-    rows.extend(
-        [
-            ("漲", change_text, change_color),
-            ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
-        ]
-    )
-
-    buy_price = getattr(snapshot, "buy_price", 0.0)
-    sell_price = getattr(snapshot, "sell_price", 0.0)
-
-    if buy_price or sell_price:
-        rows.append(
-            (
-                "買賣",
-                f"{_fmt_market_price(buy_price)} / {_fmt_market_price(sell_price)}",
-                "#222222",
-            )
-        )
+    action = str(action or "market_future_day").strip()
+    session_text = "全盤" if action == "market_future_all" else "日盤"
 
     contents: list[dict[str, Any]] = [
         {
@@ -2193,53 +2131,251 @@ def _build_market_future_realtime_flex(
             "weight": "bold",
             "color": "#444444",
             "margin": "sm",
-        },
-        {
-            "type": "text",
-            "text": price_text,
-            "size": "xxl",
-            "weight": "bold",
-            "color": change_color,
-            "margin": "sm",
-        },
-        {
-            "type": "text",
-            "text": change_text,
-            "size": "md",
-            "weight": "bold",
-            "color": change_color,
-            "margin": "xs",
-        },
-        {
-            "type": "separator",
-            "margin": "md",
-        },
-        {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "margin": "md",
-            "contents": [
-                _info_row(label, value, color)
-                for label, value, color in rows
-            ],
-        },
-        {
-            "type": "text",
-            "text": "期現價差＝台指期近月 − 加權指數現貨。",
-            "size": "xs",
-            "color": "#888888",
             "wrap": True,
-            "margin": "md",
-        },
-        {
-            "type": "separator",
-            "margin": "md",
         },
     ]
 
+    if not getattr(snapshot, "available", False):
+        contents.extend(
+            [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": getattr(snapshot, "message", "查無台指期即時資料。"),
+                    "size": "sm",
+                    "color": "#666666",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+            ]
+        )
+
+        contents.extend(_market_index_buttons(action))
+        contents.extend(_market_future_session_buttons(action))
+
+        return {
+            "type": "flex",
+            "altText": "台指期",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    future_price = _to_float(getattr(snapshot, "future_price", 0.0))
+    change = _to_float(
+        getattr(snapshot, "future_change", None)
+        if getattr(snapshot, "future_change", None) is not None
+        else getattr(snapshot, "change", 0.0)
+    )
+    change_pct = _to_float(
+        getattr(snapshot, "future_change_pct", None)
+        if getattr(snapshot, "future_change_pct", None) is not None
+        else getattr(snapshot, "change_pct", 0.0)
+    )
+
+    change_color = _calc_color(change)
+
+    price_text = _fmt_market_price(future_price)
+    change_text = f"{_fmt_signed(change)} ({_fmt_signed_pct(change_pct)})"
+
+    open_price = _to_float(getattr(snapshot, "open_price", 0.0))
+    high_price = _to_float(getattr(snapshot, "high_price", 0.0))
+    low_price = _to_float(getattr(snapshot, "low_price", 0.0))
+    total_volume = _to_int(
+        getattr(snapshot, "total_volume", None)
+        if getattr(snapshot, "total_volume", None) is not None
+        else getattr(snapshot, "volume", 0)
+    )
+
+    buy_price = _to_float(
+        getattr(snapshot, "buy_price", None)
+        if getattr(snapshot, "buy_price", None) is not None
+        else getattr(snapshot, "buy", 0.0)
+    )
+    sell_price = _to_float(
+        getattr(snapshot, "sell_price", None)
+        if getattr(snapshot, "sell_price", None) is not None
+        else getattr(snapshot, "sell", 0.0)
+    )
+
+    # 現貨：使用加權指數 snapshot。
+    spot_price = 0.0
+
+    if index_snapshot is not None and getattr(index_snapshot, "available", False):
+        try:
+            spot_price = float(getattr(index_snapshot, "close_price", 0.0) or 0.0)
+        except Exception:
+            spot_price = 0.0
+
+    basis = future_price - spot_price if future_price > 0 and spot_price > 0 else 0.0
+    basis_pct = basis / spot_price * 100 if spot_price > 0 else 0.0
+    basis_color = _calc_color(basis)
+
+    basis_text = (
+        f"{_fmt_signed(basis)} ({_fmt_signed_pct(basis_pct)})"
+        if spot_price > 0 and future_price > 0
+        else "--"
+    )
+
+    contract_code = str(
+        getattr(snapshot, "contract_code", "")
+        or getattr(snapshot, "futures_id", "")
+        or "TXFR1"
+    )
+
+    futures_name = str(
+        getattr(snapshot, "futures_name", "")
+        or "台指期近月"
+    )
+
+    quote_source = str(getattr(snapshot, "quote_source", "") or "永豐即時")
+    quote_time = _market_future_update_time_text(
+        getattr(snapshot, "quote_time", ""),
+        action,
+    )
+
+    trading_session = str(
+        getattr(snapshot, "trading_session", "")
+        or session_text
+    )
+
+    # 上方價格摘要
+    contents.extend(
+        [
+            {
+                "type": "text",
+                "text": price_text,
+                "size": "xxl",
+                "weight": "bold",
+                "color": change_color,
+                "margin": "md",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": change_text,
+                "size": "md",
+                "weight": "bold",
+                "color": change_color,
+                "margin": "xs",
+                "wrap": True,
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#F8F9FA",
+                "cornerRadius": "12px",
+                "paddingAll": "10px",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "期現價差",
+                        "size": "xs",
+                        "color": "#888888",
+                    },
+                    {
+                        "type": "text",
+                        "text": basis_text,
+                        "size": "lg",
+                        "weight": "bold",
+                        "color": basis_color,
+                        "margin": "xs",
+                    },
+                ],
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+        ]
+    )
+
+    # 大盤功能按鈕 + 台指期日盤 / 全盤切換
     contents.extend(_market_index_buttons(action))
     contents.extend(_market_future_session_buttons(action))
+
+    # 主要數值卡片
+    contents.extend(
+        [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _metric_box("現貨", _fmt_market_price(spot_price)),
+                    _metric_box("成交量", _fmt_market_int(total_volume)),
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "sm",
+                "contents": [
+                    _metric_box("開盤", _fmt_market_price(open_price)),
+                    _metric_box("最高", _fmt_market_price(high_price)),
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "sm",
+                "contents": [
+                    _metric_box("最低", _fmt_market_price(low_price)),
+                    _metric_box(
+                        "買賣",
+                        (
+                            f"{_fmt_market_price(buy_price)} / {_fmt_market_price(sell_price)}"
+                            if buy_price > 0 or sell_price > 0
+                            else "--"
+                        ),
+                    ),
+                ],
+            },
+            {
+                "type": "separator",
+                "margin": "md",
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _info_row("商品", f"{futures_name} ({contract_code})", "#222222"),
+                    _info_row("時段", trading_session, "#222222"),
+                    _info_row("資料", quote_source, "#888888"),
+                    _info_row("更新", quote_time[:19] if quote_time else "--", "#888888"),
+                ],
+            },
+            {
+                "type": "text",
+                "text": "期現價差＝台指期近月 − 加權指數現貨。日盤收盤後，日盤更新時間會以 13:45 顯示。",
+                "size": "xs",
+                "color": "#888888",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+    )
 
     return {
         "type": "flex",
@@ -2250,6 +2386,7 @@ def _build_market_future_realtime_flex(
             "body": {
                 "type": "box",
                 "layout": "vertical",
+                "paddingAll": "14px",
                 "spacing": "sm",
                 "contents": contents,
             },
