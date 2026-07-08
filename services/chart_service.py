@@ -254,6 +254,36 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
 
     volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
 
+    try:
+        image_url = publish_figure(fig, f"{stock_id}_instant")
+
+        print(
+            "DEBUG publish instant figure",
+            "| stock_id =",
+            stock_id,
+            "| image_url =",
+            image_url,
+            flush=True,
+        )
+
+        return image_url or ""
+
+    except Exception:
+        import traceback
+
+        print(
+            "DEBUG publish instant figure failed",
+            "| stock_id =",
+            stock_id,
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+
+        return ""
+
+    finally:
+        plt.close(fig)
+
 def _to_lots(volume_value, volume_unit: str = "shares") -> float:
     """
     成交量統一轉成「張」。
