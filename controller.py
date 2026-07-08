@@ -4420,7 +4420,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if tf in {"1m", "5m"}:
                 t_append0 = time.perf_counter()
 
-                df = append_stock_snapshot_to_intraday_df(df, meta.stock_id)
+                df = append_stock_snapshot_to_intraday_df_fast(df, meta.stock_id)
 
                 t_append1 = time.perf_counter()
 
@@ -4434,7 +4434,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
             else:
                 print(
-                    "DEBUG stock timing append_snapshot",
+                    "DEBUG stock timing append_snapshot"
                     "| stock_id =", getattr(meta, "stock_id", ""),
                     "| tf =", tf,
                     "| rows =", 0 if df is None else len(df),
