@@ -2661,6 +2661,12 @@ def _lh_people_from_row(row):
 
 
 def _lh_people_text(value):
+    """
+    千張大戶人數顯示。
+
+    若資料為 None / 空值 / 0，顯示 --。
+    避免像國巨這種資料沒寫入時，畫面出現 0。
+    """
     if value is None:
         return "--"
 
@@ -2671,7 +2677,12 @@ def _lh_people_text(value):
 
     try:
         number = int(float(text))
+
+        if number <= 0:
+            return "--"
+
         return f"{number:,}"
+
     except Exception:
         return str(value)
 
@@ -2710,54 +2721,156 @@ def _large_holder_week_row(
     ratio_text: str,
     change_text: str,
     change_color: str,
+    is_header: bool = False,
 ) -> dict[str, Any]:
+    text_color = "#666666" if is_header else "#111111"
+    bg_color = "#F1F3F5" if is_header else "#FFFFFF"
+    weight = "bold" if is_header else "regular"
+
     return {
         "type": "box",
         "layout": "horizontal",
-        "spacing": "sm",
-        "margin": "sm",
+        "backgroundColor": bg_color,
+        "cornerRadius": "6px" if is_header else "0px",
+        "paddingAll": "5px" if is_header else "3px",
         "contents": [
             {
                 "type": "text",
                 "text": str(date_text or "--"),
-                "size": "sm",
-                "color": "#333333",
+                "size": "xs",
+                "color": text_color,
+                "weight": weight,
                 "flex": 2,
+                "align": "start",
             },
             {
                 "type": "text",
                 "text": str(people_text or "--"),
-                "size": "sm",
-                "color": "#333333",
+                "size": "xs",
+                "color": text_color,
+                "weight": weight,
                 "align": "end",
-                "flex": 4,
+                "flex": 3,
             },
             {
                 "type": "text",
                 "text": str(ratio_text or "--"),
-                "size": "sm",
-                "color": "#111111",
-                "weight": "bold",
+                "size": "xs",
+                "color": "#111111" if not is_header else text_color,
+                "weight": "bold" if not is_header else weight,
                 "align": "end",
                 "flex": 3,
             },
             {
                 "type": "text",
                 "text": str(change_text or "--"),
-                "size": "sm",
-                "color": change_color,
-                "weight": "bold",
+                "size": "xs",
+                "color": change_color if not is_header else text_color,
+                "weight": "bold" if not is_header else weight,
                 "align": "end",
                 "flex": 3,
             },
         ],
     }
 
+def _lh_with_unit_people(text: str) -> str:
+    text = str(text or "--").strip()
+
+    if text in {"", "--", "-"}:
+        return "--"
+
+    return f"{text} 人"
+
+
+def _lh_metric_box(
+    title: str,
+    value: str,
+    sub_value: str = "",
+    value_color: str = "#111111",
+) -> dict[str, Any]:
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": title,
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": value,
+            "size": "lg",
+            "weight": "bold",
+            "color": value_color,
+            "margin": "xs",
+            "wrap": True,
+        },
+    ]
+
+    if sub_value:
+        contents.append(
+            {
+                "type": "text",
+                "text": sub_value,
+                "size": "xs",
+                "color": "#888888",
+                "margin": "xs",
+                "wrap": True,
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "backgroundColor": "#F8F9FA",
+        "cornerRadius": "12px",
+        "paddingAll": "10px",
+        "contents": contents,
+    }
+
+
+def _lh_row_to_computed(row, sorted_rows: list) -> dict[str, Any]:
+    date_raw = _lh_get(
+        row,
+        "date",
+        "week",
+        "data_date",
+        "trade_date",
+        "record_date",
+        default="",
+    )
+
+    ratio_value = _lh_ratio_from_row(row)
+    change_value = _lh_change_from_row(row)
+    people_value = _lh_people_from_row(row)
+
+    if change_value is None:
+        try:
+            idx = sorted_rows.index(row)
+
+            if idx > 0:
+                this_ratio = _lh_float(_lh_ratio_from_row(row), default=0.0)
+                prev_ratio = _lh_float(_lh_ratio_from_row(sorted_rows[idx - 1]), default=0.0)
+
+                if this_ratio and prev_ratio:
+                    change_value = this_ratio - prev_ratio
+
+        except Exception:
+            pass
+
+    return {
+        "date": _lh_date_text(date_raw),
+        "people": _lh_people_text(people_value),
+        "ratio": _lh_pct_text(ratio_value),
+        "change": _lh_change_text(change_value),
+        "change_color": _lh_change_color(change_value),
+    }
+
 def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: str = "D"):
     """
     顯示個股大戶持股近 5 週。
     欄位：
-    日期 | 千張大戶人數 | 持股比 | 增減百分點
+    日期 | 千張大戶人數 | 持股比 | 增減
     """
     raw_rows = list(rows or [])
 
@@ -2772,209 +2885,159 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
         flush=True,
     )
 
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{stock_id} {stock_name}",
+            "weight": "bold",
+            "size": "xxl",
+            "color": "#111111",
+            "wrap": True,
+        }
+    ]
+
     if not raw_rows:
-        body_contents = [
-            {
-                "type": "text",
-                "text": f"{stock_id} {stock_name}",
-                "weight": "bold",
-                "size": "xxl",
-                "color": "#111111",
-            },
-            {
-                "type": "text",
-                "text": "大戶持股近5週",
-                "weight": "bold",
-                "size": "xl",
-                "color": "#444444",
-                "margin": "md",
-            },
-            {"type": "separator", "margin": "lg"},
-            {
-                "type": "text",
-                "text": "目前查無大戶持股資料",
-                "size": "md",
-                "color": "#777777",
-                "margin": "lg",
-            },
-        ]
+        contents.extend(
+            [
+                {
+                    "type": "text",
+                    "text": "大戶持股",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#444444",
+                    "margin": "sm",
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": "目前查無大戶持股資料。",
+                    "size": "sm",
+                    "color": "#777777",
+                    "margin": "md",
+                    "wrap": True,
+                },
+            ]
+        )
     else:
         sorted_rows = sorted(raw_rows, key=_lh_sort_key)
         latest_rows = list(reversed(sorted_rows[-5:]))
 
-        computed_rows = []
+        computed_rows = [
+            _lh_row_to_computed(row, sorted_rows)
+            for row in latest_rows
+        ]
 
-        for row in latest_rows:
-            date_raw = _lh_get(
-                row,
-                "date",
-                "week",
-                "data_date",
-                "trade_date",
-                "record_date",
-                default="",
-            )
+        latest = computed_rows[0] if computed_rows else {
+            "date": "--",
+            "people": "--",
+            "ratio": "--",
+            "change": "--",
+            "change_color": "#666666",
+        }
 
-            ratio_value = _lh_ratio_from_row(row)
-            change_value = _lh_change_from_row(row)
-            people_value = _lh_people_from_row(row)
-
-            if change_value is None:
-                try:
-                    idx = sorted_rows.index(row)
-
-                    if idx > 0:
-                        this_ratio = _lh_float(_lh_ratio_from_row(row), default=0.0)
-                        prev_ratio = _lh_float(_lh_ratio_from_row(sorted_rows[idx - 1]), default=0.0)
-
-                        if this_ratio and prev_ratio:
-                            change_value = this_ratio - prev_ratio
-
-                except Exception:
-                    pass
-
-            computed_rows.append(
+        contents.extend(
+            [
                 {
-                    "date": _lh_date_text(date_raw),
-                    "people": _lh_people_text(people_value),
-                    "ratio": _lh_pct_text(ratio_value),
-                    "change": _lh_change_text(change_value),
-                    "change_color": _lh_change_color(change_value),
-                }
-            )
+                    "type": "text",
+                    "text": f"大戶持股｜最新 {latest.get('date', '--')}",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#444444",
+                    "margin": "sm",
+                    "wrap": True,
+                },
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        _lh_metric_box(
+                            "千張大戶人數",
+                            _lh_with_unit_people(latest.get("people", "--")),
+                        ),
+                        _lh_metric_box(
+                            "持股比",
+                            latest.get("ratio", "--"),
+                        ),
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F8F9FA",
+                    "cornerRadius": "12px",
+                    "paddingAll": "10px",
+                    "margin": "sm",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "週變化",
+                            "size": "xs",
+                            "color": "#888888",
+                        },
+                        {
+                            "type": "text",
+                            "text": latest.get("change", "--"),
+                            "size": "lg",
+                            "weight": "bold",
+                            "color": latest.get("change_color", "#666666"),
+                            "margin": "xs",
+                        },
+                    ],
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": "近5週",
+                    "size": "md",
+                    "weight": "bold",
+                    "color": "#444444",
+                    "margin": "md",
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "sm",
+                    "spacing": "xs",
+                    "contents": [
+                        _large_holder_week_row(
+                            "日期",
+                            "人數",
+                            "持股比",
+                            "增減",
+                            "#666666",
+                            is_header=True,
+                        ),
+                        *[
+                            _large_holder_week_row(
+                                row["date"],
+                                row["people"],
+                                row["ratio"],
+                                row["change"],
+                                row["change_color"],
+                            )
+                            for row in computed_rows
+                        ],
+                    ],
+                },
+            ]
+        )
 
-        row_boxes = [
-            _large_holder_week_row(
-                row["date"],
-                row["people"],
-                row["ratio"],
-                row["change"],
-                row["change_color"],
-            )
-            for row in computed_rows
-        ]
-
-        body_contents = [
-            {
-                "type": "text",
-                "text": f"{stock_id} {stock_name}",
-                "weight": "bold",
-                "size": "xxl",
-                "color": "#111111",
-            },
-            {
-                "type": "text",
-                "text": "大戶持股近5週",
-                "weight": "bold",
-                "size": "xl",
-                "color": "#444444",
-                "margin": "md",
-            },
-            {"type": "separator", "margin": "lg"},
-            {
-                "type": "box",
-                "layout": "horizontal",
-                "spacing": "sm",
-                "margin": "lg",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "日期",
-                        "size": "xs",
-                        "color": "#888888",
-                        "flex": 2,
-                    },
-                    {
-                        "type": "text",
-                        "text": "千張大戶人數",
-                        "size": "xs",
-                        "color": "#888888",
-                        "align": "end",
-                        "flex": 4,
-                    },
-                    {
-                        "type": "text",
-                        "text": "持股比",
-                        "size": "xs",
-                        "color": "#888888",
-                        "align": "end",
-                        "flex": 3,
-                    },
-                    {
-                        "type": "text",
-                        "text": "增減百分點",
-                        "size": "xs",
-                        "color": "#888888",
-                        "align": "end",
-                        "flex": 3,
-                    },
-                ],
-            },
-            *row_boxes,
-        ]
-
-    body_contents.extend(
-        [
-            {
-                "type": "box",
-                "layout": "horizontal",
-                "spacing": "sm",
-                "margin": "xl",
-                "contents": [
-                    _postback_button(
-                        label="即時",
-                        data=f"{stock_id},instant,instant,{current_tf}",
-                        active=False,
-                    ),
-                    _postback_button(
-                        label="K線",
-                        data=f"{stock_id},k_line,k_line,{current_tf}",
-                        active=False,
-                    ),
-                ],
-            },
-            {
-                "type": "box",
-                "layout": "horizontal",
-                "spacing": "sm",
-                "margin": "sm",
-                "contents": [
-                    _postback_button(
-                        label="法人",
-                        data=f"{stock_id},chip,chip,{current_tf}",
-                        active=False,
-                    ),
-                    _postback_button(
-                        label="大戶",
-                        data=f"{stock_id},large_holder,large_holder,{current_tf}",
-                        active=True,
-                    ),
-                    _postback_button(
-                        label="融資券",
-                        data=f"{stock_id},margin,margin,{current_tf}",
-                        active=False,
-                    ),
-                    _postback_button(
-                        label="期貨",
-                        data=f"{stock_id},futures,futures,{current_tf}",
-                        active=False,
-                    ),
-                ],
-            },
-        ]
-    )
+    contents.extend(_mode_buttons(stock_id, "large_holder", current_tf))
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name} 大戶持股近5週",
+        "altText": f"{stock_id} {stock_name} 大戶持股",
         "contents": {
             "type": "bubble",
             "size": "mega",
             "body": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "20px",
-                "contents": body_contents,
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
             },
         },
     }
