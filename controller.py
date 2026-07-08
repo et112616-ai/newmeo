@@ -4275,7 +4275,13 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 flush=True,
             )
 
-            t_append0 = time.perf_counter()
+                if df is None or len(df) == 0:
+                    return {
+                        "type": "text",
+                        "text": "目前暫時抓不到這檔股票的行情資料。若是 Yahoo/yfinance 限流，請稍後再試；也可以先查法人、大戶、融資券。"
+                    }
+
+                t_append0 = time.perf_counter()
 
             if tf in {"1m", "5m"}:
                 import os
