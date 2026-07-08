@@ -4387,6 +4387,77 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 flush=True,
             )
 
+                    # 文字輸入預設是 instant，但 parser 可能給 D。
+        # 即時圖只適合 1m / 5m，所以預設改成 1m。
+        if action == "instant" and requested_tf not in {"1m", "5m"}:
+            requested_tf = "1m"
+
+        # 如果使用者在即時模式按 D/W/M，改用 K 線。
+        if action == "instant" and requested_tf in {"D", "W", "M"}:
+            action = "k_line"
+            current_mode = "k_line"
+
+        # 如果使用者在 K 線模式按 1m/5m，改用即時圖。
+        elif action == "k_line" and requested_tf in {"1m", "5m"}:
+            action = "instant"
+            current_mode = "instant"
+
+        # 即時 / K 線 / 法人圖都需要行情資料
+        if action in {"instant", "k_line", "chip"}:
+            df, tf = _get_history_df_tf(meta, requested_tf)
+
+            print(
+                "DEBUG stock timing history",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| action =", action,
+                "| requested_tf =", requested_tf,
+                "| final_tf =", tf,
+                "| rows =", 0 if df is None else len(df),
+                flush=True,
+            )
+
+            # 分K才需要補即時快照
+            if tf in {"1m", "5m"}:
+                t_append0 = time.perf_counter()
+
+                df = append_stock_snapshot_to_intraday_df(df, meta.stock_id)
+
+                t_append1 = time.perf_counter()
+
+                print(
+                    "DEBUG stock timing append_snapshot",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| tf =", tf,
+                    "| rows =", 0 if df is None else len(df),
+                    "| sec =", round(t_append1 - t_append0, 3),
+                    flush=True,
+                )
+            else:
+                print(
+                    "DEBUG stock timing append_snapshot",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| tf =", tf,
+                    "| rows =", 0 if df is None else len(df),
+                    "| sec = 0.0",
+                    flush=True,
+                )
+
+            t_meta0 = time.perf_counter()
+
+            price_meta = build_price_meta(df, tf)
+
+            t_meta1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing price_meta",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| tf =", tf,
+                "| price_info =", getattr(price_meta, "price_info", ""),
+                "| change_info =", getattr(price_meta, "change_info", ""),
+                "| sec =", round(t_meta1 - t_meta0, 3),
+                flush=True,
+            )
+
             if action == "instant":
                 t_chart0 = time.perf_counter()
 
@@ -4400,18 +4471,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     flush=True,
                 )
 
-                requested_tf = normalize_time_frame(requested_tf)
-                action = _normalize_action(action)
-                current_mode = _normalize_action(current_mode)
-
-                if requested_tf in {"D", "W", "M"} and action == "instant":
-                    action = "k_line"
-                    current_mode = "k_line"
-
-                elif requested_tf in {"1m", "5m"} and action == "k_line":
-                    action = "instant"
-                    current_mode = "instant"
-                
                 image_url = generate_instant_chart(df, meta.stock_id, stock_name)
 
                 print(
@@ -4421,7 +4480,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     "| image_url =", image_url,
                     flush=True,
                 )
-                
+
                 t_chart1 = time.perf_counter()
 
                 print(
@@ -4474,7 +4533,25 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if action == "k_line":
                 t_chart0 = time.perf_counter()
 
+                print(
+                    "DEBUG kline chart before generate",
+                    "| stock_id =", meta.stock_id,
+                    "| tf =", tf,
+                    "| df_is_none =", df is None,
+                    "| rows =", 0 if df is None else len(df),
+                    "| columns =", [] if df is None else list(df.columns),
+                    flush=True,
+                )
+
                 image_url = generate_kline_chart(df, meta.stock_id, stock_name, tf)
+
+                print(
+                    "DEBUG kline chart after generate",
+                    "| stock_id =", meta.stock_id,
+                    "| tf =", tf,
+                    "| image_url =", image_url,
+                    flush=True,
+                )
 
                 t_chart1 = time.perf_counter()
 
@@ -4526,37 +4603,58 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             if action == "chip":
-                import time
-
-                t_chip0 = time.perf_counter()
+                t_chart0 = time.perf_counter()
 
                 chip_rows = get_institutional_chips(meta.stock_id)
+                image_url = generate_chip_chart(meta.stock_id, stock_name, chip_rows)
 
-                t_chip1 = time.perf_counter()
+                t_chart1 = time.perf_counter()
 
-                flex = _build_stock_chip_flex(
+                print(
+                    "DEBUG stock timing chart",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
+                    "| tf =", tf,
+                    "| image_url =", bool(image_url),
+                    "| sec =", round(t_chart1 - t_chart0, 3),
+                    flush=True,
+                )
+
+                t_flex0 = time.perf_counter()
+
+                flex = _build_chart_flex(
                     stock_id=meta.stock_id,
                     stock_name=stock_name,
-                    chip_rows=chip_rows,
+                    image_url=image_url,
+                    price_info=price_meta.price_info,
+                    change_info=price_meta.change_info,
+                    update_time=price_meta.time_stamp,
+                    price_change=price_meta.price_change,
+                    active_mode="chip",
                     current_tf=tf,
+                    image_aspect_ratio="4:5",
                 )
 
                 t_flex1 = time.perf_counter()
 
                 print(
-                    "DEBUG stock timing chip_flex",
+                    "DEBUG stock timing flex",
                     "| stock_id =", getattr(meta, "stock_id", ""),
-                    "| data_sec =", round(t_chip1 - t_chip0, 3),
-                    "| flex_sec =", round(t_flex1 - t_chip1, 3),
+                    "| action =", action,
+                    "| sec =", round(t_flex1 - t_flex0, 3),
+                    flush=True,
+                )
+
+                print(
+                    "DEBUG stock timing total",
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
                     "| total_sec =", round(time.perf_counter() - stock_t0, 3),
-                    "| foreign_rows =", len((chip_rows or {}).get("foreign") or []),
-                    "| trust_rows =", len((chip_rows or {}).get("trust") or []),
-                    "| dealer_rows =", len((chip_rows or {}).get("dealer") or []),
                     flush=True,
                 )
 
                 return _reply_with_title(
-                    f"{stock_name} 法人",
+                    f"{stock_name} 法人籌碼",
                     flex,
                 )
 
