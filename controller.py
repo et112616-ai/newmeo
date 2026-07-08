@@ -4400,6 +4400,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     flush=True,
                 )
 
+                requested_tf = normalize_time_frame(requested_tf)
+                action = _normalize_action(action)
+                current_mode = _normalize_action(current_mode)
+
+                if requested_tf in {"D", "W", "M"} and action == "instant":
+                    action = "k_line"
+                    current_mode = "k_line"
+
+                elif requested_tf in {"1m", "5m"} and action == "k_line":
+                    action = "instant"
+                    current_mode = "instant"
+                
                 image_url = generate_instant_chart(df, meta.stock_id, stock_name)
 
                 print(
