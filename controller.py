@@ -770,198 +770,169 @@ def _build_market_chip_flex(snapshot) -> dict[str, Any]:
         },
     }
 
-def _get_history_df_tf(meta, requested_tf):
+def _clone_meta_with_yf_symbol(meta, yf_symbol: str):
     """
-    取得個股行情資料。
-
-    1m / 5m 優先順序：
-    1. Yahoo chart API direct
-    2. Shioaji kbars
-    3. 原本 get_history() / yfinance
-
-    D / W / M：
-    維持原本 get_history()。
+    複製 meta，並只替換 yf_symbol。
+    用途：3081.TW 抓不到時，改試 3081.TWO。
     """
-    import os
-    import time
+    try:
+        from dataclasses import is_dataclass, replace
 
-    t0 = time.perf_counter()
+        if is_dataclass(meta):
+            return replace(meta, yf_symbol=yf_symbol)
+    except Exception:
+        pass
 
-    tf = str(requested_tf or "D").strip()
-    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
-    yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
+    try:
+        import copy
 
-    if tf in {"1m", "5m"}:
-        # -------------------------
-        # 1. Yahoo chart API direct
-        # -------------------------
+        cloned = copy.copy(meta)
+        setattr(cloned, "yf_symbol", yf_symbol)
+        return cloned
+
+    except Exception:
+        pass
+
+    # 最後備援：做一個簡單 proxy。
+    from types import SimpleNamespace
+
+    data = {}
+
+    for key in [
+        "stock_id",
+        "stock_name",
+        "name",
+        "yf_symbol",
+        "input_text",
+    ]:
         try:
-            t_yahoo0 = time.perf_counter()
+            data[key] = getattr(meta, key)
+        except Exception:
+            pass
 
-            df = get_stock_intraday_yahoo_direct(
-                stock_id=stock_id,
-                yf_symbol=yf_symbol,
-                time_frame=tf,
-                timeout=int(os.getenv("YAHOO_DIRECT_TIMEOUT_SECONDS", "5")),
+    data["yf_symbol"] = yf_symbol
+
+    return SimpleNamespace(**data)
+
+
+def _is_empty_history_df(df) -> bool:
+    try:
+        return df is None or len(df) == 0
+    except Exception:
+        return True
+
+
+def _is_yfinance_rate_limit_error(exc: Exception) -> bool:
+    text = repr(exc)
+
+    return (
+        "YFRateLimitError" in text
+        or "Too Many Requests" in text
+        or "Rate limited" in text
+    )
+
+
+def _get_history_df_tf_safe(meta, requested_tf: str):
+    """
+    安全版歷史資料取得。
+
+    先用原本 meta.yf_symbol 查。
+    如果失敗或空資料，且 symbol 是 .TW，改試 .TWO。
+    適用 3081 這類上櫃股票。
+    """
+    original_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
+    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+
+    try:
+        df, tf = _get_history_df_tf(meta, requested_tf)
+
+        if not _is_empty_history_df(df):
+            return df, tf
+
+        print(
+            "DEBUG history empty",
+            "| stock_id =",
+            stock_id,
+            "| yf_symbol =",
+            original_symbol,
+            "| requested_tf =",
+            requested_tf,
+            flush=True,
+        )
+
+    except Exception as exc:
+        if not _is_yfinance_rate_limit_error(exc):
+            raise
+
+        print(
+            "DEBUG yfinance rate limited on first try",
+            "| stock_id =",
+            stock_id,
+            "| yf_symbol =",
+            original_symbol,
+            "| requested_tf =",
+            requested_tf,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+
+    # .TW 失敗時，改試 .TWO。
+    # 例如 3081 聯亞：3081.TWO。
+    fallback_symbol = ""
+
+    if stock_id:
+        fallback_symbol = f"{stock_id}.TWO"
+
+    if fallback_symbol and fallback_symbol != original_symbol:
+        try:
+            meta2 = _clone_meta_with_yf_symbol(meta, fallback_symbol)
+
+            print(
+                "DEBUG history retry with TWO",
+                "| stock_id =",
+                stock_id,
+                "| old_symbol =",
+                original_symbol,
+                "| new_symbol =",
+                fallback_symbol,
+                "| requested_tf =",
+                requested_tf,
+                flush=True,
             )
 
-            t_yahoo1 = time.perf_counter()
+            df2, tf2 = _get_history_df_tf(meta2, requested_tf)
 
-            if df is not None and not df.empty:
+            if not _is_empty_history_df(df2):
+                return df2, tf2
+
+            print(
+                "DEBUG history TWO empty",
+                "| stock_id =",
+                stock_id,
+                "| yf_symbol =",
+                fallback_symbol,
+                "| requested_tf =",
+                requested_tf,
+                flush=True,
+            )
+
+        except Exception as exc2:
+            if _is_yfinance_rate_limit_error(exc2):
                 print(
-                    "_get_history_df_tf | source=yahoo_direct",
+                    "DEBUG yfinance rate limited on TWO retry",
                     "| stock_id =",
                     stock_id,
                     "| yf_symbol =",
-                    yf_symbol,
-                    "| requested_tf=" + str(requested_tf),
-                    "| tf=" + tf,
-                    "| rows=",
-                    len(df),
-                    "| sec=",
-                    round(t_yahoo1 - t_yahoo0, 3),
-                    "| total_sec=",
-                    round(time.perf_counter() - t0, 3),
+                    fallback_symbol,
+                    "| requested_tf =",
+                    requested_tf,
+                    "| error =",
+                    repr(exc2),
                     flush=True,
                 )
-
-                return df, tf
-
-            print(
-                "_get_history_df_tf | source=yahoo_direct_empty",
-                "| stock_id =",
-                stock_id,
-                "| yf_symbol =",
-                yf_symbol,
-                "| requested_tf=" + str(requested_tf),
-                "| tf=" + tf,
-                "| sec=",
-                round(t_yahoo1 - t_yahoo0, 3),
-                flush=True,
-            )
-
-        except Exception as exc:
-            print(
-                "_get_history_df_tf | source=yahoo_direct_failed",
-                "| stock_id =",
-                stock_id,
-                "| yf_symbol =",
-                yf_symbol,
-                "| requested_tf=" + str(requested_tf),
-                "| tf=" + tf,
-                "| error=",
-                repr(exc),
-                flush=True,
-            )
-
-        # -------------------------
-        # 2. Shioaji kbars fallback
-        # -------------------------
-        use_shioaji_kbars = str(os.getenv("USE_SHIOAJI_KBARS_FALLBACK", "1")).strip() != "0"
-
-        if use_shioaji_kbars:
-            try:
-                t_shioaji0 = time.perf_counter()
-
-                df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
-
-                t_shioaji1 = time.perf_counter()
-
-                if df is not None and not df.empty:
-                    print(
-                        "_get_history_df_tf | source=shioaji_kbars",
-                        "| stock_id =",
-                        stock_id,
-                        "| requested_tf=" + str(requested_tf),
-                        "| tf=" + tf,
-                        "| rows=",
-                        len(df),
-                        "| sec=",
-                        round(t_shioaji1 - t_shioaji0, 3),
-                        "| total_sec=",
-                        round(time.perf_counter() - t0, 3),
-                        flush=True,
-                    )
-
-                    return df, tf
-
-                print(
-                    "_get_history_df_tf | source=shioaji_kbars_empty",
-                    "| stock_id =",
-                    stock_id,
-                    "| requested_tf=" + str(requested_tf),
-                    "| tf=" + tf,
-                    "| sec=",
-                    round(t_shioaji1 - t_shioaji0, 3),
-                    flush=True,
-                )
-
-            except Exception as exc:
-                print(
-                    "_get_history_df_tf | source=shioaji_kbars_failed",
-                    "| stock_id =",
-                    stock_id,
-                    "| requested_tf=" + str(requested_tf),
-                    "| tf=" + tf,
-                    "| error=",
-                    repr(exc),
-                    flush=True,
-                )
-
-    # -------------------------
-    # 3. 原本 get_history() fallback
-    # -------------------------
-    t_history0 = time.perf_counter()
-
-    try:
-        result = get_history(meta, requested_tf)
-
-        t_history1 = time.perf_counter()
-
-        if isinstance(result, tuple):
-            df, tf = result
-        else:
-            df = result
-            tf = requested_tf
-
-        print(
-            "_get_history_df_tf | source=get_history",
-            "| stock_id =",
-            stock_id,
-            "| yf_symbol =",
-            yf_symbol,
-            "| requested_tf=" + str(requested_tf),
-            "| tf=" + str(tf),
-            "| df_type=" + str(type(df)),
-            "| rows=",
-            0 if df is None else len(df),
-            "| sec=",
-            round(t_history1 - t_history0, 3),
-            "| total_sec=",
-            round(time.perf_counter() - t0, 3),
-            flush=True,
-        )
-
-        return df, tf
-
-    except Exception as exc:
-        print(
-            "_get_history_df_tf | source=get_history_failed",
-            "| stock_id =",
-            stock_id,
-            "| yf_symbol =",
-            yf_symbol,
-            "| requested_tf=" + str(requested_tf),
-            "| error=",
-            repr(exc),
-            "| sec=",
-            round(time.perf_counter() - t_history0, 3),
-            "| total_sec=",
-            round(time.perf_counter() - t0, 3),
-            flush=True,
-        )
-
-        raise
+            else:
+                raise
 
 def _snap_get(snapshot: dict, *keys, default=None):
     if not isinstance(snapshot, dict):
