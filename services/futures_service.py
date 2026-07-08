@@ -841,9 +841,17 @@ def _generate_futures_kline_chart(
     futures_name: str,
     contract_date: str,
     session: str,
+    current_price: float = 0.0,
+    quote_time: str = "",
 ) -> str:
     """
-    產生股票期貨 K 線圖（含成交量）。
+    產生股票期貨 K 線圖。
+
+    修正版重點：
+    1. 上方 K 線與下方成交量共用同一組 x_values。
+    2. 不使用 fig.tight_layout()，避免上下圖被自動調成不同寬度。
+    3. 用 GridSpec 固定 left/right/top/bottom。
+    4. 強制 ax_k / ax_v 使用相同 xlim。
     """
     if not rows:
         return ""
@@ -885,10 +893,30 @@ def _generate_futures_kline_chart(
     if not chart_rows:
         return ""
 
-    df = pd.DataFrame(chart_rows)
+    df = pd.DataFrame(chart_rows).copy()
+    df = df.sort_values("date").reset_index(drop=True)
 
-    fig = plt.figure(figsize=(7.2, 5.8), dpi=130, facecolor="white")
-    gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.06)
+    # 顯示最近 30 根，避免期貨卡圖太擠。
+    df = df.tail(30).reset_index(drop=True)
+
+    # 計算短均線，讓圖不只看 K 棒。
+    # 期貨資料根數通常不多，min_periods=1 可以避免前面一段空白。
+    df["MA5"] = df["close"].astype(float).rolling(5, min_periods=1).mean()
+    df["MA10"] = df["close"].astype(float).rolling(10, min_periods=1).mean()
+
+    fig = plt.figure(figsize=(7.6, 5.6), dpi=130, facecolor="white")
+
+    # 固定整張圖的邊界，避免上下圖因 ytick / ylabel 被 tight_layout 調歪。
+    gs = gridspec.GridSpec(
+        2,
+        1,
+        height_ratios=[3.2, 1.05],
+        hspace=0.03,
+        left=0.11,
+        right=0.96,
+        top=0.88,
+        bottom=0.11,
+    )
 
     ax_k = fig.add_subplot(gs[0])
     ax_v = fig.add_subplot(gs[1], sharex=ax_k)
@@ -896,25 +924,34 @@ def _generate_futures_kline_chart(
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
-    x = list(range(len(df)))
+    x_values = list(range(len(df)))
     width = 0.58
 
-    for i in range(len(df)):
+    for i in x_values:
         row = df.iloc[i]
 
         o = float(row["open"])
         h = float(row["high"])
         l = float(row["low"])
         c = float(row["close"])
+        vol = int(row["volume"])
 
-        color = "#FF3B30" if c >= o else "#34C759"
+        color = "#FF2D2D" if c >= o else "#00B050"
 
-        # 上下影線
-        ax_k.vlines(i, l, h, linewidth=1.0, color=color)
+        # K 線影線
+        ax_k.vlines(
+            i,
+            l,
+            h,
+            linewidth=1.0,
+            color=color,
+            zorder=2,
+        )
 
-        # K棒實體
+        # K 線實體
         lower = min(o, c)
         height = abs(c - o)
+
         if height <= 0:
             height = 0.01
 
@@ -925,32 +962,112 @@ def _generate_futures_kline_chart(
             width=width,
             color=color,
             align="center",
+            zorder=3,
         )
 
-        # 成交量
+        # 成交量：使用同一個 i，確保與上方 K 棒垂直對齊。
         ax_v.bar(
             i,
-            int(row["volume"]),
+            vol,
             width=width,
             color=color,
+            align="center",
+            edgecolor="none",
+            zorder=3,
         )
 
-    session_label = "全盤" if session == "盤後" else "日盤"
-
-    ax_k.set_title(
-        f"{futures_name} {contract_date} {session_label}",
-        fontsize=13,
-        fontweight="bold",
+    # 均線
+    ax_k.plot(
+        x_values,
+        df["MA5"].values,
+        linewidth=1.2,
+        color="#1F77B4",
+        label="MA5",
+        zorder=4,
     )
 
-    ax_k.grid(True, linestyle=":", alpha=0.4)
-    ax_v.grid(True, linestyle=":", alpha=0.35)
+    ax_k.plot(
+        x_values,
+        df["MA10"].values,
+        linewidth=1.2,
+        color="#FFB000",
+        label="MA10",
+        zorder=4,
+    )
 
-    ax_v.set_ylabel("成交量", fontsize=9)
+    if session == "全盤":
+        session_label = "全盤"
+    elif session == "盤後":
+        session_label = "盤後"
+    else:
+        session_label = "日盤"
 
-    labels = [str(d)[5:] for d in df["date"].tolist()]
+    latest_date = str(df["date"].iloc[-1])
+    latest_close = float(df["close"].iloc[-1])
+
+    ax_k.set_title(
+        f"{futures_name or futures_id}｜{contract_date}｜{session_label}｜{latest_date} 收 {latest_close:g}",
+        fontsize=12,
+        fontweight="bold",
+        pad=8,
+    )
+
+    ax_k.grid(True, linestyle=":", alpha=0.35, zorder=1)
+    ax_v.grid(True, linestyle=":", alpha=0.30, zorder=1)
+
+    # 右側價格軸比較像行情軟體，也可避免左側成交量字壓縮圖面。
+    ax_k.yaxis.tick_right()
+    ax_k.yaxis.set_label_position("right")
+    ax_v.yaxis.tick_right()
+    ax_v.yaxis.set_label_position("right")
+
+    ax_k.tick_params(axis="y", labelsize=8)
+    ax_v.tick_params(axis="y", labelsize=8)
+    ax_v.set_ylabel("量", fontsize=8)
+
+    ax_k.legend(
+        loc="upper left",
+        fontsize=8,
+        frameon=False,
+        ncol=2,
+    )
+
+    # 即時現價線
+    if current_price and current_price > 0:
+        ax_k.axhline(
+            current_price,
+            linestyle="--",
+            linewidth=1.1,
+            alpha=0.75,
+            color="#666666",
+            zorder=1,
+        )
+
+        ax_k.text(
+            0.99,
+            current_price,
+            f" 現價 {current_price:g}",
+            transform=ax_k.get_yaxis_transform(),
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            fontweight="bold",
+            color="#444444",
+        )
+
+    labels = [str(d)[5:].replace("-", "/") for d in df["date"].tolist()]
     step = max(1, len(labels) // 6)
     ticks = list(range(0, len(labels), step))
+
+    if (len(labels) - 1) not in ticks:
+        ticks.append(len(labels) - 1)
+
+    # 上下圖固定同一個 x 範圍，這是對齊的關鍵。
+    x_min = -0.8
+    x_max = len(df) - 0.2
+
+    ax_k.set_xlim(x_min, x_max)
+    ax_v.set_xlim(x_min, x_max)
 
     ax_v.set_xticks(ticks)
     ax_v.set_xticklabels(
@@ -961,14 +1078,18 @@ def _generate_futures_kline_chart(
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    ax_k.spines["top"].set_visible(False)
-    ax_k.spines["right"].set_visible(False)
-    ax_v.spines["top"].set_visible(False)
-    ax_v.spines["right"].set_visible(False)
+    for spine in ["top", "left"]:
+        ax_k.spines[spine].set_visible(False)
+        ax_v.spines[spine].set_visible(False)
 
-    fig.tight_layout()
+    for spine in ["right", "bottom"]:
+        ax_k.spines[spine].set_alpha(0.35)
+        ax_v.spines[spine].set_alpha(0.35)
 
-    return publish_figure(fig, f"{futures_id}_futures_kline")
+    try:
+        return publish_figure(fig, f"{futures_id}_futures_kline")
+    finally:
+        plt.close(fig)
 
 def get_stock_futures_snapshot(
     stock_id: str,
