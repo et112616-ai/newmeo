@@ -410,12 +410,24 @@ def _row_close_price(row: dict) -> float:
 
 def _row_price(row: dict) -> float:
     """
-    歷史日成交價格。
+    期貨 K 線收盤價。
 
-    這裡刻意不 fallback 到 settlement_price。
-    settlement_price 是另外一個欄位，不是 K 線收盤價。
+    注意：
+    這裡不可讀 settlement_price。
+    settlement_price 不是 K 線收盤價，容易造成圖表出現 15.01 這種錯誤價格。
     """
-    return _row_close_price(row)
+    for key in [
+        "close",
+        "Close",
+        "close_price",
+        "收盤價",
+    ]:
+        price = _safe_float(row.get(key))
+
+        if price > 0:
+            return price
+
+    return 0.0
 
 def _row_change(row: dict) -> float:
     for key in [
@@ -783,28 +795,36 @@ def _is_regular_session(value: Any) -> bool:
 
 def _is_valid_trade_row(row: dict) -> bool:
     """
-    只保留有效的單一契約交易資料。
+    只保留真正可以畫 K 線的 OHLC 交易列。
 
-    排除：
-    - 跨月價差，例如 202609/202612
-    - contract_date 空白 / 全月份
-    - position / 未平倉列
-    - 沒有真正成交收盤價的列
-
-    注意：
-    settlement_price 不等於 K 線 close，不能拿來當價格。
+    不用 session 直接排除 position，因為有些資料源 session 命名不穩。
+    直接用 OHLC 合理性判斷。
     """
     contract = _normalize_contract_date(row.get("contract_date"))
 
     if not contract:
         return False
 
-    if _is_position_session(_get_session_value(row)):
+    close = _row_price(row)
+
+    if close <= 0:
         return False
 
-    price = _row_close_price(row)
+    open_price = _get_open_price(row)
+    high_price = _get_high_price(row)
+    low_price = _get_low_price(row)
 
-    if price <= 0:
+    if open_price <= 0 or high_price <= 0 or low_price <= 0:
+        return False
+
+    # 高低價基本合理性。
+    if high_price < low_price:
+        return False
+
+    if high_price < max(open_price, close):
+        return False
+
+    if low_price > min(open_price, close):
         return False
 
     return True
@@ -818,10 +838,11 @@ def _prepare_futures_kline_rows(
     準備股票期貨 K 線資料。
 
     day：
-    - 只畫真正日盤交易列，不畫 position / 未平倉列
+    - 優先用 regular / day / 一般 / 日盤 / position 中的有效 OHLC。
+    - 若 session 判斷失敗，fallback 到所有有效 OHLC rows。
 
     all：
-    - 每個交易日把日盤 + 盤後合併成一根全盤 K
+    - 每個交易日把有效 OHLC rows 合併成一根全盤 K。
     """
     session_mode = str(session_mode or "day").strip().lower()
 
@@ -856,9 +877,17 @@ def _prepare_futures_kline_rows(
         same_contract_rows.append(item)
 
     if not same_contract_rows:
+        print(
+            "DEBUG futures kline no valid OHLC rows",
+            "| contract =",
+            contract,
+            "| raw_rows =",
+            len(rows or []),
+            flush=True,
+        )
         return []
 
-    # 全盤：每個交易日合併日盤 + 盤後
+    # 全盤：每個交易日合併有效 OHLC rows。
     if session_mode == "all":
         grouped: dict[str, list[dict]] = {}
 
@@ -875,14 +904,25 @@ def _prepare_futures_kline_rows(
 
         return combined_rows[-30:]
 
-    # 日盤：只取真正 regular / day，不取 position / 未平倉列
+    # 日盤：優先取 regular / day / 一般 / 日盤 / position。
+    # position 保留是為了避免 FinMind session 命名造成完全無圖；
+    # 但是否能畫圖仍由 _is_valid_trade_row 的 OHLC 合理性決定。
     regular_rows = [
         r for r in same_contract_rows
         if _is_regular_session(_get_session_value(r))
     ]
 
+    # 如果 session 名稱沒有命中，退回所有有效 OHLC rows。
     if not regular_rows:
-        return []
+        print(
+            "DEBUG futures kline regular empty; fallback all valid rows",
+            "| contract =",
+            contract,
+            "| valid_rows =",
+            len(same_contract_rows),
+            flush=True,
+        )
+        regular_rows = same_contract_rows
 
     regular_rows = sorted(
         regular_rows,
@@ -892,7 +932,20 @@ def _prepare_futures_kline_rows(
     by_date: dict[str, dict] = {}
 
     for r in regular_rows:
-        by_date[r["_trade_date_norm"]] = r
+        date_key = r["_trade_date_norm"]
+
+        old = by_date.get(date_key)
+
+        if old is None:
+            by_date[date_key] = r
+            continue
+
+        # 同一天有多列時，優先取成交量較大的那列。
+        old_volume = _safe_int(old.get("volume"))
+        new_volume = _safe_int(r.get("volume"))
+
+        if new_volume >= old_volume:
+            by_date[date_key] = r
 
     return list(by_date.values())[-30:]
 
