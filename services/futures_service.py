@@ -111,6 +111,151 @@ def _safe_int(value: Any, default: int = 0) -> int:
     except Exception:
         return default
 
+def _get_open_interest_from_row(row: dict) -> int:
+    """
+    從不同可能欄位取未平倉。
+
+    FinMind / Shioaji / 不同資料整理版本可能欄位不同。
+    """
+    if not isinstance(row, dict):
+        return 0
+
+    for key in [
+        "open_interest",
+        "openInterest",
+        "open_interest_volume",
+        "open_interest_qty",
+        "未沖銷契約數",
+        "未平倉",
+        "未平倉量",
+        "OI",
+        "oi",
+    ]:
+        value = _safe_int(row.get(key))
+
+        if value > 0:
+            return value
+
+    return 0
+
+
+def _find_open_interest_from_rows(
+    rows: list[dict],
+    selected_row: dict | None = None,
+) -> int:
+    """
+    找股票期貨未平倉。
+
+    優先順序：
+    1. selected_row 本身
+    2. 同交易日、同契約的其他 row，例如 position row
+    3. 同契約的最近一筆有 open_interest 的 row
+    4. 全資料最近一筆有 open_interest 的 row
+    """
+    if selected_row:
+        oi = _get_open_interest_from_row(selected_row)
+
+        if oi > 0:
+            return oi
+
+    rows = list(rows or [])
+
+    if not rows:
+        return 0
+
+    selected_contract = ""
+    selected_date = ""
+
+    if selected_row:
+        selected_contract = (
+            selected_row.get("_contract_norm")
+            or _normalize_contract_date(selected_row.get("contract_date"))
+        )
+        selected_date = (
+            selected_row.get("_trade_date_norm")
+            or _normalize_trade_date(selected_row.get("date"))
+        )
+
+    # 1. 同日期、同契約
+    if selected_contract and selected_date:
+        for r in reversed(rows):
+            r_contract = (
+                r.get("_contract_norm")
+                or _normalize_contract_date(r.get("contract_date"))
+            )
+            r_date = (
+                r.get("_trade_date_norm")
+                or _normalize_trade_date(r.get("date"))
+            )
+
+            if r_contract == selected_contract and r_date == selected_date:
+                oi = _get_open_interest_from_row(r)
+
+                if oi > 0:
+                    return oi
+
+    # 2. 同契約最近一筆
+    if selected_contract:
+        same_contract_rows = []
+
+        for r in rows:
+            r_contract = (
+                r.get("_contract_norm")
+                or _normalize_contract_date(r.get("contract_date"))
+            )
+
+            if r_contract == selected_contract:
+                same_contract_rows.append(r)
+
+        same_contract_rows = sorted(
+            same_contract_rows,
+            key=lambda r: _normalize_trade_date(r.get("date")),
+        )
+
+        for r in reversed(same_contract_rows):
+            oi = _get_open_interest_from_row(r)
+
+            if oi > 0:
+                return oi
+
+    # 3. 全資料最近一筆
+    sorted_rows = sorted(
+        rows,
+        key=lambda r: _normalize_trade_date(r.get("date")),
+    )
+
+    for r in reversed(sorted_rows):
+        oi = _get_open_interest_from_row(r)
+
+        if oi > 0:
+            return oi
+
+    return 0
+
+
+def _has_afterhours_rows_for_contract(rows: list[dict], contract: str) -> bool:
+    """
+    判斷該契約是否真的有盤後 / 夜盤 row。
+    若沒有，全盤圖應 fallback 成日盤圖。
+    """
+    contract = str(contract or "").strip()
+
+    if not contract:
+        return False
+
+    for r in rows or []:
+        r_contract = (
+            r.get("_contract_norm")
+            or _normalize_contract_date(r.get("contract_date"))
+        )
+
+        if r_contract != contract:
+            continue
+
+        if _is_afterhours_session(_get_session_value(r)):
+            return True
+
+    return False
 
 def _clean_stock_id(stock_id: str) -> str:
     return str(stock_id or "").replace(".TW", "").replace(".TWO", "").strip()
@@ -838,11 +983,13 @@ def _prepare_futures_kline_rows(
     準備股票期貨 K 線資料。
 
     day：
-    - 優先用 regular / day / 一般 / 日盤 / position 中的有效 OHLC。
-    - 若 session 判斷失敗，fallback 到所有有效 OHLC rows。
+    - 優先取日盤 / regular rows。
+    - 若 session 名稱不穩，fallback 到所有有效 OHLC rows。
 
     all：
-    - 每個交易日把有效 OHLC rows 合併成一根全盤 K。
+    - 若該契約真的有盤後 / 夜盤資料，才合併全盤。
+    - 若沒有盤後 / 夜盤資料，直接 fallback 日盤。
+      例如：台達電期貨沒有全盤，按全盤應等於日盤圖。
     """
     session_mode = str(session_mode or "day").strip().lower()
 
@@ -887,7 +1034,27 @@ def _prepare_futures_kline_rows(
         )
         return []
 
-    # 全盤：每個交易日合併有效 OHLC rows。
+    # 如果使用者按全盤，但這個契約沒有盤後資料，直接 fallback 日盤。
+    if session_mode == "all":
+        has_afterhours = _has_afterhours_rows_for_contract(
+            same_contract_rows,
+            contract,
+        )
+
+        if not has_afterhours:
+            print(
+                "DEBUG futures all fallback to day",
+                "| contract =",
+                contract,
+                "| reason = no_afterhours_rows",
+                "| valid_rows =",
+                len(same_contract_rows),
+                flush=True,
+            )
+
+            session_mode = "day"
+
+    # 全盤：每個交易日合併日盤 + 盤後。
     if session_mode == "all":
         grouped: dict[str, list[dict]] = {}
 
@@ -904,9 +1071,7 @@ def _prepare_futures_kline_rows(
 
         return combined_rows[-30:]
 
-    # 日盤：優先取 regular / day / 一般 / 日盤 / position。
-    # position 保留是為了避免 FinMind session 命名造成完全無圖；
-    # 但是否能畫圖仍由 _is_valid_trade_row 的 OHLC 合理性決定。
+    # 日盤：優先取 regular / day / 一般 / 日盤。
     regular_rows = [
         r for r in same_contract_rows
         if _is_regular_session(_get_session_value(r))
@@ -940,7 +1105,7 @@ def _prepare_futures_kline_rows(
             by_date[date_key] = r
             continue
 
-        # 同一天有多列時，優先取成交量較大的那列。
+        # 同一天多列時，優先取成交量較大的那列。
         old_volume = _safe_int(old.get("volume"))
         new_volume = _safe_int(r.get("volume"))
 
@@ -1425,8 +1590,9 @@ def get_stock_futures_snapshot(
         trade_date = _normalize_trade_date(
             selected_row.get("date")
         )
-        open_interest = _safe_int(
-            selected_row.get("open_interest")
+        open_interest = _find_open_interest_from_rows(
+            selected_rows,
+            selected_row,
         )
         settlement_price = _safe_float(
             selected_row.get("settlement_price")
@@ -1452,6 +1618,8 @@ def get_stock_futures_snapshot(
             shioaji_quote.get("total_volume")
             or shioaji_quote.get("volume")
         )
+        if open_interest <= 0:
+            open_interest = _get_open_interest_from_row(shioaji_quote)
 
         quote_source = "永豐即時"
         quote_time = str(
