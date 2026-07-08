@@ -225,13 +225,15 @@ def _is_afterhours_session(value: Any) -> bool:
 def _is_regular_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
+    if _is_position_session(text):
+        return False
+
     return (
         "regular" in text
         or "day" in text
         or "一般" in text
         or "日盤" in text
     )
-
 
 def _display_session(value: Any) -> str:
     if _is_afterhours_session(value):
@@ -245,19 +247,32 @@ def _display_session(value: Any) -> str:
     return text or "--"
 
 
-def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
+def _pick_near_month_prefer_afterhours(
+    rows: list[dict],
+    session_mode: str = "day",
+) -> dict | None:
     """
-    選資料規則：
+    選近月資料。
 
-    1. 找最新資料日期
-    2. 最新日期中，找 contract_date 最小者，也就是近月
-    3. 同一近月內，盤後優先
-    4. 沒盤後，用日盤
-    5. session 欄位不明時，用近月最後一筆
+    day：
+    - 只選真正日盤交易列
+    - 不選 position / 未平倉列
+
+    all：
+    - 仍然只從有效交易列選近月錨點
+    - 後續 _prepare_futures_kline_rows() 會再合併日盤 + 盤後
     """
+    session_mode = str(session_mode or "day").strip().lower()
+
+    if session_mode not in {"day", "all"}:
+        session_mode = "day"
+
     valid_rows: list[dict] = []
 
-    for r in rows:
+    for r in rows or []:
+        if not _is_valid_trade_row(r):
+            continue
+
         trade_date = _normalize_trade_date(r.get("date"))
         contract = _normalize_contract_date(r.get("contract_date"))
 
@@ -293,24 +308,28 @@ def _pick_near_month_prefer_afterhours(rows: list[dict]) -> dict | None:
     if not near_rows:
         return None
 
+    regular_rows = [
+        r for r in near_rows
+        if _is_regular_session(_get_session_value(r))
+    ]
+
     afterhours_rows = [
         r for r in near_rows
-        if _is_afterhours_session(r.get("trading_session"))
+        if _is_afterhours_session(_get_session_value(r))
     ]
+
+    if session_mode == "day":
+        if regular_rows:
+            return regular_rows[-1]
+        return None
 
     if afterhours_rows:
         return afterhours_rows[-1]
-
-    regular_rows = [
-        r for r in near_rows
-        if _is_regular_session(r.get("trading_session"))
-    ]
 
     if regular_rows:
         return regular_rows[-1]
 
     return near_rows[-1]
-
 
 def _get_spot_price(stock_id: str) -> float:
     """
@@ -366,12 +385,20 @@ def _get_spot_price(stock_id: str) -> float:
     return 0.0
 
 
-def _row_price(row: dict) -> float:
+def _row_close_price(row: dict) -> float:
+    """
+    K 線與日成交價格只允許使用真正的成交收盤價。
+
+    不要把 settlement_price 當成 close。
+    FinMind 的 position / 未平倉列可能只有結算或部位資訊，
+    如果拿來畫 K 線，就會出現像「收 15.01」這種錯誤。
+    """
     for key in [
         "close",
         "Close",
-        "settlement_price",
-        "SettlementPrice",
+        "close_price",
+        "ClosePrice",
+        "收盤價",
     ]:
         price = _safe_float(row.get(key))
 
@@ -380,6 +407,15 @@ def _row_price(row: dict) -> float:
 
     return 0.0
 
+
+def _row_price(row: dict) -> float:
+    """
+    歷史日成交價格。
+
+    這裡刻意不 fallback 到 settlement_price。
+    settlement_price 是另外一個欄位，不是 K 線收盤價。
+    """
+    return _row_close_price(row)
 
 def _row_change(row: dict) -> float:
     for key in [
@@ -599,38 +635,42 @@ def _pick_chart_anchor_row(rows: list[dict]) -> dict | None:
     return latest_rows[-1]
 
 def _get_open_price(row: dict) -> float:
+    close = _row_close_price(row)
+
     return _safe_float(
         row.get("open")
         or row.get("Open")
         or row.get("open_price")
         or row.get("開盤價")
-        or _row_price(row)
+        or close
     )
 
-
 def _get_high_price(row: dict) -> float:
+    close = _row_close_price(row)
+
     return _safe_float(
         row.get("max")
         or row.get("high")
         or row.get("High")
         or row.get("最高價")
-        or _row_price(row)
+        or close
     )
 
-
 def _get_low_price(row: dict) -> float:
+    close = _row_close_price(row)
+
     return _safe_float(
         row.get("min")
         or row.get("low")
         or row.get("Low")
         or row.get("最低價")
-        or _row_price(row)
+        or close
     )
-
 
 def _combine_all_session_rows(rows: list[dict]) -> dict | None:
     """
     同一交易日、同一契約，把日盤 + 盤後合併成全盤 K。
+    只合併真正交易列，不合併 position / 未平倉列。
     """
     valid = [dict(r) for r in rows if _is_valid_trade_row(r)]
 
@@ -662,12 +702,14 @@ def _combine_all_session_rows(rows: list[dict]) -> dict | None:
         if _get_low_price(r) > 0
     ]
 
+    close_price = _row_close_price(close_source)
+
     combined = dict(close_source)
 
     combined["open"] = _get_open_price(open_source)
-    combined["max"] = max(prices_high) if prices_high else _row_price(close_source)
-    combined["min"] = min(prices_low) if prices_low else _row_price(close_source)
-    combined["close"] = _row_price(close_source)
+    combined["max"] = max(prices_high) if prices_high else close_price
+    combined["min"] = min(prices_low) if prices_low else close_price
+    combined["close"] = close_price
     combined["volume"] = sum(_safe_int(r.get("volume")) for r in valid)
 
     combined["trading_session"] = "all"
@@ -704,6 +746,17 @@ def _get_session_value(row: dict) -> str:
     return ""
 
 
+def _is_position_session(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        "position" in text
+        or "open_interest" in text
+        or "未平倉" in text
+        or "部位" in text
+    )
+
+
 def _is_afterhours_session(value) -> bool:
     text = str(value or "").strip().lower()
 
@@ -715,17 +768,18 @@ def _is_afterhours_session(value) -> bool:
     )
 
 
-def _is_regular_session(value) -> bool:
+def _is_regular_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
+
+    if _is_position_session(text):
+        return False
 
     return (
         "regular" in text
         or "day" in text
         or "一般" in text
         or "日盤" in text
-        or "position" in text
     )
-
 
 def _is_valid_trade_row(row: dict) -> bool:
     """
@@ -734,14 +788,21 @@ def _is_valid_trade_row(row: dict) -> bool:
     排除：
     - 跨月價差，例如 202609/202612
     - contract_date 空白 / 全月份
-    - 價格為 0
+    - position / 未平倉列
+    - 沒有真正成交收盤價的列
+
+    注意：
+    settlement_price 不等於 K 線 close，不能拿來當價格。
     """
     contract = _normalize_contract_date(row.get("contract_date"))
 
     if not contract:
         return False
 
-    price = _row_price(row)
+    if _is_position_session(_get_session_value(row)):
+        return False
+
+    price = _row_close_price(row)
 
     if price <= 0:
         return False
@@ -757,7 +818,7 @@ def _prepare_futures_kline_rows(
     準備股票期貨 K 線資料。
 
     day：
-    - 只畫日盤 / position
+    - 只畫真正日盤交易列，不畫 position / 未平倉列
 
     all：
     - 每個交易日把日盤 + 盤後合併成一根全盤 K
@@ -814,7 +875,7 @@ def _prepare_futures_kline_rows(
 
         return combined_rows[-30:]
 
-    # 日盤：只取 regular / position
+    # 日盤：只取真正 regular / day，不取 position / 未平倉列
     regular_rows = [
         r for r in same_contract_rows
         if _is_regular_session(_get_session_value(r))
@@ -847,11 +908,10 @@ def _generate_futures_kline_chart(
     """
     產生股票期貨 K 線圖。
 
-    修正版重點：
-    1. 上方 K 線與下方成交量共用同一組 x_values。
-    2. 不使用 fig.tight_layout()，避免上下圖被自動調成不同寬度。
-    3. 用 GridSpec 固定 left/right/top/bottom。
-    4. 強制 ax_k / ax_v 使用相同 xlim。
+    重點：
+    1. K 線 close 只吃真正成交收盤價，不吃 settlement_price。
+    2. 排除 position / 未平倉列。
+    3. 上方 K 線與下方成交量共用同一組 x_values 與 xlim。
     """
     if not rows:
         return ""
@@ -859,15 +919,35 @@ def _generate_futures_kline_chart(
     chart_rows = []
 
     for r in rows:
+        if not _is_valid_trade_row(r):
+            continue
+
         date = _normalize_trade_date(r.get("date"))
-        close = _row_price(r)
+        close = _row_close_price(r)
 
         if not date or close <= 0:
             continue
 
-        open_price = _safe_float(r.get("open") or r.get("Open") or close)
-        high_price = _safe_float(r.get("max") or r.get("high") or r.get("High") or close)
-        low_price = _safe_float(r.get("min") or r.get("low") or r.get("Low") or close)
+        open_price = _safe_float(
+            r.get("open")
+            or r.get("Open")
+            or close
+        )
+
+        high_price = _safe_float(
+            r.get("max")
+            or r.get("high")
+            or r.get("High")
+            or close
+        )
+
+        low_price = _safe_float(
+            r.get("min")
+            or r.get("low")
+            or r.get("Low")
+            or close
+        )
+
         volume = _safe_int(r.get("volume"))
 
         if open_price <= 0:
@@ -895,18 +975,13 @@ def _generate_futures_kline_chart(
 
     df = pd.DataFrame(chart_rows).copy()
     df = df.sort_values("date").reset_index(drop=True)
-
-    # 顯示最近 30 根，避免期貨卡圖太擠。
     df = df.tail(30).reset_index(drop=True)
 
-    # 計算短均線，讓圖不只看 K 棒。
-    # 期貨資料根數通常不多，min_periods=1 可以避免前面一段空白。
     df["MA5"] = df["close"].astype(float).rolling(5, min_periods=1).mean()
     df["MA10"] = df["close"].astype(float).rolling(10, min_periods=1).mean()
 
     fig = plt.figure(figsize=(7.6, 5.6), dpi=130, facecolor="white")
 
-    # 固定整張圖的邊界，避免上下圖因 ytick / ylabel 被 tight_layout 調歪。
     gs = gridspec.GridSpec(
         2,
         1,
@@ -938,7 +1013,6 @@ def _generate_futures_kline_chart(
 
         color = "#FF2D2D" if c >= o else "#00B050"
 
-        # K 線影線
         ax_k.vlines(
             i,
             l,
@@ -948,7 +1022,6 @@ def _generate_futures_kline_chart(
             zorder=2,
         )
 
-        # K 線實體
         lower = min(o, c)
         height = abs(c - o)
 
@@ -965,7 +1038,6 @@ def _generate_futures_kline_chart(
             zorder=3,
         )
 
-        # 成交量：使用同一個 i，確保與上方 K 棒垂直對齊。
         ax_v.bar(
             i,
             vol,
@@ -976,7 +1048,6 @@ def _generate_futures_kline_chart(
             zorder=3,
         )
 
-    # 均線
     ax_k.plot(
         x_values,
         df["MA5"].values,
@@ -1015,7 +1086,6 @@ def _generate_futures_kline_chart(
     ax_k.grid(True, linestyle=":", alpha=0.35, zorder=1)
     ax_v.grid(True, linestyle=":", alpha=0.30, zorder=1)
 
-    # 右側價格軸比較像行情軟體，也可避免左側成交量字壓縮圖面。
     ax_k.yaxis.tick_right()
     ax_k.yaxis.set_label_position("right")
     ax_v.yaxis.tick_right()
@@ -1032,7 +1102,6 @@ def _generate_futures_kline_chart(
         ncol=2,
     )
 
-    # 即時現價線
     if current_price and current_price > 0:
         ax_k.axhline(
             current_price,
@@ -1062,7 +1131,6 @@ def _generate_futures_kline_chart(
     if (len(labels) - 1) not in ticks:
         ticks.append(len(labels) - 1)
 
-    # 上下圖固定同一個 x 範圍，這是對齊的關鍵。
     x_min = -0.8
     x_max = len(df) - 0.2
 
