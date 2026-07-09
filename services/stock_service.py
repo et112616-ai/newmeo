@@ -5,8 +5,10 @@ from datetime import datetime, time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+import os
 import time as time_module
 import pandas as pd
+import requests
 import yfinance as yf
 
 from utils.formatter import normalize_time_frame, signed_number, signed_percent
@@ -585,6 +587,175 @@ def _normalize_yf_daily_df(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+
+
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
+
+
+def _date_days_ago(days: int) -> str:
+    try:
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    except Exception:
+        today = datetime.utcnow().date()
+
+    return (today - pd.Timedelta(days=int(days))).strftime("%Y-%m-%d")
+
+
+def _finmind_token() -> str:
+    return str(
+        os.getenv("FINMIND_TOKEN")
+        or os.getenv("FINMIND_API_TOKEN")
+        or ""
+    ).strip()
+
+
+def _get_finmind_daily_history(meta: StockMeta, days: int = 900) -> pd.DataFrame:
+    """
+    用 FinMind TaiwanStockPrice 一次取得台股日成交資訊。
+
+    目的：
+    - 避免 TWSE / TPEx 官方逐月抓取造成 Render worker timeout。
+    - 避免 yfinance 舊收盤價被調整，導致 MA 與 Yahoo 技術分析頁不一致。
+    """
+    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+
+    if not stock_id:
+        return pd.DataFrame()
+
+    start_date = _date_days_ago(days)
+
+    params = {
+        "dataset": "TaiwanStockPrice",
+        "data_id": stock_id,
+        "start_date": start_date,
+    }
+
+    token = _finmind_token()
+
+    if token:
+        params["token"] = token
+
+    timeout_seconds = int(os.getenv("FINMIND_STOCK_PRICE_TIMEOUT_SECONDS", "8"))
+
+    try:
+        res = requests.get(
+            FINMIND_API_URL,
+            params=params,
+            timeout=timeout_seconds,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "stock_service | finmind daily failed",
+                "| stock =",
+                stock_id,
+                "| status =",
+                res.status_code,
+                "| body =",
+                res.text[:200],
+                flush=True,
+            )
+            return pd.DataFrame()
+
+        payload = res.json()
+        rows = payload.get("data") or []
+
+        if not isinstance(rows, list) or not rows:
+            print(
+                "stock_service | finmind daily empty",
+                "| stock =",
+                stock_id,
+                "| start_date =",
+                start_date,
+                flush=True,
+            )
+            return pd.DataFrame()
+
+        raw = pd.DataFrame(rows)
+
+        required = ["date", "open", "max", "min", "close"]
+
+        for col in required:
+            if col not in raw.columns:
+                print(
+                    "stock_service | finmind daily missing col",
+                    "| stock =",
+                    stock_id,
+                    "| col =",
+                    col,
+                    "| columns =",
+                    list(raw.columns),
+                    flush=True,
+                )
+                return pd.DataFrame()
+
+        volume_col = None
+
+        for cand in [
+            "Trading_Volume",
+            "Trading_Volumn",
+            "Trading_volume",
+            "trading_volume",
+            "Volume",
+            "volume",
+        ]:
+            if cand in raw.columns:
+                volume_col = cand
+                break
+
+        if volume_col is None:
+            raw["_volume"] = 0
+            volume_col = "_volume"
+
+        out = pd.DataFrame()
+        out["Date"] = pd.to_datetime(raw["date"], errors="coerce")
+        out["Open"] = pd.to_numeric(raw["open"], errors="coerce")
+        out["High"] = pd.to_numeric(raw["max"], errors="coerce")
+        out["Low"] = pd.to_numeric(raw["min"], errors="coerce")
+        out["Close"] = pd.to_numeric(raw["close"], errors="coerce")
+        out["Volume"] = pd.to_numeric(raw[volume_col], errors="coerce").fillna(0)
+
+        out = out.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+
+        if out.empty:
+            return pd.DataFrame()
+
+        out = out.sort_values("Date")
+        out = out.drop_duplicates(subset=["Date"], keep="last")
+        out = out.set_index("Date")
+        out.index = pd.to_datetime(out.index).tz_localize(None)
+
+        out.attrs["volume_unit"] = "shares"
+        out.attrs["price_source"] = "FinMind_TaiwanStockPrice"
+        out.attrs["unadjusted_price"] = True
+
+        print(
+            "stock_service | finmind_daily_history",
+            "| stock =",
+            stock_id,
+            "| rows =",
+            len(out),
+            "| first =",
+            out.index[0] if not out.empty else None,
+            "| latest =",
+            out.index[-1] if not out.empty else None,
+            "| source = FinMind_TaiwanStockPrice",
+            flush=True,
+        )
+
+        return out
+
+    except Exception as exc:
+        print(
+            "stock_service | finmind daily exception",
+            "| stock =",
+            stock_id,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return pd.DataFrame()
+
 def _resample_ohlcv_keep_latest_date(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df.empty:
         return df
@@ -618,282 +789,44 @@ def _resample_ohlcv_keep_latest_date(df: pd.DataFrame, rule: str) -> pd.DataFram
     return out
 
 
-
-
-def _iter_months_back(months: int):
-    """
-    由台北當月往前列出 year/month。
-    """
-    try:
-        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
-    except Exception:
-        today = datetime.utcnow().date()
-
-    y = today.year
-    m = today.month
-
-    for _ in range(max(1, int(months))):
-        yield y, m
-        m -= 1
-        if m <= 0:
-            y -= 1
-            m = 12
-
-
-def _parse_tw_trade_date(value: Any):
-    """
-    支援：2026/07/09、2026-07-09、115/07/09。
-    """
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    text = text.replace("-", "/")
-    parts = text.split("/")
-    if len(parts) < 3:
-        return None
-
-    try:
-        year = int(parts[0])
-        month = int(parts[1])
-        day = int(parts[2])
-        if year < 1911:
-            year += 1911
-        return pd.Timestamp(year=year, month=month, day=day)
-    except Exception:
-        return None
-
-
-def _tw_number(value: Any) -> float:
-    try:
-        text = str(value or "").strip()
-        text = text.replace(",", "")
-        text = text.replace("--", "")
-        text = text.replace("X", "")
-        text = text.replace("除權息", "")
-        text = text.replace("+", "")
-        if text in {"", "-", "nan", "None"}:
-            return 0.0
-        return float(text)
-    except Exception:
-        return 0.0
-
-
-def _find_field_index(fields: list[str], keywords: list[str], default: int = -1) -> int:
-    for idx, field in enumerate(fields or []):
-        text = str(field)
-        if all(k in text for k in keywords):
-            return idx
-    return default
-
-
-def _normalize_official_stock_day_payload(payload: dict[str, Any], market: str) -> tuple[pd.DataFrame, str]:
-    """
-    將 TWSE / TPEx 個股日成交資訊轉成 OHLCV。
-    回傳 DataFrame 與 volume_unit：shares 或 lots。
-    """
-    if not isinstance(payload, dict):
-        return pd.DataFrame(), "shares"
-
-    fields = payload.get("fields") or payload.get("headers") or []
-    fields = [str(x) for x in fields] if isinstance(fields, list) else []
-
-    rows = payload.get("data") or payload.get("aaData") or []
-
-    if not rows and isinstance(payload.get("tables"), list):
-        try:
-            table0 = payload["tables"][0]
-            fields = table0.get("fields") or table0.get("headers") or fields
-            fields = [str(x) for x in fields] if isinstance(fields, list) else fields
-            rows = table0.get("data") or table0.get("aaData") or []
-        except Exception:
-            rows = []
-
-    if not isinstance(rows, list) or not rows:
-        return pd.DataFrame(), "shares"
-
-    if fields:
-        date_idx = _find_field_index(fields, ["日期"], 0)
-        open_idx = _find_field_index(fields, ["開盤"], 3)
-        high_idx = _find_field_index(fields, ["最高"], 4)
-        low_idx = _find_field_index(fields, ["最低"], 5)
-        close_idx = _find_field_index(fields, ["收盤"], 6)
-        vol_idx = _find_field_index(fields, ["成交", "股"], 1)
-        if vol_idx < 0:
-            vol_idx = _find_field_index(fields, ["成交", "張"], 1)
-        if vol_idx < 0:
-            vol_idx = 1
-        vol_field = str(fields[vol_idx]) if 0 <= vol_idx < len(fields) else ""
-        volume_unit = "lots" if ("仟股" in vol_field or "張" in vol_field) else "shares"
-    else:
-        # TWSE STOCK_DAY：日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價...
-        # TPEx st43：日期, 成交仟股, 成交仟元, 開盤, 最高, 最低, 收盤...
-        date_idx, vol_idx, open_idx, high_idx, low_idx, close_idx = 0, 1, 3, 4, 5, 6
-        volume_unit = "lots" if market == "TPEX" else "shares"
-
-    records = []
-    max_idx = max(date_idx, vol_idx, open_idx, high_idx, low_idx, close_idx)
-
-    for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) <= max_idx:
-            continue
-
-        ts = _parse_tw_trade_date(row[date_idx])
-        if ts is None:
-            continue
-
-        open_price = _tw_number(row[open_idx])
-        high_price = _tw_number(row[high_idx])
-        low_price = _tw_number(row[low_idx])
-        close_price = _tw_number(row[close_idx])
-        volume = _tw_number(row[vol_idx])
-
-        if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0:
-            continue
-
-        records.append({"Date": ts, "Open": open_price, "High": high_price, "Low": low_price, "Close": close_price, "Volume": volume})
-
-    if not records:
-        return pd.DataFrame(), volume_unit
-
-    df = pd.DataFrame(records).drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
-    df = df.set_index("Date")
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    df.attrs["volume_unit"] = volume_unit
-    df.attrs["price_source"] = market
-    df.attrs["unadjusted_price"] = True
-    return df, volume_unit
-
-
-def _request_json_safely(url: str, params: dict[str, Any], timeout: int = 10) -> dict[str, Any]:
-    try:
-        import requests
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*"}
-        res = requests.get(url, params=params, headers=headers, timeout=timeout)
-        if res.status_code >= 400:
-            return {}
-        return res.json()
-    except Exception:
-        return {}
-
-
-def _download_twse_official_stock_day_month(stock_id: str, year: int, month: int) -> pd.DataFrame:
-    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    payload = _request_json_safely(url, {"response": "json", "date": f"{year}{month:02d}01", "stockNo": str(stock_id)})
-    df, volume_unit = _normalize_official_stock_day_payload(payload, "TWSE")
-    if not df.empty:
-        df.attrs["volume_unit"] = volume_unit or "shares"
-        df.attrs["price_source"] = "TWSE_STOCK_DAY"
-    return df
-
-
-def _download_tpex_official_stock_day_month(stock_id: str, year: int, month: int) -> pd.DataFrame:
-    roc_year = year - 1911
-    candidates = [
-        ("https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock", {"code": str(stock_id), "date": f"{roc_year}/{month:02d}", "response": "json"}),
-        ("https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php", {"l": "zh-tw", "d": f"{roc_year}/{month:02d}", "stkno": str(stock_id)}),
-    ]
-    for url, params in candidates:
-        payload = _request_json_safely(url, params)
-        df, volume_unit = _normalize_official_stock_day_payload(payload, "TPEX")
-        if not df.empty:
-            df.attrs["volume_unit"] = volume_unit or "lots"
-            df.attrs["price_source"] = "TPEX_STOCK_DAY"
-            return df
-    return pd.DataFrame()
-
-
-def _get_official_unadjusted_daily_history(meta: StockMeta, months: int) -> pd.DataFrame:
-    """
-    從 TWSE / TPEx 官方個股日成交資訊抓未還原日 K。
-    用來避免 yfinance 歷史 Close 遇到除權息後被調整，造成 MA 失真。
-    """
-    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
-    if not stock_id:
-        return pd.DataFrame()
-
-    twse_parts = []
-    tpex_parts = []
-
-    for year, month in _iter_months_back(months):
-        twse_df = _download_twse_official_stock_day_month(stock_id, year, month)
-        if not twse_df.empty:
-            twse_parts.append(twse_df)
-            continue
-        tpex_df = _download_tpex_official_stock_day_month(stock_id, year, month)
-        if not tpex_df.empty:
-            tpex_parts.append(tpex_df)
-
-    parts = twse_parts if twse_parts else tpex_parts
-    if not parts:
-        return pd.DataFrame()
-
-    out = pd.concat(parts).sort_index()
-    out = out[~out.index.duplicated(keep="last")]
-    source = "TWSE_STOCK_DAY" if twse_parts else "TPEX_STOCK_DAY"
-    volume_unit = "shares" if twse_parts else str(parts[0].attrs.get("volume_unit") or "lots")
-    out.attrs["volume_unit"] = volume_unit
-    out.attrs["price_source"] = source
-    out.attrs["unadjusted_price"] = True
-
-    print(
-        "stock_service | official_unadjusted_daily",
-        "| stock =", stock_id,
-        "| source =", source,
-        "| rows =", len(out),
-        "| first =", out.index[0] if not out.empty else None,
-        "| latest =", out.index[-1] if not out.empty else None,
-        "| volume_unit =", volume_unit,
-        flush=True,
-    )
-    return out
-
 def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
     tf = normalize_time_frame(time_frame)
     cache_key = (meta.yf_symbol, tf)
     now = time_module.time()
 
     cached = _DWM_CACHE.get(cache_key)
+
     if cached:
         ts, cached_df = cached
         if now - ts <= DWM_CACHE_TTL_SECONDS:
             return cached_df.copy()
 
-    import os
-
-    official_months_map = {
-        "D": int(os.getenv("TW_OFFICIAL_D_MONTHS", "18")),
-        "W": int(os.getenv("TW_OFFICIAL_W_MONTHS", "42")),
-        "M": int(os.getenv("TW_OFFICIAL_M_MONTHS", "0")),
-    }
-
-    if tf == "M" and str(os.getenv("USE_TW_OFFICIAL_MONTHLY_HISTORY", "0")).strip() == "1":
-        official_months_map["M"] = int(os.getenv("TW_OFFICIAL_M_MONTHS", "156"))
-
-    use_official = str(os.getenv("USE_TW_OFFICIAL_DWM_HISTORY", "1")).strip() != "0"
-    official_months = official_months_map.get(tf, 0)
-
+    # 重要：不要在 LINE webhook 內逐月打 TWSE / TPEx，會造成 Render worker timeout。
+    # 改用 FinMind TaiwanStockPrice，一次 request 拿日成交資訊。
     daily = pd.DataFrame()
 
-    if use_official and official_months > 0:
-        try:
-            daily = _get_official_unadjusted_daily_history(meta, official_months)
-        except Exception as exc:
-            print(
-                "stock_service | official_unadjusted_daily failed",
-                "| stock =", getattr(meta, "stock_id", ""),
-                "| tf =", tf,
-                "| error =", repr(exc),
-                flush=True,
-            )
-            daily = pd.DataFrame()
+    use_finmind = str(os.getenv("USE_FINMIND_DWM_HISTORY", "1")).strip() != "0"
 
+    finmind_days_map = {
+        "D": int(os.getenv("FINMIND_D_DAYS", "900")),
+        "W": int(os.getenv("FINMIND_W_DAYS", "1800")),
+        "M": int(os.getenv("FINMIND_M_DAYS", "0")),
+    }
+
+    if tf == "M" and str(os.getenv("USE_FINMIND_MONTHLY_HISTORY", "0")).strip() == "1":
+        finmind_days_map["M"] = int(os.getenv("FINMIND_M_DAYS", "5500"))
+
+    if use_finmind and finmind_days_map.get(tf, 0) > 0:
+        daily = _get_finmind_daily_history(meta, days=finmind_days_map.get(tf, 900))
+
+    # FinMind 失敗才 fallback yfinance。yfinance 可能是調整後價格，MA可能不準，但不讓服務卡死。
     if daily.empty:
         period_map = {
             "D": "2y",
             "W": "5y",
             "M": "15y",
         }
+
         period = period_map.get(tf, "2y")
 
         try:
@@ -910,12 +843,14 @@ def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
             return pd.DataFrame()
 
         daily = _normalize_yf_daily_df(raw)
+
         if daily.empty:
             print(f"_get_dwm_history_from_daily empty daily: {meta.yf_symbol}, tf={tf}")
             return pd.DataFrame()
 
         daily.attrs["volume_unit"] = "shares"
-        daily.attrs["price_source"] = "yfinance"
+        daily.attrs["price_source"] = "yfinance_fallback"
+        daily.attrs["unadjusted_price"] = False
 
     if tf == "D":
         out = daily.copy()
@@ -937,6 +872,7 @@ def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
         "W": 180,
         "M": 140,
     }
+
     out = out.tail(tail_map.get(tf, 180)).copy()
 
     display_stamp = daily.index[-1].strftime("%Y-%m-%d")
@@ -953,10 +889,11 @@ def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
     _DWM_CACHE[cache_key] = (now, out.copy())
 
     print(
-        "stock_service_v6_official_unadjusted | dwm_history | "
+        "stock_service_v7_finmind_dwm | dwm_history | "
         f"stock={meta.stock_id} | tf={tf} | rows={len(out)} | latest={out.index[-1]} "
         f"| source={out.attrs.get('price_source')} | volume_unit={out.attrs.get('volume_unit')}"
     )
+
     return out
 
 
