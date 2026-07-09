@@ -429,6 +429,18 @@ def sync_stock_futures_map_route():
         }
     ), 200
 
+@app.route("/debug_routes_public", methods=["GET"])
+def debug_routes_public():
+    routes = []
+
+    for rule in app.url_map.iter_rules():
+        routes.append(str(rule))
+
+    return jsonify({
+        "status": "ok",
+        "routes": sorted(routes),
+    }), 200
+
 @app.route("/sync_financial", methods=["GET", "POST"])
 def sync_financial():
     if not _check_internal_token():
