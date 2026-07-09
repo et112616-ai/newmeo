@@ -44,6 +44,7 @@ import traceback
 
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
+from services.financial_service import get_financial_snapshot
 
 def _is_tw_stock_live_session() -> bool:
     """
