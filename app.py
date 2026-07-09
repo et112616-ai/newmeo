@@ -7,7 +7,6 @@ from services.sinopac_quote_service import get_api
 from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
 from services.sinopac_quote_service import get_api, get_stock_snapshot
-from services.financial_service import sync_stock_financial_quarterly
 
 import base64
 import hashlib
@@ -111,8 +110,32 @@ def _line_should_process_event(event: dict) -> bool:
 app = Flask(__name__)
 
 
+@app.route("/route_probe", methods=["GET"])
+def route_probe():
+    return jsonify({
+        "status": "ok",
+        "message": "route_probe registered",
+    }), 200
+
+
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+
+
+def _get_internal_token_from_request() -> str:
+    token = request.args.get("token", "").strip()
+
+    if not token:
+        token = request.headers.get("X-Sync-Token", "").strip()
+
+    return token
+
+
+def _check_internal_token() -> bool:
+    expected = str(os.getenv("TDCC_SYNC_TOKEN", "") or "").strip()
+    token = _get_internal_token_from_request()
+
+    return bool(expected and token and token == expected)
 
 
 def extract_reply_token(payload: Dict[str, Any]) -> str:
@@ -446,6 +469,20 @@ def sync_financial():
     if not _check_internal_token():
         return jsonify({"status": "forbidden"}), 403
 
+    try:
+        from services.financial_service import sync_stock_financial_quarterly
+    except Exception as exc:
+        print(
+            "DEBUG sync_financial import failed",
+            repr(exc),
+            flush=True,
+        )
+        return jsonify({
+            "status": "error",
+            "message": "financial_service import failed",
+            "error": repr(exc),
+        }), 500
+
     stock_id = request.args.get("stock_id", "").strip()
     stock_name = request.args.get("stock_name", "").strip()
     start_date = request.args.get("start_date", "").strip()
@@ -456,16 +493,33 @@ def sync_financial():
             "message": "missing stock_id",
         }), 400
 
-    result = sync_stock_financial_quarterly(
-        stock_id=stock_id,
-        stock_name=stock_name,
-        start_date=start_date,
-    )
+    try:
+        result = sync_stock_financial_quarterly(
+            stock_id=stock_id,
+            stock_name=stock_name,
+            start_date=start_date,
+        )
 
-    return jsonify({
-        "status": "ok",
-        "result": result,
-    }), 200
+        return jsonify({
+            "status": "ok",
+            "result": result,
+        }), 200
+
+    except Exception as exc:
+        import traceback
+
+        print(
+            "DEBUG sync_financial failed",
+            repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+
+        return jsonify({
+            "status": "error",
+            "message": "sync financial failed",
+            "error": repr(exc),
+        }), 500
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
