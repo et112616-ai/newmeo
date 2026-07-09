@@ -9,6 +9,8 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 
+from services.financial_service import get_financial_snapshot
+
 from typing import Any
 
 from services.chart_service import (
@@ -131,6 +133,13 @@ def _normalize_action(action: str | None) -> str:
         "major_holder": "large_holder",
         "holder": "large_holder",
         "大戶": "large_holder",
+
+        # EPS
+        "financial": "financial",
+        "finance": "financial",
+        "fundamental": "financial",
+        "財務": "financial",
+        "eps": "financial",
 
         # 融資券
         "margin": "margin",
@@ -1548,7 +1557,9 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
         ("法人", "chip"),
         ("大戶", "large_holder"),
         ("融資券", "margin"),
+        ("財務", "financial"),
         ("期貨", "futures"),
+
     ]
 
     buttons = []
@@ -3265,7 +3276,6 @@ def _stock_chip_color(value) -> str:
 
     return "#666666"
 
-
 def _stock_chip_dates(chip_rows: dict) -> list[str]:
     """
     依 get_institutional_chips() 回傳順序整理日期。
@@ -3285,7 +3295,6 @@ def _stock_chip_dates(chip_rows: dict) -> list[str]:
 
     return dates[-10:]
 
-
 def _stock_chip_value(chip_rows: dict, section: str, date: str) -> float:
     if not isinstance(chip_rows, dict):
         return 0.0
@@ -3299,6 +3308,322 @@ def _stock_chip_value(chip_rows: dict, section: str, date: str) -> float:
 
     return 0.0
 
+def _financial_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+
+        text = str(value).replace(",", "").replace("%", "").strip()
+
+        if text in {"", "--", "-"}:
+            return default
+
+        return float(text)
+
+    except Exception:
+        return default
+
+
+def _financial_fmt(value, digits: int = 2) -> str:
+    try:
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return "--"
+
+
+def _financial_signed(value, digits: int = 2) -> str:
+    try:
+        num = float(value)
+        sign = "+" if num > 0 else ""
+        return f"{sign}{num:,.{digits}f}"
+    except Exception:
+        return "--"
+
+
+def _financial_color(value) -> str:
+    num = _financial_float(value)
+
+    if num > 0:
+        return "#FF2D2D"
+
+    if num < 0:
+        return "#00B050"
+
+    return "#666666"
+
+
+def _financial_metric_box(
+    title: str,
+    value: str,
+    sub_value: str = "",
+    value_color: str = "#111111",
+) -> dict[str, Any]:
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": title,
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": value,
+            "size": "lg",
+            "weight": "bold",
+            "color": value_color,
+            "margin": "xs",
+            "wrap": True,
+        },
+    ]
+
+    if sub_value:
+        contents.append(
+            {
+                "type": "text",
+                "text": sub_value,
+                "size": "xs",
+                "color": "#888888",
+                "margin": "xs",
+                "wrap": True,
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "backgroundColor": "#F8F9FA",
+        "cornerRadius": "12px",
+        "paddingAll": "10px",
+        "contents": contents,
+    }
+
+
+def _financial_table_row(
+    quarter: str,
+    eps: str,
+    eps_change: str,
+    ttm_eps: str,
+    pe: str,
+    change_color: str = "#666666",
+    is_header: bool = False,
+) -> dict[str, Any]:
+    text_color = "#666666" if is_header else "#222222"
+    weight = "bold" if is_header else "regular"
+    bg_color = "#F1F3F5" if is_header else "#FFFFFF"
+
+    def cell(text, flex, color=None, align="end"):
+        return {
+            "type": "text",
+            "text": str(text),
+            "size": "xs",
+            "color": color or text_color,
+            "weight": weight,
+            "flex": flex,
+            "align": align,
+            "wrap": True,
+        }
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "backgroundColor": bg_color,
+        "cornerRadius": "6px" if is_header else "0px",
+        "paddingAll": "5px" if is_header else "3px",
+        "contents": [
+            cell(quarter, 2, align="start"),
+            cell(eps, 2),
+            cell(eps_change, 2, change_color if not is_header else text_color),
+            cell(ttm_eps, 2),
+            cell(pe, 2),
+        ],
+    }
+
+
+def _build_financial_flex(
+    stock_id: str,
+    stock_name: str,
+    snapshot,
+    current_tf: str = "D",
+) -> dict[str, Any]:
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{stock_id} {stock_name}",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": "財務｜近四季 EPS",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+            "wrap": True,
+        },
+    ]
+
+    if not getattr(snapshot, "available", False):
+        contents.extend(
+            [
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": getattr(snapshot, "message", "目前查無 EPS 財務資料。"),
+                    "size": "sm",
+                    "color": "#666666",
+                    "margin": "md",
+                    "wrap": True,
+                },
+            ]
+        )
+
+        contents.extend(_mode_buttons(stock_id, "financial", current_tf))
+
+        return {
+            "type": "flex",
+            "altText": f"{stock_id} {stock_name} 財務",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    latest_ttm_eps = _financial_float(getattr(snapshot, "latest_ttm_eps", 0.0))
+    latest_eps = _financial_float(getattr(snapshot, "latest_eps", 0.0))
+    eps_change = _financial_float(getattr(snapshot, "latest_eps_change", 0.0))
+    current_price = _financial_float(getattr(snapshot, "current_price", 0.0))
+    current_pe = _financial_float(getattr(snapshot, "current_pe", 0.0))
+
+    contents.extend(
+        [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    _financial_metric_box(
+                        "近四季 EPS",
+                        _financial_fmt(latest_ttm_eps),
+                        getattr(snapshot, "latest_quarter", ""),
+                    ),
+                    _financial_metric_box(
+                        "目前本益比",
+                        f"{_financial_fmt(current_pe)} 倍" if current_pe > 0 else "--",
+                        f"股價 {_financial_fmt(current_price)}",
+                    ),
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "sm",
+                "contents": [
+                    _financial_metric_box(
+                        "最新單季 EPS",
+                        _financial_fmt(latest_eps),
+                    ),
+                    _financial_metric_box(
+                        "EPS QoQ",
+                        _financial_signed(eps_change),
+                        value_color=_financial_color(eps_change),
+                    ),
+                ],
+            },
+            {"type": "separator", "margin": "md"},
+            {
+                "type": "text",
+                "text": "近8季",
+                "size": "md",
+                "weight": "bold",
+                "color": "#444444",
+                "margin": "md",
+            },
+        ]
+    )
+
+    table_rows = [
+        _financial_table_row(
+            "季度",
+            "EPS",
+            "增減",
+            "TTM",
+            "PE",
+            is_header=True,
+        )
+    ]
+
+    for row in list(getattr(snapshot, "rows", []) or [])[:8]:
+        ttm_eps = _financial_float(row.get("ttm_eps"))
+        pe = (
+            current_price / ttm_eps
+            if current_price > 0 and ttm_eps > 0
+            else 0.0
+        )
+
+        eps_chg = _financial_float(row.get("eps_change"))
+
+        table_rows.append(
+            _financial_table_row(
+                str(row.get("quarter_label") or "--"),
+                _financial_fmt(row.get("eps")),
+                _financial_signed(eps_chg) if row.get("eps_change") is not None else "--",
+                _financial_fmt(ttm_eps) if ttm_eps > 0 else "--",
+                _financial_fmt(pe) if pe > 0 else "--",
+                change_color=_financial_color(eps_chg),
+            )
+        )
+
+    contents.extend(
+        [
+            {
+                "type": "box",
+                "layout": "vertical",
+                "margin": "sm",
+                "spacing": "xs",
+                "contents": table_rows,
+            },
+            {
+                "type": "text",
+                "text": "本益比＝股價 ÷ 近四季 EPS。EPS 來源為財報資料，實際公布時間可能落後交易日。",
+                "size": "xs",
+                "color": "#888888",
+                "wrap": True,
+                "margin": "md",
+            },
+            {"type": "separator", "margin": "md"},
+        ]
+    )
+
+    contents.extend(_mode_buttons(stock_id, "financial", current_tf))
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 財務",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
 
 def _build_stock_chip_flex(
     stock_id: str,
@@ -4699,6 +5024,11 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 _build_market_margin_flex(snapshot),
                 )
             
+            if action == "financial":
+                snapshot = get_financial_snapshot(meta.stock_id, stock_name)
+                flex = _build_financial_flex(meta.stock_id, stock_name, snapshot, requested_tf)
+                return _reply_with_title(f"{stock_name} 財務", flex)
+                        
             if action in {"market_future_day", "market_future_all"}:
                 session_mode = "all" if action == "market_future_all" else "day"
 
