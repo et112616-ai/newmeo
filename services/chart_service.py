@@ -1,1037 +1,92 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, time
-from typing import Any, Optional
-from zoneinfo import ZoneInfo
+from datetime import time
+from pathlib import Path
 
-import time as time_module
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.dates as mdates
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 import pandas as pd
-import yfinance as yf
+import matplotlib.ticker as mticker
+from matplotlib import font_manager
 
-from utils.formatter import normalize_time_frame, signed_number, signed_percent
-
-
-STOCK_SERVICE_VERSION = "stock_service_v5_quote_reconcile"
-
-TW_SUFFIX = ".TW"
-TWO_SUFFIX = ".TWO"
-
-REFERENCE_PRICE_COL = "_reference_price"
-DISPLAY_TIMESTAMP_COL = "_display_timestamp"
-QUOTE_PRICE_COL = "_quote_price"
-QUOTE_CACHE_TTL_SECONDS = 20
-_QUOTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-DWM_CACHE_TTL_SECONDS = 60
-_DWM_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
-
-@dataclass
-class StockMeta:
-    input_text: str
-    stock_id: str
-    yf_symbol: str
-    stock_name: str
+from services.upload_service import publish_figure
+from utils.formatter import normalize_time_frame
 
 
-@dataclass
-class PriceMeta:
-    price_info: str
-    change_info: str
-    time_stamp: str
-    price_change: float
-    latest_price: float
+plt.rcParams["axes.unicode_minus"] = False
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
+
+CHART_FONT_PROP = None
+
+if FONT_PATH.exists():
+    font_manager.fontManager.addfont(str(FONT_PATH))
+    CHART_FONT_PROP = font_manager.FontProperties(fname=str(FONT_PATH))
+    plt.rcParams["font.family"] = CHART_FONT_PROP.get_name()
+else:
+    print(f"Chart font not found: {FONT_PATH}")
+    plt.rcParams["font.sans-serif"] = [
+        "Noto Sans CJK TC",
+        "Microsoft JhengHei",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+        "sans-serif",
+    ]
 
 
-def _twstock_lookup(query: str) -> Optional[tuple[str, str]]:
-    try:
-        import twstock
+def _font_kwargs() -> dict:
+    if CHART_FONT_PROP is not None:
+        return {"fontproperties": CHART_FONT_PROP}
+    return {}
 
-        q = query.strip()
-        q_upper = q.upper().replace(TW_SUFFIX, "").replace(TWO_SUFFIX, "")
+def _empty_chart(title: str, message: str) -> str:
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=120, facecolor="white")
+    ax.axis("off")
+    ax.text(0.5, 0.55, "No Data", ha="center", va="center", fontsize=16, fontweight="bold")
+    ax.text(0.5, 0.45, "Data unavailable", ha="center", va="center", fontsize=11)
+    return publish_figure(fig, "empty")
 
-        if q_upper in twstock.codes:
-            item = twstock.codes[q_upper]
-            return q_upper, getattr(item, "name", q_upper) or q_upper
-
-        exact = []
-        partial = []
-
-        for code, item in twstock.codes.items():
-            name = getattr(item, "name", "") or ""
-
-            if not name:
-                continue
-
-            if q == name:
-                exact.append((code, name))
-            elif q in name:
-                partial.append((code, name))
-
-        if exact:
-            return exact[0]
-
-        if partial:
-            return partial[0]
-
-    except Exception:
-        return None
-
-    return None
-
-
-def normalize_stock_input(stock_input: str) -> StockMeta:
-    raw = str(stock_input or "").strip()
-
-    if not raw:
-        raise ValueError("請輸入股票代號或名稱。")
-
-    cleaned = raw.upper().replace(TW_SUFFIX, "").replace(TWO_SUFFIX, "").strip()
-
-    lookup = _twstock_lookup(raw)
-
-    if lookup:
-        stock_id, stock_name = lookup
-    elif cleaned.isdigit():
-        stock_id, stock_name = cleaned, cleaned
-    else:
-        stock_id, stock_name = cleaned, raw
-
-    yf_symbol = f"{stock_id}.TW" if stock_id.isdigit() else stock_id
-
-    return StockMeta(
-        input_text=raw,
-        stock_id=stock_id,
-        yf_symbol=yf_symbol,
-        stock_name=stock_name,
-    )
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-
-        if isinstance(value, str):
-            value = value.replace(",", "").replace("%", "").strip()
-
-            if not value:
-                return default
-
-        return float(value)
-
-    except Exception:
-        return default
-
-
-def _read_value(source: Any, keys: list[str]) -> Any:
-    for key in keys:
-        try:
-            if isinstance(source, dict) and key in source:
-                return source.get(key)
-
-            if hasattr(source, "get"):
-                value = source.get(key)
-                if value not in (None, ""):
-                    return value
-
-            if hasattr(source, key):
-                value = getattr(source, key)
-                if value not in (None, ""):
-                    return value
-
-        except Exception:
-            continue
-
-    return None
-
-
-def _download_history(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval, auto_adjust=False)
-    return df
-
-
-def _normalize_to_taipei_time(df: pd.DataFrame) -> pd.DataFrame:
+def _set_tw_stock_intraday_axis(ax, df: pd.DataFrame) -> None:
+    """
+    現貨盤中圖固定顯示 09:00 ~ 13:30。
+    前提：df.index 已經是台北時間。
+    """
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
-        return df
-
-    df = df.copy()
-
-    try:
-        if df.index.tz is None:
-            df.index = df.index.tz_localize("UTC").tz_convert("Asia/Taipei")
-        else:
-            df.index = df.index.tz_convert("Asia/Taipei")
-
-        df.index = df.index.tz_localize(None)
-
-    except Exception as exc:
-        print(f"_normalize_to_taipei_time failed: {exc}")
-
-    return df
-
-
-def _keep_latest_trading_day(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
-        return df
-
-    last_date = df.index[-1].date()
-    return df[df.index.date == last_date].copy()
-
-
-def _filter_tw_stock_session(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
-    if df.empty or time_frame not in {"1m", "5m"}:
-        return df
-
-    try:
-        return df.between_time("09:00", "13:30").copy()
-    except Exception as exc:
-        print(f"_filter_tw_stock_session failed: {exc}")
-        return df
-
-
-def _set_reference_price(df: pd.DataFrame, reference_price: float) -> pd.DataFrame:
-    df = df.copy()
-
-    ref = float(reference_price)
-
-    df.attrs["reference_price"] = ref
-    df[REFERENCE_PRICE_COL] = ref
-
-    return df
-
-
-def _get_reference_price_from_df(df: pd.DataFrame) -> float:
-    try:
-        ref = df.attrs.get("reference_price")
-
-        if ref not in (None, ""):
-            ref_float = float(ref)
-
-            if ref_float > 0:
-                return ref_float
-
-    except Exception:
-        pass
-
-    try:
-        if REFERENCE_PRICE_COL in df.columns:
-            s = df[REFERENCE_PRICE_COL].dropna()
-
-            if not s.empty:
-                ref_float = float(s.iloc[-1])
-
-                if ref_float > 0:
-                    return ref_float
-
-    except Exception:
-        pass
-
-    try:
-        if "Open" in df.columns and not df["Open"].empty:
-            ref_float = float(df["Open"].iloc[0])
-
-            if ref_float > 0:
-                return ref_float
-
-    except Exception:
-        pass
-
-    try:
-        return float(df["Close"].iloc[0])
-    except Exception:
-        return 0.0
-
-
-def _get_latest_price_from_df(df: pd.DataFrame) -> float:
-    """
-    最新價優先順序：
-    1. quote 覆蓋價
-    2. quote 欄位
-    3. history 最後一筆 Close
-    """
-    try:
-        quote_price = df.attrs.get("quote_price")
-
-        if quote_price not in (None, ""):
-            price = float(quote_price)
-
-            if price > 0:
-                return price
-
-    except Exception:
-        pass
-
-    try:
-        if QUOTE_PRICE_COL in df.columns:
-            s = df[QUOTE_PRICE_COL].dropna()
-
-            if not s.empty:
-                price = float(s.iloc[-1])
-
-                if price > 0:
-                    return price
-
-    except Exception:
-        pass
-
-    return float(df["Close"].iloc[-1])
-
-
-def _get_previous_close(meta: StockMeta, trade_date) -> float:
-    try:
-        daily = _download_history(meta.yf_symbol, "15d", "1d")
-
-        if daily.empty and meta.yf_symbol.endswith(TW_SUFFIX):
-            two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
-            daily = _download_history(two_symbol, "15d", "1d")
-
-        if daily.empty:
-            return 0.0
-
-        daily = daily.dropna(subset=["Close"])
-        daily = _normalize_to_taipei_time(daily)
-
-        if daily.empty:
-            return 0.0
-
-        prev_daily = daily[daily.index.date < trade_date]
-
-        if prev_daily.empty:
-            return 0.0
-
-        return float(prev_daily["Close"].iloc[-1])
-
-    except Exception as exc:
-        print(f"_get_previous_close failed: {exc}")
-        return 0.0
-
-
-def _attach_intraday_reference_price(
-    meta: StockMeta,
-    df: pd.DataFrame,
-    time_frame: str,
-) -> pd.DataFrame:
-    """
-    幫 1m / 5m 盤中資料加上平盤價。
-    平盤價 = 前一交易日收盤價。
-
-    優先使用 fast_info.previous_close，避免多打一個日 K 造成 timeout。
-    """
-    if df.empty or time_frame not in {"1m", "5m"}:
-        return df
-
-    if not isinstance(df.index, pd.DatetimeIndex):
-        return df
-
-    df = df.copy()
-
-    try:
-        quote = _get_yahoo_quote_snapshot(meta)
-        ref_price = _safe_float(quote.get("previous_close"))
-
-        if ref_price > 0:
-            return _set_reference_price(df, ref_price)
-
-    except Exception as exc:
-        print(f"_attach_intraday_reference_price quote failed: {exc}")
+        return
 
     trade_date = df.index[-1].date()
 
-    ref_price = _get_previous_close(meta, trade_date)
-
-    if ref_price > 0:
-        return _set_reference_price(df, ref_price)
-
-    try:
-        fallback_ref = float(df["Open"].iloc[0])
-        return _set_reference_price(df, fallback_ref)
-    except Exception:
-        return df
-def _append_intraday_close_point(df: pd.DataFrame, time_frame: str) -> pd.DataFrame:
-    """
-    yfinance 有時最後一筆停在 13:24、13:25。
-    收盤後補一筆 13:30，價格先沿用最後一筆。
-    後面會再用 quote 最新價覆蓋。
-    """
-    if df.empty or time_frame not in {"1m", "5m"}:
-        return df
-
-    if not isinstance(df.index, pd.DatetimeIndex):
-        return df
-
-    try:
-        df = df.copy()
-        attrs = dict(df.attrs)
-
-        last_ts = df.index[-1]
-        trade_date = last_ts.date()
-        close_ts = pd.Timestamp.combine(trade_date, time(13, 30))
-
-        if last_ts >= close_ts:
-            return df
-
-        if last_ts.time() < time(13, 20):
-            return df
-
-        now_tpe = datetime.now(ZoneInfo("Asia/Taipei"))
-
-        is_old_trade_day = trade_date < now_tpe.date()
-        is_after_close_today = (
-            trade_date == now_tpe.date()
-            and now_tpe.time() >= time(13, 35)
-        )
-
-        if not is_old_trade_day and not is_after_close_today:
-            return df
-
-        last_row = df.iloc[-1].copy()
-
-        append_df = pd.DataFrame([last_row], index=[close_ts])
-        append_df.columns = df.columns
-
-        df = pd.concat([df, append_df])
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-
-        df.attrs.update(attrs)
-
-        display_stamp = f"{trade_date.strftime('%Y-%m-%d')} 13:30"
-        df.attrs["display_timestamp"] = display_stamp
-        df[DISPLAY_TIMESTAMP_COL] = display_stamp
-
-        return df
-
-    except Exception as exc:
-        print(f"_append_intraday_close_point failed: {exc}")
-        return df
-
-
-def _get_yahoo_quote_snapshot(meta: StockMeta) -> dict[str, Any]:
-    """
-    用 yfinance fast_info 抓最新報價。
-
-    重要：
-    - 不使用 ticker.info，因為它常常很慢，容易造成 Make HTTP timeout。
-    - 加 20 秒快取，避免同一請求流程重複打 Yahoo。
-    """
-    cache_key = meta.yf_symbol
-    now = time_module.time()
-
-    cached = _QUOTE_CACHE.get(cache_key)
-
-    if cached:
-        ts, data = cached
-        if now - ts <= QUOTE_CACHE_TTL_SECONDS:
-            return dict(data)
-
-    try:
-        ticker = yf.Ticker(meta.yf_symbol)
-        fast_info = ticker.fast_info
-
-        latest = _safe_float(
-            _read_value(
-                fast_info,
-                [
-                    "last_price",
-                    "lastPrice",
-                    "regularMarketPrice",
-                    "currentPrice",
-                ],
-            )
-        )
-
-        previous_close = _safe_float(
-            _read_value(
-                fast_info,
-                [
-                    "previous_close",
-                    "previousClose",
-                    "regularMarketPreviousClose",
-                    "regular_market_previous_close",
-                ],
-            )
-        )
-
-        result: dict[str, Any] = {}
-
-        if latest > 0:
-            result["latest_price"] = latest
-
-        if previous_close > 0:
-            result["previous_close"] = previous_close
-
-        if result:
-            _QUOTE_CACHE[cache_key] = (now, result)
-
-        return result
-
-    except Exception as exc:
-        print(f"_get_yahoo_quote_snapshot fast_info failed: {exc}")
-        return {}
-        
-def _reconcile_intraday_with_quote(
-    meta: StockMeta,
-    df: pd.DataFrame,
-    time_frame: str,
-) -> pd.DataFrame:
-    """
-    用 quote 最新價覆蓋 intraday history 最後一筆。
-
-    這是修正：
-    - yfinance history 最後 Close 可能是 204
-    - Yahoo 報價頁 13:30 可能是 203
-    的問題。
-    """
-    if df.empty or time_frame not in {"1m", "5m"}:
-        return df
-
-    if not isinstance(df.index, pd.DatetimeIndex):
-        return df
-
-    quote = _get_yahoo_quote_snapshot(meta)
-
-    latest_price = _safe_float(quote.get("latest_price"))
-
-    if latest_price <= 0:
-        return df
-
-    df = df.copy()
-
-    display_stamp = df.attrs.get("display_timestamp")
-
-    previous_close = _safe_float(quote.get("previous_close"))
-
-    if previous_close > 0:
-        df = _set_reference_price(df, previous_close)
-
-    if display_stamp:
-        df.attrs["display_timestamp"] = display_stamp
-        df[DISPLAY_TIMESTAMP_COL] = display_stamp
-
-    last_idx = df.index[-1]
-
-    df.at[last_idx, "Close"] = latest_price
-
-    if "High" in df.columns:
-        df.at[last_idx, "High"] = max(_safe_float(df.at[last_idx, "High"]), latest_price)
-
-    if "Low" in df.columns:
-        old_low = _safe_float(df.at[last_idx, "Low"])
-
-        if old_low > 0:
-            df.at[last_idx, "Low"] = min(old_low, latest_price)
-        else:
-            df.at[last_idx, "Low"] = latest_price
-
-    if "Open" in df.columns:
-        old_open = _safe_float(df.at[last_idx, "Open"])
-
-        if old_open <= 0:
-            df.at[last_idx, "Open"] = latest_price
-
-    df.attrs["quote_price"] = latest_price
-    df.attrs["quote_source"] = "yfinance.fast_info"
-    df[QUOTE_PRICE_COL] = latest_price
-
-    print(
-        STOCK_SERVICE_VERSION,
-        "| reconcile_quote",
-        "| stock=", meta.stock_id,
-        "| yf_symbol=", meta.yf_symbol,
-        "| quote_latest=", latest_price,
-        "| quote_prev_close=", previous_close,
-        "| last_idx=", last_idx,
+    ax.set_xlim(
+        pd.Timestamp.combine(trade_date, time(9, 0)),
+        pd.Timestamp.combine(trade_date, time(13, 30)),
     )
+    ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
-    return df
-
-def _normalize_yf_daily_df(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-
-    df = raw.copy()
-
-    # yfinance 有時會回 MultiIndex 欄位
-    if isinstance(df.columns, pd.MultiIndex):
-        for level in range(df.columns.nlevels):
-            level_values = set(str(x) for x in df.columns.get_level_values(level))
-            if {"Open", "High", "Low", "Close"}.issubset(level_values):
-                df.columns = df.columns.get_level_values(level)
-                break
-
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    required = ["Open", "High", "Low", "Close"]
-
-    for col in required:
-        if col not in df.columns:
-            return pd.DataFrame()
-
-    if "Volume" not in df.columns:
-        df["Volume"] = 0
-
-    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
-
-    if df.empty:
-        return pd.DataFrame()
-
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-
-    return df
-
-
-def _resample_ohlcv_keep_latest_date(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    latest_trade_ts = df.index[-1]
-
-    out = df.resample(rule).agg(
-        {
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        }
-    )
-
-    out = out.dropna(subset=["Open", "High", "Low", "Close"])
-
-    if out.empty:
-        return out
-
-    # 重點：
-    # 週線、月線最後一根 K 的 index 改成實際最新交易日
-    # 避免月線顯示 2026-06-01 或週線顯示未來週五
-    idx = list(out.index)
-    idx[-1] = latest_trade_ts
-    out.index = pd.DatetimeIndex(idx)
-
-    out = out[~out.index.duplicated(keep="last")]
-
-    return out
-
-
-
-
-def _iter_months_back(months: int):
+def _get_reference_price(df: pd.DataFrame) -> float:
     """
-    由台北當月往前列出 year/month。
+    取得即時圖參考價 / 昨收。
+
+    優先順序：
+    1. df.attrs["previous_close"]：Yahoo chart API meta 的真正昨收。
+    2. df.attrs["chart_previous_close"]
+    3. df.attrs["regular_market_previous_close"]
+    4. df.attrs["prev_close"]
+    5. df 欄位 previous_close / prev_close / Adj Close 等。
+    6. 最後才 fallback 第一筆 Close。
+
+    注意：
+    不能優先用第一筆 Close，否則遇到跳空開盤會把開盤附近價格誤當昨收。
     """
-    try:
-        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
-    except Exception:
-        today = datetime.utcnow().date()
-
-    y = today.year
-    m = today.month
-
-    for _ in range(max(1, int(months))):
-        yield y, m
-        m -= 1
-        if m <= 0:
-            y -= 1
-            m = 12
-
-
-def _parse_tw_trade_date(value: Any):
-    """
-    支援：2026/07/09、2026-07-09、115/07/09。
-    """
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    text = text.replace("-", "/")
-    parts = text.split("/")
-    if len(parts) < 3:
-        return None
-
-    try:
-        year = int(parts[0])
-        month = int(parts[1])
-        day = int(parts[2])
-        if year < 1911:
-            year += 1911
-        return pd.Timestamp(year=year, month=month, day=day)
-    except Exception:
-        return None
-
-
-def _tw_number(value: Any) -> float:
-    try:
-        text = str(value or "").strip()
-        text = text.replace(",", "")
-        text = text.replace("--", "")
-        text = text.replace("X", "")
-        text = text.replace("除權息", "")
-        text = text.replace("+", "")
-        if text in {"", "-", "nan", "None"}:
-            return 0.0
-        return float(text)
-    except Exception:
+    if df is None or df.empty:
         return 0.0
 
-
-def _find_field_index(fields: list[str], keywords: list[str], default: int = -1) -> int:
-    for idx, field in enumerate(fields or []):
-        text = str(field)
-        if all(k in text for k in keywords):
-            return idx
-    return default
-
-
-def _normalize_official_stock_day_payload(payload: dict[str, Any], market: str) -> tuple[pd.DataFrame, str]:
-    """
-    將 TWSE / TPEx 個股日成交資訊轉成 OHLCV。
-    回傳 DataFrame 與 volume_unit：shares 或 lots。
-    """
-    if not isinstance(payload, dict):
-        return pd.DataFrame(), "shares"
-
-    fields = payload.get("fields") or payload.get("headers") or []
-    fields = [str(x) for x in fields] if isinstance(fields, list) else []
-
-    rows = payload.get("data") or payload.get("aaData") or []
-
-    if not rows and isinstance(payload.get("tables"), list):
-        try:
-            table0 = payload["tables"][0]
-            fields = table0.get("fields") or table0.get("headers") or fields
-            fields = [str(x) for x in fields] if isinstance(fields, list) else fields
-            rows = table0.get("data") or table0.get("aaData") or []
-        except Exception:
-            rows = []
-
-    if not isinstance(rows, list) or not rows:
-        return pd.DataFrame(), "shares"
-
-    if fields:
-        date_idx = _find_field_index(fields, ["日期"], 0)
-        open_idx = _find_field_index(fields, ["開盤"], 3)
-        high_idx = _find_field_index(fields, ["最高"], 4)
-        low_idx = _find_field_index(fields, ["最低"], 5)
-        close_idx = _find_field_index(fields, ["收盤"], 6)
-        vol_idx = _find_field_index(fields, ["成交", "股"], 1)
-        if vol_idx < 0:
-            vol_idx = _find_field_index(fields, ["成交", "張"], 1)
-        if vol_idx < 0:
-            vol_idx = 1
-        vol_field = str(fields[vol_idx]) if 0 <= vol_idx < len(fields) else ""
-        volume_unit = "lots" if ("仟股" in vol_field or "張" in vol_field) else "shares"
-    else:
-        # TWSE STOCK_DAY：日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價...
-        # TPEx st43：日期, 成交仟股, 成交仟元, 開盤, 最高, 最低, 收盤...
-        date_idx, vol_idx, open_idx, high_idx, low_idx, close_idx = 0, 1, 3, 4, 5, 6
-        volume_unit = "lots" if market == "TPEX" else "shares"
-
-    records = []
-    max_idx = max(date_idx, vol_idx, open_idx, high_idx, low_idx, close_idx)
-
-    for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) <= max_idx:
-            continue
-
-        ts = _parse_tw_trade_date(row[date_idx])
-        if ts is None:
-            continue
-
-        open_price = _tw_number(row[open_idx])
-        high_price = _tw_number(row[high_idx])
-        low_price = _tw_number(row[low_idx])
-        close_price = _tw_number(row[close_idx])
-        volume = _tw_number(row[vol_idx])
-
-        if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0:
-            continue
-
-        records.append({"Date": ts, "Open": open_price, "High": high_price, "Low": low_price, "Close": close_price, "Volume": volume})
-
-    if not records:
-        return pd.DataFrame(), volume_unit
-
-    df = pd.DataFrame(records).drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
-    df = df.set_index("Date")
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    df.attrs["volume_unit"] = volume_unit
-    df.attrs["price_source"] = market
-    df.attrs["unadjusted_price"] = True
-    return df, volume_unit
-
-
-def _request_json_safely(url: str, params: dict[str, Any], timeout: int = 10) -> dict[str, Any]:
-    try:
-        import requests
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*"}
-        res = requests.get(url, params=params, headers=headers, timeout=timeout)
-        if res.status_code >= 400:
-            return {}
-        return res.json()
-    except Exception:
-        return {}
-
-
-def _download_twse_official_stock_day_month(stock_id: str, year: int, month: int) -> pd.DataFrame:
-    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    payload = _request_json_safely(url, {"response": "json", "date": f"{year}{month:02d}01", "stockNo": str(stock_id)})
-    df, volume_unit = _normalize_official_stock_day_payload(payload, "TWSE")
-    if not df.empty:
-        df.attrs["volume_unit"] = volume_unit or "shares"
-        df.attrs["price_source"] = "TWSE_STOCK_DAY"
-    return df
-
-
-def _download_tpex_official_stock_day_month(stock_id: str, year: int, month: int) -> pd.DataFrame:
-    roc_year = year - 1911
-    candidates = [
-        ("https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock", {"code": str(stock_id), "date": f"{roc_year}/{month:02d}", "response": "json"}),
-        ("https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php", {"l": "zh-tw", "d": f"{roc_year}/{month:02d}", "stkno": str(stock_id)}),
-    ]
-    for url, params in candidates:
-        payload = _request_json_safely(url, params)
-        df, volume_unit = _normalize_official_stock_day_payload(payload, "TPEX")
-        if not df.empty:
-            df.attrs["volume_unit"] = volume_unit or "lots"
-            df.attrs["price_source"] = "TPEX_STOCK_DAY"
-            return df
-    return pd.DataFrame()
-
-
-def _get_official_unadjusted_daily_history(meta: StockMeta, months: int) -> pd.DataFrame:
-    """
-    從 TWSE / TPEx 官方個股日成交資訊抓未還原日 K。
-    用來避免 yfinance 歷史 Close 遇到除權息後被調整，造成 MA 失真。
-    """
-    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
-    if not stock_id:
-        return pd.DataFrame()
-
-    twse_parts = []
-    tpex_parts = []
-
-    for year, month in _iter_months_back(months):
-        twse_df = _download_twse_official_stock_day_month(stock_id, year, month)
-        if not twse_df.empty:
-            twse_parts.append(twse_df)
-            continue
-        tpex_df = _download_tpex_official_stock_day_month(stock_id, year, month)
-        if not tpex_df.empty:
-            tpex_parts.append(tpex_df)
-
-    parts = twse_parts if twse_parts else tpex_parts
-    if not parts:
-        return pd.DataFrame()
-
-    out = pd.concat(parts).sort_index()
-    out = out[~out.index.duplicated(keep="last")]
-    source = "TWSE_STOCK_DAY" if twse_parts else "TPEX_STOCK_DAY"
-    volume_unit = "shares" if twse_parts else str(parts[0].attrs.get("volume_unit") or "lots")
-    out.attrs["volume_unit"] = volume_unit
-    out.attrs["price_source"] = source
-    out.attrs["unadjusted_price"] = True
-
-    print(
-        "stock_service | official_unadjusted_daily",
-        "| stock =", stock_id,
-        "| source =", source,
-        "| rows =", len(out),
-        "| first =", out.index[0] if not out.empty else None,
-        "| latest =", out.index[-1] if not out.empty else None,
-        "| volume_unit =", volume_unit,
-        flush=True,
-    )
-    return out
-
-def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
-    tf = normalize_time_frame(time_frame)
-    cache_key = (meta.yf_symbol, tf)
-    now = time_module.time()
-
-    cached = _DWM_CACHE.get(cache_key)
-    if cached:
-        ts, cached_df = cached
-        if now - ts <= DWM_CACHE_TTL_SECONDS:
-            return cached_df.copy()
-
-    import os
-
-    official_months_map = {
-        "D": int(os.getenv("TW_OFFICIAL_D_MONTHS", "18")),
-        "W": int(os.getenv("TW_OFFICIAL_W_MONTHS", "42")),
-        "M": int(os.getenv("TW_OFFICIAL_M_MONTHS", "0")),
-    }
-
-    if tf == "M" and str(os.getenv("USE_TW_OFFICIAL_MONTHLY_HISTORY", "0")).strip() == "1":
-        official_months_map["M"] = int(os.getenv("TW_OFFICIAL_M_MONTHS", "156"))
-
-    use_official = str(os.getenv("USE_TW_OFFICIAL_DWM_HISTORY", "1")).strip() != "0"
-    official_months = official_months_map.get(tf, 0)
-
-    daily = pd.DataFrame()
-
-    if use_official and official_months > 0:
-        try:
-            daily = _get_official_unadjusted_daily_history(meta, official_months)
-        except Exception as exc:
-            print(
-                "stock_service | official_unadjusted_daily failed",
-                "| stock =", getattr(meta, "stock_id", ""),
-                "| tf =", tf,
-                "| error =", repr(exc),
-                flush=True,
-            )
-            daily = pd.DataFrame()
-
-    if daily.empty:
-        period_map = {
-            "D": "2y",
-            "W": "5y",
-            "M": "15y",
-        }
-        period = period_map.get(tf, "2y")
-
-        try:
-            raw = yf.download(
-                meta.yf_symbol,
-                period=period,
-                interval="1d",
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-            )
-        except Exception as exc:
-            print(f"_get_dwm_history_from_daily download failed: {meta.yf_symbol}, tf={tf}, error={exc}")
-            return pd.DataFrame()
-
-        daily = _normalize_yf_daily_df(raw)
-        if daily.empty:
-            print(f"_get_dwm_history_from_daily empty daily: {meta.yf_symbol}, tf={tf}")
-            return pd.DataFrame()
-
-        daily.attrs["volume_unit"] = "shares"
-        daily.attrs["price_source"] = "yfinance"
-
-    if tf == "D":
-        out = daily.copy()
-    elif tf == "W":
-        out = _resample_ohlcv_keep_latest_date(daily, "W-FRI")
-    elif tf == "M":
-        try:
-            out = _resample_ohlcv_keep_latest_date(daily, "ME")
-        except Exception:
-            out = _resample_ohlcv_keep_latest_date(daily, "M")
-    else:
-        out = daily.copy()
-
-    if out.empty:
-        return pd.DataFrame()
-
-    tail_map = {
-        "D": 180,
-        "W": 180,
-        "M": 140,
-    }
-    out = out.tail(tail_map.get(tf, 180)).copy()
-
-    display_stamp = daily.index[-1].strftime("%Y-%m-%d")
-    out.attrs["display_timestamp"] = display_stamp
-    out.attrs["volume_unit"] = str(daily.attrs.get("volume_unit") or "shares")
-    out.attrs["price_source"] = str(daily.attrs.get("price_source") or "unknown")
-    out.attrs["unadjusted_price"] = bool(daily.attrs.get("unadjusted_price", False))
-
-    try:
-        out[DISPLAY_TIMESTAMP_COL] = display_stamp
-    except Exception:
-        pass
-
-    _DWM_CACHE[cache_key] = (now, out.copy())
-
-    print(
-        "stock_service_v6_official_unadjusted | dwm_history | "
-        f"stock={meta.stock_id} | tf={tf} | rows={len(out)} | latest={out.index[-1]} "
-        f"| source={out.attrs.get('price_source')} | volume_unit={out.attrs.get('volume_unit')}"
-    )
-    return out
-
-
-def get_history(meta: StockMeta, time_frame: str = "D") -> tuple[pd.DataFrame, str]:
-    tf = normalize_time_frame(time_frame)
-    
-    if tf in {"D", "W", "M"}:
-        dwm_df = _get_dwm_history_from_daily(meta, tf)
-
-        if not dwm_df.empty:
-            return dwm_df
-
-    mapping = {
-        "1m": ("1d", "1m"),
-        "5m": ("5d", "5m"),
-        "D": ("6mo", "1d"),
-        "W": ("2y", "1wk"),
-        "M": ("5y", "1mo"),
-    }
-
-    period, interval = mapping.get(tf, mapping["D"])
-
-    df = _download_history(meta.yf_symbol, period, interval)
-
-    if df.empty and meta.yf_symbol.endswith(TW_SUFFIX):
-        two_symbol = meta.yf_symbol.replace(TW_SUFFIX, TWO_SUFFIX)
-        df = _download_history(two_symbol, period, interval)
-
-        if not df.empty:
-            meta.yf_symbol = two_symbol
-
-    if df.empty and tf == "1m":
-        df = _download_history(meta.yf_symbol, "5d", "1m")
-
-    if not df.empty:
-        df = df.dropna(subset=["Close"])
-
-        df = _normalize_to_taipei_time(df)
-
-        if tf in {"1m", "5m"}:
-            df = _keep_latest_trading_day(df)
-
-        if tf in {"1m", "5m"}:
-            df = _filter_tw_stock_session(df, tf)
-
-        if tf in {"1m", "5m"}:
-            df = _attach_intraday_reference_price(meta, df, tf)
-
-        if tf in {"1m", "5m"}:
-            df = _append_intraday_close_point(df, tf)
-
-        if tf in {"1m", "5m"}:
-            df = _reconcile_intraday_with_quote(meta, df, tf)
-
-    return df, tf
-
-
-def get_stock_name(meta: StockMeta) -> str:
-    """
-    股票名稱優先使用 twstock 查到的名稱。
-    不再呼叫 yfinance ticker.info，避免查詢 timeout。
-    """
-    if meta.stock_name and meta.stock_name != meta.stock_id:
-        return meta.stock_name
-
-    return meta.stock_id
-
-def _get_previous_close_from_df_attrs(df) -> float:
-    """
-    從 DataFrame attrs / 欄位取得真正昨收。
-    Yahoo direct 會把 previousClose 存在 df.attrs["previous_close"]。
-    """
-    if df is None:
-        return 0.0
-
+    # 1. 先讀 DataFrame attrs
     attr_keys = [
         "previous_close",
         "chart_previous_close",
@@ -1043,7 +98,7 @@ def _get_previous_close_from_df_attrs(df) -> float:
 
     for key in attr_keys:
         try:
-            value = getattr(df, "attrs", {}).get(key)
+            value = df.attrs.get(key)
 
             if value is None:
                 continue
@@ -1056,6 +111,7 @@ def _get_previous_close_from_df_attrs(df) -> float:
         except Exception:
             continue
 
+    # 2. 再讀欄位
     column_keys = [
         "previous_close",
         "PreviousClose",
@@ -1068,10 +124,10 @@ def _get_previous_close_from_df_attrs(df) -> float:
     ]
 
     for col in column_keys:
-        try:
-            if col not in df.columns:
-                continue
+        if col not in df.columns:
+            continue
 
+        try:
             values = pd.to_numeric(df[col], errors="coerce").dropna()
 
             if values.empty:
@@ -1085,129 +141,982 @@ def _get_previous_close_from_df_attrs(df) -> float:
         except Exception:
             continue
 
+    # 3. 最後 fallback：第一筆 Close
+    try:
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+
+        if not close.empty:
+            value = float(close.iloc[0])
+
+            if value > 0:
+                return value
+
+    except Exception:
+        pass
+
     return 0.0
 
-def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
+def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     """
-    價格資訊。
+    讓平盤價置於 Y 軸中間，並在右側顯示漲跌幅百分比。
+    """
+    ref_price = _get_reference_price(df)
 
-    規則：
-    - 1m / 5m：最新價、時間 一律以 intraday df 最後一筆為準
-    - 漲跌幅 = 最新價 vs 平盤價(reference_price)
-    - D / W / M：最新一根 vs 前一根
-    """
+    close = df["Close"].astype(float).dropna()
+
+    if close.empty:
+        return ref_price
+
+    max_delta = max(
+        abs(float(close.max()) - ref_price),
+        abs(float(close.min()) - ref_price),
+    )
+
+    if max_delta <= 0:
+        max_delta = max(ref_price * 0.005, 0.5)
+
+    max_delta *= 1.2
+
+    ymin = ref_price - max_delta
+    ymax = ref_price + max_delta
+
+    ax.set_ylim(ymin, ymax)
+
+    ax.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.0,
+        alpha=0.8,
+        label="Prev Close",
+    )
+
+    def price_to_pct(price):
+        return (price - ref_price) / ref_price * 100
+
+    def pct_to_price(pct):
+        return ref_price * (1 + pct / 100)
+
+    secax = ax.secondary_yaxis(
+        "right",
+        functions=(price_to_pct, pct_to_price),
+    )
+
+    secax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
+    )
+
+    return ref_price
+
+def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
     if df is None or df.empty:
-        return PriceMeta("--", "--", "--", 0.0, 0.0)
+        return _empty_chart(f"{stock_id}", "No intraday data")
 
-    tf = normalize_time_frame(time_frame)
+    df = df.copy()
 
-    latest = float(df["Close"].iloc[-1])
+    # ===== 取價格欄位 =====
+    close = df["Close"].astype(float)
+    latest = float(close.iloc[-1])
 
-    if tf in {"1m", "5m"}:
-        prev = 0.0
+    ref_price = _get_reference_price(df)
 
-        # 優先讀 Yahoo direct 存進 df.attrs 的真正昨收
-        for key in [
-            "previous_close",
-            "chart_previous_close",
-            "regular_market_previous_close",
-            "prev_close",
-            "reference_price",
-            "ref_price",
-        ]:
-            try:
-                value = df.attrs.get(key)
+    try:
+        ref_price = float(ref_price)
+    except Exception:
+        ref_price = latest
 
-                if value is None:
-                    continue
+    try:
+        prev_close = float(df.attrs.get("previous_close") or ref_price or latest)
+    except Exception:
+        prev_close = latest
 
-                value = float(value)
-    
-                if value > 0:
-                    prev = value
-                    break
+    try:
+        open_price = float(df["Open"].astype(float).iloc[0])
+    except Exception:
+        open_price = latest
 
-            except Exception:
-                continue
+    try:
+        high_price = float(df["High"].astype(float).max())
+    except Exception:
+        high_price = latest
 
-        # 如果 attrs 沒有，再檢查欄位
-        if not prev:
-            for col in [
-                "previous_close",
-                "PreviousClose",
-                "prev_close",
-                "PrevClose",
-                "reference_price",
-                "ReferencePrice",
-                "ref_price",
-                "RefPrice",
-            ]:
-                try:
-                    if col not in df.columns:
-                        continue
+    try:
+        low_price = float(df["Low"].astype(float).min())
+    except Exception:
+        low_price = latest
 
-                    values = pd.to_numeric(df[col], errors="coerce").dropna()
+    try:
+        total_volume = float(df["Volume"].fillna(0).astype(float).sum())
+    except Exception:
+        total_volume = 0.0
 
-                    if values.empty:
-                        continue
+    # 即時分K這邊目前預設 Volume 是「股」，統一換算成「張」。
+    volume_lots = total_volume / 1000.0
 
-                    value = float(values.iloc[-1])
+    def _fmt_price(value) -> str:
+        try:
+            return f"{float(value):,.2f}"
+        except Exception:
+            return "--"
 
-                    if value > 0:
-                        prev = value
-                        break
+    def _fmt_volume_lots(value) -> str:
+        try:
+            return f"{float(value):,.0f} 張"
+        except Exception:
+            return "--"
 
-                except Exception:
-                    continue
+    # ===== 畫布：資訊列 + 主圖 + 成交量 =====
+    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.95, 4.6, 1.45],
+        hspace=0.05,
+    )
 
-        # 最後 fallback，避免程式壞掉，但這不是最準
-        if not prev:
-            try:
-                prev = float(df["Open"].iloc[0])
-            except Exception:
-                prev = latest
+    ax_info = fig.add_subplot(gs[0])
+    ax = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax)
 
-        change = latest - prev
-        pct = (change / prev * 100) if prev else 0.0
+    ax_info.axis("off")
+    ax.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
 
-        stamp = df.index[-1].strftime("%Y-%m-%d %H:%M")
+    # ===== 上方資訊列：2 排 x 3 欄 =====
+    info_items = [
+        ("昨收", _fmt_price(prev_close)),
+        ("開盤", _fmt_price(open_price)),
+        ("最高", _fmt_price(high_price)),
+        ("最低", _fmt_price(low_price)),
+        ("參考", _fmt_price(ref_price)),
+        ("成交量", _fmt_volume_lots(volume_lots)),
+    ]
+
+    positions = [
+        (0.00, 0.68),
+        (0.34, 0.68),
+        (0.68, 0.68),
+        (0.00, 0.25),
+        (0.34, 0.25),
+        (0.68, 0.25),
+    ]
+
+    for (label, value), (x, y) in zip(info_items, positions):
+        ax_info.text(
+            x,
+            y,
+            f"{label} {value}",
+            ha="left",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+            color="#333333",
+            transform=ax_info.transAxes,
+            **_get_font_kwargs_safe(),
+        )
+
+    # ===== 主圖：即時折線 =====
+    line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
+
+    ax.plot(
+        df.index,
+        close,
+        linewidth=2.6,
+        color=line_color,
+        zorder=3,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close >= ref_price,
+        alpha=0.12,
+        color="#E74C3C",
+        interpolate=True,
+        zorder=2,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close < ref_price,
+        alpha=0.10,
+        color="#27AE60",
+        interpolate=True,
+        zorder=2,
+    )
+
+    # 參考線 / 昨收線
+    ax.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.3,
+        color="#7F8C8D",
+        alpha=0.85,
+        zorder=1,
+    )
+
+    # 自動置中價格軸 + 右側漲跌幅
+    _set_tw_stock_intraday_axis(ax, df)
+    _set_centered_price_axis(ax, df)
+
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.tick_params(axis="x", labelsize=11)
+    ax.tick_params(axis="y", labelsize=11)
+
+    # ===== 成交量圖 =====
+    vol_colors = []
+
+    for _, row in df.iterrows():
+        try:
+            o = float(row["Open"])
+            c = float(row["Close"])
+            vol_colors.append("#E74C3C" if c >= o else "#27AE60")
+        except Exception:
+            vol_colors.append("#E74C3C")
+
+    volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
+
+    bar_width = 0.0025 if len(df) > 100 else 0.0045
+
+    ax_v.bar(
+        df.index,
+        volume_lot_series,
+        width=bar_width,
+        color=vol_colors,
+        edgecolor="none",
+    )
+
+    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
+    ax_v.grid(True, linestyle=":", alpha=0.30)
+    ax_v.tick_params(axis="x", labelsize=10)
+    ax_v.tick_params(axis="y", labelsize=10)
+
+    ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+        ax_v.spines[spine].set_visible(False)
+
+    fig.tight_layout()
+
+    try:
+        image_url = publish_figure(fig, f"{stock_id}_instant")
 
         print(
-            "DEBUG build_price_meta intraday",
-            "| tf =", tf,
-            "| latest =", latest,
-            "| prev =", prev,
-            "| change =", change,
-            "| pct =", pct,
-            "| attrs =",
-            {
-                "previous_close": df.attrs.get("previous_close"),
-                "reference_price": df.attrs.get("reference_price"),
-                "symbol": df.attrs.get("symbol"),
-                "source": df.attrs.get("source"),
-            },
+            "DEBUG publish instant figure",
+            "| stock_id =",
+            stock_id,
+            "| image_url =",
+            image_url,
             flush=True,
         )
 
-        return PriceMeta(
-            price_info=f"{latest:.2f}",
-            change_info=f"{signed_number(change)} ({signed_percent(pct)})",
-            time_stamp=stamp,
-            price_change=change,
-            latest_price=latest,
+        return image_url or ""
+
+    except Exception:
+        import traceback
+
+        print(
+            "DEBUG publish instant figure failed",
+            "| stock_id =",
+            stock_id,
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+
+        return ""
+
+    finally:
+        plt.close(fig)
+
+def _to_lots(volume_value, volume_unit: str = "shares") -> float:
+    """
+    成交量統一轉成「張」。
+
+    volume_unit:
+    - shares / share / 股：代表原始資料是股，除以 1000
+    - lots / lot / 張：代表原始資料已經是張，不除
+    """
+    try:
+        value = float(volume_value)
+    except Exception:
+        return 0.0
+
+    unit = str(volume_unit or "shares").lower()
+
+    if unit in {"lots", "lot", "張"}:
+        return value
+
+    return value / 1000.0
+    
+def _fmt_lots(value) -> str:
+    try:
+        return f"{float(value):,.0f} 張"
+    except Exception:
+        return "--"
+    
+    def _fmt_price(value) -> str:
+        try:
+            return f"{float(value):,.2f}"
+        except Exception:
+            return "--"
+
+    def _fmt_volume_lots(value) -> str:
+        try:
+            return f"{float(value):,.0f} 張"
+        except Exception:
+            return "--"
+
+    # ===== 畫布：資訊列 + 主圖 + 成交量 =====
+    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.95, 4.6, 1.45],
+        hspace=0.05,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax)
+
+    ax_info.axis("off")
+    ax.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
+
+    # ===== 上方資訊列：改成 2 排 x 3 欄 =====
+    info_items = [
+        ("昨收", _fmt_price(prev_close)),
+        ("開盤", _fmt_price(open_price)),
+        ("最高", _fmt_price(high_price)),
+        ("最低", _fmt_price(low_price)),
+        ("參考", _fmt_price(ref_price)),
+        ("成交量", _fmt_volume_lots(volume_lots)),
+    ]
+
+    positions = [
+        (0.00, 0.68),
+        (0.34, 0.68),
+        (0.68, 0.68),
+        (0.00, 0.25),
+        (0.34, 0.25),
+        (0.68, 0.25),
+    ]
+
+    for (label, value), (x, y) in zip(info_items, positions):
+        ax_info.text(
+            x,
+            y,
+            f"{label} {value}",
+            ha="left",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+            color="#333333",
+            transform=ax_info.transAxes,
+            **_get_font_kwargs_safe(),
         )
 
-    # D / W / M
-    prev = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
-    change = latest - prev
-    pct = (change / prev * 100) if prev else 0.0
-    stamp = df.index[-1].strftime("%Y-%m-%d")
+    # ===== 主圖：即時折線 =====
+    line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
 
-    return PriceMeta(
-        price_info=f"{latest:.2f}",
-        change_info=f"{signed_number(change)} ({signed_percent(pct)})",
-        time_stamp=stamp,
-        price_change=change,
-        latest_price=latest,
+    ax.plot(
+        df.index,
+        close,
+        linewidth=2.6,
+        color=line_color,
+        zorder=3,
     )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close >= ref_price,
+        alpha=0.12,
+        color="#E74C3C",
+        interpolate=True,
+        zorder=2,
+    )
+
+    ax.fill_between(
+        df.index,
+        close,
+        ref_price,
+        where=close < ref_price,
+        alpha=0.10,
+        color="#27AE60",
+        interpolate=True,
+        zorder=2,
+    )
+
+    # 參考線 / 昨收線
+    ax.axhline(
+        ref_price,
+        linestyle="--",
+        linewidth=1.3,
+        color="#7F8C8D",
+        alpha=0.85,
+        zorder=1,
+    )
+
+    # 自動置中價格軸 + 右側漲跌幅
+    _set_tw_stock_intraday_axis(ax, df)
+    _set_centered_price_axis(ax, df)
+
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.tick_params(axis="x", labelsize=11)
+    ax.tick_params(axis="y", labelsize=11)
+
+    # ===== 成交量圖 =====
+    vol_colors = []
+
+    for _, row in df.iterrows():
+        try:
+            o = float(row["Open"])
+            c = float(row["Close"])
+            vol_colors.append("#E74C3C" if c >= o else "#27AE60")
+        except Exception:
+            vol_colors.append("#E74C3C")
+
+    volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
+
+    # Matplotlib 日期座標的 width 單位是「天」
+    # 0.0025 約等於 3.6 分鐘，視覺上比較飽滿。
+    bar_width = 0.0025 if len(df) > 100 else 0.0045
+
+    ax_v.bar(
+        df.index,
+        volume_lot_series,
+        width=bar_width,
+        color=vol_colors,
+        edgecolor="none",
+    )
+
+    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
+    ax_v.grid(True, linestyle=":", alpha=0.30)
+    ax_v.tick_params(axis="x", labelsize=10)
+    ax_v.tick_params(axis="y", labelsize=10)
+
+    # X 軸格式
+    ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+        ax_v.spines[spine].set_visible(False)
+
+    fig.tight_layout()
+
+    try:
+        return publish_figure(fig, f"{stock_id}_instant")
+    finally:
+        plt.close(fig)
     
+def _fmt_ma_value(value) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "--"
+        return f"{float(value):.2f}"
+    except Exception:
+        return "--"
+
+
+def _get_font_kwargs_safe() -> dict:
+    try:
+        return _font_kwargs()
+    except Exception:
+        return {}
+
+def _setup_chinese_font():
+    """
+    設定中文字型，避免圖表中文字變方塊。
+    """
+    try:
+        from pathlib import Path
+
+        import matplotlib.font_manager as fm
+        import matplotlib.pyplot as plt
+
+        font_path = Path("assets/fonts/NotoSansTC-Regular.ttf")
+
+        if font_path.exists():
+            fm.fontManager.addfont(str(font_path))
+            font_prop = fm.FontProperties(fname=str(font_path))
+            plt.rcParams["font.family"] = font_prop.get_name()
+
+        plt.rcParams["axes.unicode_minus"] = False
+
+    except Exception as exc:
+        print(
+            "DEBUG chart font setup failed",
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+
+def _prepare_kline_work_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """
+    K 線計算前整理資料。
+
+    修正重點：
+    1. D / W / M 若同一天有兩筆資料，保留最後一筆。
+       這會處理「日 K 歷史列 + Shioaji 即時 snapshot 列」重複造成 MA 失真的問題。
+    2. MA 一律用未還原 Close 計算。
+    3. Open / High / Low / Close / Volume 轉成數值。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    attrs_backup = dict(getattr(df, "attrs", {}) or {})
+    work_df = df.copy()
+
+    if not isinstance(work_df.index, pd.DatetimeIndex):
+        try:
+            work_df.index = pd.to_datetime(work_df.index, errors="coerce")
+            work_df = work_df[~work_df.index.isna()].copy()
+        except Exception:
+            pass
+
+    if work_df.empty:
+        return pd.DataFrame()
+
+    try:
+        work_df = work_df.sort_index()
+    except Exception:
+        pass
+
+    normalized_tf = normalize_time_frame(tf)
+
+    if normalized_tf in {"D", "W", "M"} and isinstance(work_df.index, pd.DatetimeIndex):
+        try:
+            before_rows = len(work_df)
+
+            # 同一交易日若同時存在 00:00 日K與 13:xx 即時快照，
+            # 保留最後一筆，避免 MA 把同一天算兩次。
+            date_keys = pd.Index(work_df.index.normalize())
+            keep_mask = ~date_keys.duplicated(keep="last")
+            work_df = work_df.loc[keep_mask].copy()
+
+            after_rows = len(work_df)
+
+            if before_rows != after_rows:
+                print(
+                    "DEBUG kline dedupe same_date",
+                    "| before_rows =",
+                    before_rows,
+                    "| after_rows =",
+                    after_rows,
+                    "| removed =",
+                    before_rows - after_rows,
+                    flush=True,
+                )
+
+        except Exception as exc:
+            print(
+                "DEBUG kline dedupe same_date failed",
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
+
+    required_cols = ["Open", "High", "Low", "Close", "Volume"]
+
+    for col in required_cols:
+        if col not in work_df.columns:
+            if col == "Volume":
+                work_df[col] = 0
+            else:
+                return pd.DataFrame()
+
+        work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
+
+    work_df = work_df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    try:
+        work_df.attrs.update(attrs_backup)
+    except Exception:
+        pass
+
+    return work_df
+
+
+def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: str) -> str:
+    if df is None or df.empty:
+        return ""
+
+    _setup_chinese_font()
+
+    tf = normalize_time_frame(tf)
+    work_df = _prepare_kline_work_df(df, tf)
+
+    if work_df.empty:
+        return ""
+
+    volume_unit = str(getattr(work_df, "attrs", {}).get("volume_unit") or "shares").lower()
+
+    # MA 必須先用完整資料算，再裁切顯示範圍。
+    # min_periods 用完整 period，避免資料不足時硬算出失真的 MA。
+    close_for_ma = pd.to_numeric(work_df["Close"], errors="coerce")
+
+    for period in [5, 10, 20, 60, 120, 240]:
+        work_df[f"MA{period}"] = close_for_ma.rolling(
+            period,
+            min_periods=period,
+        ).mean()
+
+    if tf == "D":
+        plot_df = work_df.tail(60).copy()
+    elif tf == "W":
+        plot_df = work_df.tail(80).copy()
+    elif tf == "M":
+        plot_df = work_df.tail(80).copy()
+    else:
+        plot_df = work_df.tail(60).copy()
+
+    if plot_df.empty:
+        return ""
+
+    latest = work_df.iloc[-1]
+
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    latest_close = float(latest["Close"])
+    latest_volume = _to_lots(latest["Volume"], volume_unit)
+
+    try:
+        latest_date = work_df.index[-1].strftime("%Y-%m-%d")
+    except Exception:
+        latest_date = str(work_df.index[-1])
+
+    prev_close = None
+
+    if len(work_df) >= 2:
+        prev_close = float(work_df["Close"].iloc[-2])
+
+    change = 0.0
+    pct = 0.0
+
+    if prev_close and prev_close != 0:
+        change = latest_close - prev_close
+        pct = change / prev_close * 100
+
+    ma5 = latest.get("MA5")
+    ma20 = latest.get("MA20")
+    ma60 = latest.get("MA60")
+    ma120 = latest.get("MA120")
+
+    if str(stock_id) == "5274" and tf == "D":
+        try:
+            debug_tail = [float(x) for x in close_for_ma.dropna().tail(25).tolist()]
+
+            print(
+                "DEBUG kline MA check",
+                "| stock_id =", stock_id,
+                "| tf =", tf,
+                "| rows =", len(work_df),
+                "| latest_date =", latest_date,
+                "| latest_close =", latest_close,
+                "| volume =", latest_volume,
+                "| MA5 =", ma5,
+                "| MA20 =", ma20,
+                "| MA60 =", ma60,
+                "| MA120 =", ma120,
+                "| close_tail25 =", debug_tail,
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "DEBUG kline MA check failed",
+                "| stock_id =", stock_id,
+                "| error =", repr(exc),
+                flush=True,
+            )
+
+    def _fmt_price(v):
+        try:
+            return f"{float(v):,.2f}"
+        except Exception:
+            return "--"
+
+    def _fmt_ma(v):
+        try:
+            if v is None or pd.isna(v):
+                return "--"
+            return f"{float(v):.2f}"
+        except Exception:
+            return "--"
+
+    fig = plt.figure(figsize=(9, 7), dpi=130, facecolor="white")
+    gs = gridspec.GridSpec(
+        3,
+        1,
+        height_ratios=[0.78, 3.35, 1.05],
+        hspace=0.05,
+    )
+
+    ax_info = fig.add_subplot(gs[0])
+    ax_k = fig.add_subplot(gs[1])
+    ax_v = fig.add_subplot(gs[2], sharex=ax_k)
+
+    ax_info.set_facecolor("white")
+    ax_info.axis("off")
+
+    font_kwargs = _get_font_kwargs_safe()
+
+    ax_info.text(0.00, 0.34, f"5MA {_fmt_ma(ma5)}", fontsize=15, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.28, 0.34, f"20MA {_fmt_ma(ma20)}", fontsize=15, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.56, 0.34, f"60MA {_fmt_ma(ma60)}", fontsize=15, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.08, f"120MA {_fmt_ma(ma120)}", fontsize=15, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+
+    ax_info.text(
+        0.35,
+        0.08,
+        f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
+        fontsize=13,
+        color="#444444",
+        ha="left",
+        va="center",
+        transform=ax_info.transAxes,
+        **font_kwargs,
+    )
+
+    ax_k.set_facecolor("#F8F9FA")
+    ax_v.set_facecolor("#F8F9FA")
+
+    x_values = list(range(len(plot_df)))
+    candle_width = 0.58
+
+    for i in range(len(plot_df)):
+        row = plot_df.iloc[i]
+
+        open_price = float(row["Open"])
+        high_price = float(row["High"])
+        low_price = float(row["Low"])
+        close_price = float(row["Close"])
+        volume = _to_lots(row["Volume"], volume_unit)
+
+        color = "#FF2D2D" if close_price >= open_price else "#00B050"
+
+        ax_k.vlines(i, low_price, high_price, linewidth=1.0, color=color)
+
+        lower = min(open_price, close_price)
+        height = abs(close_price - open_price)
+
+        if height <= 0:
+            height = 0.01
+
+        ax_k.bar(i, height, bottom=lower, width=candle_width, color=color, align="center")
+        ax_v.bar(i, volume, width=candle_width, color=color, align="center")
+
+    ma_styles = {
+        "MA5": ("#111111", 1.2),
+        "MA20": ("#1F77B4", 1.2),
+        "MA60": ("#FF7F0E", 1.2),
+        "MA120": ("#9467BD", 1.2),
+    }
+
+    for col, (line_color, linewidth) in ma_styles.items():
+        if col in plot_df.columns:
+            ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
+
+    ax_k.grid(True, linestyle=":", alpha=0.35)
+    ax_v.grid(True, linestyle=":", alpha=0.30)
+
+    if tf == "D":
+        labels = [idx.strftime("%m/%d") for idx in plot_df.index]
+    elif tf == "W":
+        labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
+    else:
+        labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
+
+    step = max(1, len(labels) // 6)
+    ticks = list(range(0, len(labels), step))
+
+    ax_v.set_xticks(ticks)
+    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=9, **font_kwargs)
+
+    plt.setp(ax_k.get_xticklabels(), visible=False)
+
+    ax_v.set_ylabel("成交量", fontsize=10, **font_kwargs)
+
+    ax_k.tick_params(axis="y", labelsize=9)
+    ax_v.tick_params(axis="y", labelsize=9)
+
+    ax_k.spines["top"].set_visible(False)
+    ax_k.spines["right"].set_visible(False)
+    ax_v.spines["top"].set_visible(False)
+    ax_v.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+
+    try:
+        return publish_figure(fig, f"{stock_id}_{tf}_kline")
+    finally:
+        plt.close(fig)
+
+def _fmt_chip_ratio(value) -> str:
+    try:
+        if value in (None, "", "--"):
+            return "--"
+        if isinstance(value, str) and value.endswith("%"):
+            return value
+        return f"{float(value):.2f}%"
+    except Exception:
+        return str(value)
+
+def _fmt_chip_date(value) -> str:
+    s = str(value or "--").strip()
+
+    if len(s) >= 10 and "-" in s:
+        return s[5:10].replace("-", "/")
+
+    return s.replace("-", "/")
+
+def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, list[dict]]) -> str:
+    """
+    三大法人籌碼圖：中文大字版
+
+    每區分成兩塊：
+    1. 文字資訊列：法人名稱、日期、持股比、買賣超張數
+    2. 10日買賣超柱狀圖
+    """
+    font_kwargs = _font_kwargs()
+
+    fig = plt.figure(figsize=(8.8, 12.2), dpi=150, facecolor="white")
+
+    gs = gridspec.GridSpec(
+        6,
+        1,
+        height_ratios=[0.50, 1.55, 0.50, 1.55, 0.50, 1.55],
+        hspace=0.36,
+    )
+
+    fig.suptitle(
+        f"{stock_id} {stock_name} 三大法人籌碼",
+        fontsize=21,
+        fontweight="bold",
+        y=0.992,
+        **font_kwargs,
+    )
+
+    sections = [
+        ("外資", chip_rows.get("foreign", [])),
+        ("投信", chip_rows.get("trust", [])),
+        ("自營商", chip_rows.get("dealer", [])),
+    ]
+
+    for idx, (section_name, rows) in enumerate(sections):
+        rows = rows[-10:] if rows else []
+
+        ax_text = fig.add_subplot(gs[idx * 2])
+        ax_bar = fig.add_subplot(gs[idx * 2 + 1])
+
+        # =========================
+        # 文字資訊區
+        # =========================
+        ax_text.axis("off")
+
+        latest = rows[-1] if rows else {}
+        latest_date = _fmt_chip_date(latest.get("date", "--"))
+        latest_ratio = _fmt_chip_ratio(latest.get("ratio", "--"))
+        latest_value = float(latest.get("buy_sell", 0) or 0)
+
+        latest_lots = abs(int(round(latest_value)))
+        action_text = "買超" if latest_value >= 0 else "賣超"
+
+        ax_text.text(
+            0.01,
+            0.72,
+            section_name,
+            fontsize=18,
+            fontweight="bold",
+            color="#111111",
+            ha="left",
+            va="center",
+            **font_kwargs,
+        )
+
+        if latest_ratio in {"--", "", "None", "nan"}:
+            info_text = f"{latest_date} │ {action_text} {latest_lots:,} 張"
+        else:
+            info_text = f"{latest_date} │ 持股比 {latest_ratio} │ {action_text} {latest_lots:,} 張"
+        
+        ax_text.text(
+            0.01,
+            0.24,
+            info_text,
+            fontsize=15,
+            fontweight="bold",
+            color="#333333",
+            ha="left",
+            va="center",
+            **font_kwargs,
+        )
+
+        # =========================
+        # 10日柱狀圖
+        # =========================
+        ax_bar.set_facecolor("#F8F9FA")
+
+        values = [float(r.get("buy_sell", 0) or 0) for r in rows]
+        dates = [_fmt_chip_date(r.get("date", "--")) for r in rows]
+
+        if values:
+            colors = ["#FF3B30" if v >= 0 else "#34C759" for v in values]
+            x = list(range(len(values)))
+
+            ax_bar.bar(
+                x,
+                values,
+                color=colors,
+                width=0.60,
+                edgecolor="none",
+            )
+
+            ax_bar.axhline(
+                0,
+                linewidth=1.2,
+                color="#666666",
+            )
+
+            ax_bar.set_xticks(x)
+            ax_bar.set_xticklabels(
+                dates,
+                fontsize=12,
+                rotation=0,
+            )
+        else:
+            ax_bar.text(
+                0.5,
+                0.5,
+                "暫無資料",
+                transform=ax_bar.transAxes,
+                ha="center",
+                va="center",
+                fontsize=15,
+                color="#888888",
+                **font_kwargs,
+            )
+            ax_bar.set_xticks([])
+
+        ax_bar.tick_params(axis="y", labelsize=12)
+        ax_bar.grid(True, axis="y", linestyle=":", alpha=0.35)
+
+        ax_bar.spines["top"].set_visible(False)
+        ax_bar.spines["right"].set_visible(False)
+
+        ax_bar.margins(y=0.22)
+
+    fig.tight_layout(rect=[0.03, 0.02, 0.98, 0.965])
+
+    return publish_figure(fig, f"{stock_id}_chip")
