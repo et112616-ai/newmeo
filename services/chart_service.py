@@ -662,27 +662,118 @@ def _setup_chinese_font():
             flush=True,
         )
 
+def _prepare_kline_work_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """
+    K 線計算前整理資料。
+
+    修正重點：
+    1. D / W / M 若同一天有兩筆資料，保留最後一筆。
+       這會處理「日 K 歷史列 + Shioaji 即時 snapshot 列」重複造成 MA 失真的問題。
+    2. MA 一律用未還原 Close 計算。
+    3. Open / High / Low / Close / Volume 轉成數值。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    attrs_backup = dict(getattr(df, "attrs", {}) or {})
+    work_df = df.copy()
+
+    if not isinstance(work_df.index, pd.DatetimeIndex):
+        try:
+            work_df.index = pd.to_datetime(work_df.index, errors="coerce")
+            work_df = work_df[~work_df.index.isna()].copy()
+        except Exception:
+            pass
+
+    if work_df.empty:
+        return pd.DataFrame()
+
+    try:
+        work_df = work_df.sort_index()
+    except Exception:
+        pass
+
+    normalized_tf = normalize_time_frame(tf)
+
+    if normalized_tf in {"D", "W", "M"} and isinstance(work_df.index, pd.DatetimeIndex):
+        try:
+            before_rows = len(work_df)
+
+            # 同一交易日若同時存在 00:00 日K與 13:xx 即時快照，
+            # 保留最後一筆，避免 MA 把同一天算兩次。
+            date_keys = pd.Index(work_df.index.normalize())
+            keep_mask = ~date_keys.duplicated(keep="last")
+            work_df = work_df.loc[keep_mask].copy()
+
+            after_rows = len(work_df)
+
+            if before_rows != after_rows:
+                print(
+                    "DEBUG kline dedupe same_date",
+                    "| before_rows =",
+                    before_rows,
+                    "| after_rows =",
+                    after_rows,
+                    "| removed =",
+                    before_rows - after_rows,
+                    flush=True,
+                )
+
+        except Exception as exc:
+            print(
+                "DEBUG kline dedupe same_date failed",
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
+
+    required_cols = ["Open", "High", "Low", "Close", "Volume"]
+
+    for col in required_cols:
+        if col not in work_df.columns:
+            if col == "Volume":
+                work_df[col] = 0
+            else:
+                return pd.DataFrame()
+
+        work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
+
+    work_df = work_df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    try:
+        work_df.attrs.update(attrs_backup)
+    except Exception:
+        pass
+
+    return work_df
+
+
 def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: str) -> str:
     if df is None or df.empty:
         return ""
 
     _setup_chinese_font()
 
-    work_df = df.copy()
+    tf = normalize_time_frame(tf)
+    work_df = _prepare_kline_work_df(df, tf)
 
-    volume_unit = str(df.attrs.get("volume_unit") or "shares").lower()
+    if work_df.empty:
+        return ""
 
-    for period in [5, 20, 60, 120]:
-        work_df[f"MA{period}"] = (
-            work_df["Close"]
-            .astype(float)
-            .rolling(period, min_periods=1)
-            .mean()
-        )
+    volume_unit = str(getattr(work_df, "attrs", {}).get("volume_unit") or "shares").lower()
 
-    # 顯示範圍
+    # MA 必須先用完整資料算，再裁切顯示範圍。
+    # min_periods 用完整 period，避免資料不足時硬算出失真的 MA。
+    close_for_ma = pd.to_numeric(work_df["Close"], errors="coerce")
+
+    for period in [5, 10, 20, 60, 120, 240]:
+        work_df[f"MA{period}"] = close_for_ma.rolling(
+            period,
+            min_periods=period,
+        ).mean()
+
     if tf == "D":
-        plot_df = work_df.tail(60).copy()   # 近 3 個月
+        plot_df = work_df.tail(60).copy()
     elif tf == "W":
         plot_df = work_df.tail(80).copy()
     elif tf == "M":
@@ -700,14 +791,20 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     latest_low = float(latest["Low"])
     latest_close = float(latest["Close"])
     latest_volume = _to_lots(latest["Volume"], volume_unit)
-    latest_date = work_df.index[-1].strftime("%Y-%m-%d")
+
+    try:
+        latest_date = work_df.index[-1].strftime("%Y-%m-%d")
+    except Exception:
+        latest_date = str(work_df.index[-1])
 
     prev_close = None
+
     if len(work_df) >= 2:
         prev_close = float(work_df["Close"].iloc[-2])
 
     change = 0.0
     pct = 0.0
+
     if prev_close and prev_close != 0:
         change = latest_close - prev_close
         pct = change / prev_close * 100
@@ -717,37 +814,49 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ma60 = latest.get("MA60")
     ma120 = latest.get("MA120")
 
+    if str(stock_id) == "5274" and tf == "D":
+        try:
+            debug_tail = [float(x) for x in close_for_ma.dropna().tail(25).tolist()]
+
+            print(
+                "DEBUG kline MA check",
+                "| stock_id =", stock_id,
+                "| tf =", tf,
+                "| rows =", len(work_df),
+                "| latest_date =", latest_date,
+                "| latest_close =", latest_close,
+                "| volume =", latest_volume,
+                "| MA5 =", ma5,
+                "| MA20 =", ma20,
+                "| MA60 =", ma60,
+                "| MA120 =", ma120,
+                "| close_tail25 =", debug_tail,
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "DEBUG kline MA check failed",
+                "| stock_id =", stock_id,
+                "| error =", repr(exc),
+                flush=True,
+            )
+
     def _fmt_price(v):
         try:
             return f"{float(v):,.2f}"
         except Exception:
             return "--"
 
-    def _fmt_int(v):
-        try:
-            return f"{int(float(v)):,}"
-        except Exception:
-            return "--"
-
-    def _fmt_signed(v):
-        try:
-            return f"{float(v):+,.2f}"
-        except Exception:
-            return "--"
-
-    def _fmt_signed_pct(v):
-        try:
-            return f"{float(v):+,.2f}%"
-        except Exception:
-            return "--"
-
     def _fmt_ma(v):
         try:
+            if v is None or pd.isna(v):
+                return "--"
             return f"{float(v):.2f}"
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=(9,7), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=(9, 7), dpi=130, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
@@ -759,57 +868,15 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ax_k = fig.add_subplot(gs[1])
     ax_v = fig.add_subplot(gs[2], sharex=ax_k)
 
-    # =========================
-    # 上方資訊區
-    # =========================
     ax_info.set_facecolor("white")
     ax_info.axis("off")
 
-    # MA 顯示（字體改大：15）
-    ax_info.text(
-        0.00,
-        0.34,
-        f"5MA {_fmt_ma(ma5)}",
-        fontsize=15,
-        fontweight="bold",
-        color="#111111",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.28,
-        0.34,
-        f"20MA {_fmt_ma(ma20)}",
-        fontsize=15,
-        fontweight="bold",
-        color="#1F77B4",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.56,
-        0.34,
-        f"60MA {_fmt_ma(ma60)}",
-        fontsize=15,
-        fontweight="bold",
-        color="#FF7F0E",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.00,
-        0.08,
-        f"120MA {_fmt_ma(ma120)}",
-        fontsize=15,
-        fontweight="bold",
-        color="#9467BD",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
+    font_kwargs = _get_font_kwargs_safe()
+
+    ax_info.text(0.00, 0.34, f"5MA {_fmt_ma(ma5)}", fontsize=15, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.28, 0.34, f"20MA {_fmt_ma(ma20)}", fontsize=15, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.56, 0.34, f"60MA {_fmt_ma(ma60)}", fontsize=15, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.08, f"120MA {_fmt_ma(ma120)}", fontsize=15, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
 
     ax_info.text(
         0.35,
@@ -820,11 +887,9 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         ha="left",
         va="center",
         transform=ax_info.transAxes,
+        **font_kwargs,
     )
 
-    # =========================
-    # K線區
-    # =========================
     ax_k.set_facecolor("#F8F9FA")
     ax_v.set_facecolor("#F8F9FA")
 
@@ -846,25 +911,12 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
         lower = min(open_price, close_price)
         height = abs(close_price - open_price)
+
         if height <= 0:
             height = 0.01
 
-        ax_k.bar(
-            i,
-            height,
-            bottom=lower,
-            width=candle_width,
-            color=color,
-            align="center",
-        )
-
-        ax_v.bar(
-            i,
-            volume,
-            width=candle_width,
-            color=color,
-            align="center",
-        )
+        ax_k.bar(i, height, bottom=lower, width=candle_width, color=color, align="center")
+        ax_v.bar(i, volume, width=candle_width, color=color, align="center")
 
     ma_styles = {
         "MA5": ("#111111", 1.2),
@@ -875,12 +927,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     for col, (line_color, linewidth) in ma_styles.items():
         if col in plot_df.columns:
-            ax_k.plot(
-                x_values,
-                plot_df[col].values,
-                linewidth=linewidth,
-                color=line_color,
-            )
+            ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
 
     ax_k.grid(True, linestyle=":", alpha=0.35)
     ax_v.grid(True, linestyle=":", alpha=0.30)
@@ -896,15 +943,11 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ticks = list(range(0, len(labels), step))
 
     ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels(
-        [labels[i] for i in ticks],
-        rotation=0,
-        fontsize=9,
-    )
+    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=9, **font_kwargs)
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    ax_v.set_ylabel("成交量", fontsize=10)
+    ax_v.set_ylabel("成交量", fontsize=10, **font_kwargs)
 
     ax_k.tick_params(axis="y", labelsize=9)
     ax_v.tick_params(axis="y", labelsize=9)
@@ -920,7 +963,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         return publish_figure(fig, f"{stock_id}_{tf}_kline")
     finally:
         plt.close(fig)
-    
+
 def _fmt_chip_ratio(value) -> str:
     try:
         if value in (None, "", "--"):
