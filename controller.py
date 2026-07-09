@@ -8,8 +8,8 @@ from services.sinopac_quote_service import (
     is_shioaji_api_ready,
 )
 from services.market_margin_service import get_market_margin_snapshot
-
 from services.financial_service import get_financial_snapshot
+
 
 from typing import Any
 
@@ -44,7 +44,6 @@ import traceback
 
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
-from services.financial_service import get_financial_snapshot
 
 def _is_tw_stock_live_session() -> bool:
     """
@@ -5024,12 +5023,8 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "大盤融資券",
                 _build_market_margin_flex(snapshot),
                 )
-            
-            if action == "financial":
-                snapshot = get_financial_snapshot(meta.stock_id, stock_name)
-                flex = _build_financial_flex(meta.stock_id, stock_name, snapshot, requested_tf)
-                return _reply_with_title(f"{stock_name} 財務", flex)
-                        
+
+
             if action in {"market_future_day", "market_future_all"}:
                 session_mode = "all" if action == "market_future_all" else "day"
 
@@ -5050,43 +5045,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         stock_t0 = time.perf_counter()
 
-        if action == "financial":
-            import time
-
-            t_fin0 = time.perf_counter()
-
-            snapshot = get_financial_snapshot(
-                meta.stock_id,
-                stock_name,
-            )
-
-            t_fin1 = time.perf_counter()
-
-            print(
-                "DEBUG stock timing financial",
-                "| stock_id =",
-                meta.stock_id,
-                "| available =",
-                bool(getattr(snapshot, "available", False)),
-                "| rows =",
-                len(getattr(snapshot, "rows", []) or []),
-                "| sec =",
-                round(t_fin1 - t_fin0, 3),
-                flush=True,
-            )
-
-            flex = _build_financial_flex(
-                meta.stock_id,
-                stock_name,
-                snapshot,
-                requested_tf,
-            )
-
-            return _reply_with_title(
-                f"{stock_name} 財務",
-                flex,
-            )
-        
         print(
             "DEBUG stock timing enter",
             "| raw_stock =", req.stock,
@@ -5166,6 +5124,43 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             "| elapsed_sec =", round(time.perf_counter() - stock_t0, 3),
             flush=True,
         )
+
+        # -------------------------
+        # 2. 財務
+        # -------------------------
+        if action == "financial":
+            t_fin0 = time.perf_counter()
+
+            stock_id_for_financial = str(getattr(meta, "stock_id", "") or "").strip()
+
+            snapshot = get_financial_snapshot(
+                stock_id_for_financial,
+                stock_name,
+            )
+
+            t_fin1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing financial",
+                "| stock_id =", stock_id_for_financial,
+                "| available =", bool(getattr(snapshot, "available", False)),
+                "| rows =", len(getattr(snapshot, "rows", []) or []),
+                "| sec =", round(t_fin1 - t_fin0, 3),
+                "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+
+            flex = _build_financial_flex(
+                stock_id_for_financial,
+                stock_name,
+                snapshot,
+                requested_tf,
+            )
+
+            return _reply_with_title(
+                f"{stock_name} 財務",
+                flex,
+            )
 
         # -------------------------
         # 2. 即時 / K 線 / 法人
