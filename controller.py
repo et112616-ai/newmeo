@@ -5050,6 +5050,43 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         stock_t0 = time.perf_counter()
 
+        if action == "financial":
+            import time
+
+            t_fin0 = time.perf_counter()
+
+            snapshot = get_financial_snapshot(
+                meta.stock_id,
+                stock_name,
+            )
+
+            t_fin1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing financial",
+                "| stock_id =",
+                meta.stock_id,
+                "| available =",
+                bool(getattr(snapshot, "available", False)),
+                "| rows =",
+                len(getattr(snapshot, "rows", []) or []),
+                "| sec =",
+                round(t_fin1 - t_fin0, 3),
+                flush=True,
+            )
+
+            flex = _build_financial_flex(
+                meta.stock_id,
+                stock_name,
+                snapshot,
+                requested_tf,
+            )
+
+            return _reply_with_title(
+                f"{stock_name} 財務",
+                flex,
+            )
+        
         print(
             "DEBUG stock timing enter",
             "| raw_stock =", req.stock,
