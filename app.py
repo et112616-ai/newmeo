@@ -7,6 +7,7 @@ from services.sinopac_quote_service import get_api
 from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
 from services.sinopac_quote_service import get_api, get_stock_snapshot
+from services.financial_service import sync_stock_financial_quarterly
 
 import base64
 import hashlib
@@ -427,6 +428,32 @@ def sync_stock_futures_map_route():
             "result": result,
         }
     ), 200
+
+@app.route("/sync_financial", methods=["GET", "POST"])
+def sync_financial():
+    if not _check_internal_token():
+        return jsonify({"status": "forbidden"}), 403
+
+    stock_id = request.args.get("stock_id", "").strip()
+    stock_name = request.args.get("stock_name", "").strip()
+    start_date = request.args.get("start_date", "").strip()
+
+    if not stock_id:
+        return jsonify({
+            "status": "error",
+            "message": "missing stock_id",
+        }), 400
+
+    result = sync_stock_financial_quarterly(
+        stock_id=stock_id,
+        stock_name=stock_name,
+        start_date=start_date,
+    )
+
+    return jsonify({
+        "status": "ok",
+        "result": result,
+    }), 200
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
