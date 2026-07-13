@@ -5591,6 +5591,27 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 # 修正 Yahoo 盤中延遲：再用 Shioaji snapshot 強制補最後一列。
                 df = _apply_shioaji_stock_realtime(df, meta.stock_id)
 
+            # K 線的歷史資料來源改成 FinMind 未還原日 K 後，
+            # 盤中 / 當日可能只更新到前一個已結算交易日。
+            #
+            # 因此：
+            # - 圖表本身仍用 df，避免歷史 MA 被不穩定的盤中資料污染。
+            # - 上方價格卡另外用 Shioaji snapshot 補一份 price_df，讓 K 線卡價格與即時卡一致。
+            price_df = df
+
+            if action == "k_line" and tf in {"D", "W", "M"}:
+                try:
+                    price_df = _apply_shioaji_stock_realtime(df, meta.stock_id)
+                except Exception as exc:
+                    print(
+                        "DEBUG kline realtime price_meta fallback failed",
+                        "| stock_id =", meta.stock_id,
+                        "| tf =", tf,
+                        "| error =", repr(exc),
+                        flush=True,
+                    )
+                    price_df = df
+
             t_append1 = time.perf_counter()
 
             print(
@@ -5598,13 +5619,14 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "| stock_id =", getattr(meta, "stock_id", ""),
                 "| tf =", tf,
                 "| rows =", 0 if df is None else len(df),
+                "| price_rows =", 0 if price_df is None else len(price_df),
                 "| sec =", round(t_append1 - t_append0, 3),
                 flush=True,
             )
 
             t_price0 = time.perf_counter()
 
-            price_meta = build_price_meta(df, tf)
+            price_meta = build_price_meta(price_df, tf)
 
             t_price1 = time.perf_counter()
 
