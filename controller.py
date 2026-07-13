@@ -4435,6 +4435,16 @@ def _build_margin_flex(
         default="--",
     )
 
+    latest_maintenance = _margin_get(
+        latest,
+        "maintenance_ratio",
+        "maintenance",
+        "maintenance_rate",
+        "融資維持率",
+        "維持率",
+        default="--",
+    )
+
     previous_margin = _margin_to_float(
         _margin_get(
             previous,
@@ -4506,26 +4516,18 @@ def _build_margin_flex(
         },
         {
             "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#F8F9FA",
-            "cornerRadius": "12px",
-            "paddingAll": "10px",
+            "layout": "horizontal",
+            "spacing": "sm",
             "margin": "sm",
             "contents": [
-                {
-                    "type": "text",
-                    "text": "券資比",
-                    "size": "xs",
-                    "color": "#888888",
-                },
-                {
-                    "type": "text",
-                    "text": _margin_fmt_ratio(latest_ratio),
-                    "size": "lg",
-                    "weight": "bold",
-                    "color": "#111111",
-                    "margin": "xs",
-                },
+                _margin_metric_box(
+                    "券資比",
+                    _margin_fmt_ratio(latest_ratio),
+                ),
+                _margin_metric_box(
+                    "維持率",
+                    _margin_fmt_ratio(latest_maintenance),
+                ),
             ],
         },
         {
@@ -4550,7 +4552,7 @@ def _build_margin_flex(
                     "日期",
                     "融資餘額",
                     "融券餘額",
-                    "券資比",
+                    "維持率",
                     is_header=True,
                 ),
                 *[
@@ -4591,10 +4593,11 @@ def _build_margin_flex(
                         _margin_fmt_ratio(
                             _margin_get(
                                 r,
-                                "ratio",
-                                "short_margin_ratio",
-                                "資券比",
-                                "券資比",
+                                "maintenance_ratio",
+                                "maintenance",
+                                "maintenance_rate",
+                                "融資維持率",
+                                "維持率",
                                 default="--",
                             )
                         ),
