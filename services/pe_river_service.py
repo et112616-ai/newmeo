@@ -328,7 +328,7 @@ def _make_pe_river_chart(
 ) -> str:
     font_kwargs = _setup_font()
 
-    fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=140, facecolor="white")
+    fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=150, facecolor="white")
     ax.set_facecolor("#F8F9FA")
 
     x = weekly.index
@@ -392,27 +392,33 @@ def _make_pe_river_chart(
     title = f"{stock_id} {stock_name} 本益比河流圖"
     subtitle = f"目前 PE {current_pe:.2f} 倍｜{zone_label}｜最新股價 {latest_close:,.2f}"
 
-    ax.set_title(title + "\n" + subtitle, fontsize=15, fontweight="bold", pad=14, **font_kwargs)
-    ax.set_ylabel("股價", fontsize=11, **font_kwargs)
+    ax.set_title(title + "\n" + subtitle, fontsize=18, fontweight="bold", pad=16, **font_kwargs)
+    ax.set_ylabel("股價", fontsize=18, **font_kwargs)
 
     ax.grid(True, linestyle=":", alpha=0.35)
     ax.legend(
         loc="upper left",
-        fontsize=8,
+        fontsize=12,
         frameon=True,
+        borderpad=0.6,
+        labelspacing=0.45,
+        handlelength=2.0,
     )
 
-    ax.xaxis.set_major_locator(mdates.YearLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    # 近一年顯示，X 軸用月份，比年份更直觀。
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y/%m"))
 
-    ax.tick_params(axis="x", labelsize=9)
-    ax.tick_params(axis="y", labelsize=9)
+    ax.set_xlabel("日期", fontsize=18, **font_kwargs)
+
+    ax.tick_params(axis="x", labelsize=12)
+    ax.tick_params(axis="y", labelsize=12)
 
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
 
     note = "河流區間＝歷史 PE 分位數 × 當期近四季 EPS；EPS 資料可能落後公告。"
-    fig.text(0.02, 0.02, note, fontsize=9, color="#666666", **font_kwargs)
+    fig.text(0.02, 0.02, note, fontsize=12, color="#666666", **font_kwargs)
 
     fig.tight_layout(rect=[0, 0.035, 1, 1])
 
@@ -522,7 +528,7 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
     levels = [round(float(np.percentile(merged["pe"].values, p)), 2) for p in percentiles]
 
     chart_df = merged.set_index("date")[["Close", "ttm_eps", "pe"]].copy()
-    chart_df = chart_df.tail(int(os.getenv("PE_RIVER_MAX_WEEKS", "260")))
+    chart_df = chart_df.tail(int(os.getenv("PE_RIVER_MAX_WEEKS", "52")))
 
     latest = chart_df.iloc[-1]
     latest_close = float(latest["Close"])
@@ -553,6 +559,8 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
         sid,
         "| rows =",
         len(chart_df),
+        "| display_weeks =",
+        int(os.getenv("PE_RIVER_MAX_WEEKS", "52")),
         "| latest_date =",
         latest_date,
         "| close =",
