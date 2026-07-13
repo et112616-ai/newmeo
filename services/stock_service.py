@@ -612,9 +612,6 @@ def _finmind_token() -> str:
         or ""
     ).strip()
 
-
-
-
 def _copy_df_with_attrs(df: pd.DataFrame) -> pd.DataFrame:
     copied = df.copy()
 
@@ -685,7 +682,6 @@ def _get_finmind_daily_cache(cache_key: tuple[str, int, str]) -> pd.DataFrame:
     )
 
     return _copy_df_with_attrs(cached_df)
-
 
 def _set_finmind_daily_cache(
     cache_key: tuple[str, int, str],
@@ -1190,7 +1186,7 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
                     continue
 
                 value = float(value)
-    
+
                 if value > 0:
                     prev = value
                     break
@@ -1265,115 +1261,112 @@ def build_price_meta(df: pd.DataFrame, time_frame: str) -> PriceMeta:
             latest_price=latest,
         )
 
-        # D / W / M
-        #
-        # 修正重點：
-        # K線卡為了讓上方價格跟即時卡一致，controller 會用 Shioaji snapshot
-        # 再補一筆最新價。
-        #
-        # 問題：
-        # 如果 FinMind 日K/週K/月K 已經有目前這個交易期間的資料，
-        # Shioaji snapshot 又補一筆，就會造成：
-        #
-        # 日K：同一天兩筆
-        # 週K：同一週兩筆
-        # 月K：同一月兩筆
-        #
-        # 舊邏輯直接拿 iloc[-2] 當前一筆，
-        # 會導致今日上漲股票顯示 +0.00 (+0.00%)。
-        #
-        # 解法：
-        # D 用同一天去重。
-        # W 用同一週去重。
-        # M 用同一月去重。
-        # 每個期間保留最後一筆，也就是保留 Shioaji snapshot。
-        price_df = df
+    # D / W / M
+    #
+    # 修正重點：
+    # K線卡為了讓上方價格跟即時卡一致，controller 會用 Shioaji snapshot
+    # 再補一筆最新價。
+    #
+    # 問題：
+    # 如果 FinMind 日K/週K/月K 已經有目前這個交易期間的資料，
+    # Shioaji snapshot 又補一筆，就會造成：
+    #
+    # 日K：同一天兩筆
+    # 週K：同一週兩筆
+    # 月K：同一月兩筆
+    #
+    # 舊邏輯直接拿 iloc[-2] 當前一筆，
+    # 會導致今日上漲股票顯示 +0.00 (+0.00%)。
+    #
+    # 解法：
+    # D 用同一天去重。
+    # W 用同一週去重。
+    # M 用同一月去重。
+    # 每個期間保留最後一筆，也就是保留 Shioaji snapshot。
+    price_df = df
 
-        try:
-            price_df = df.copy()
+    try:
+        price_df = df.copy()
 
-            if not isinstance(price_df.index, pd.DatetimeIndex):
-                price_df.index = pd.to_datetime(price_df.index, errors="coerce")
-                price_df = price_df[~price_df.index.isna()].copy()
+        if not isinstance(price_df.index, pd.DatetimeIndex):
+            price_df.index = pd.to_datetime(price_df.index, errors="coerce")
+            price_df = price_df[~price_df.index.isna()].copy()
 
-            price_df = price_df.sort_index()
+        price_df = price_df.sort_index()
 
-            if isinstance(price_df.index, pd.DatetimeIndex):
-                before_rows = len(price_df)
+        if isinstance(price_df.index, pd.DatetimeIndex):
+            before_rows = len(price_df)
 
-                if tf == "D":
-                    period_keys = pd.Index(price_df.index.normalize())
+            if tf == "D":
+                period_keys = pd.Index(price_df.index.normalize())
 
-                elif tf == "W":
-                    # 台股週線以週五收週；同一週只保留最後一筆。
-                    period_keys = pd.Index(price_df.index.to_period("W-FRI").astype(str))
+            elif tf == "W":
+                period_keys = pd.Index(price_df.index.to_period("W-FRI").astype(str))
 
-                elif tf == "M":
-                    # 同一月份只保留最後一筆。
-                    period_keys = pd.Index(price_df.index.to_period("M").astype(str))
+            elif tf == "M":
+                period_keys = pd.Index(price_df.index.to_period("M").astype(str))
 
-                else:
-                    period_keys = pd.Index(price_df.index.normalize())
-    
-                keep_mask = ~period_keys.duplicated(keep="last")
-                price_df = price_df.loc[keep_mask].copy()
+            else:
+                period_keys = pd.Index(price_df.index.normalize())
 
-                after_rows = len(price_df)
+            keep_mask = ~period_keys.duplicated(keep="last")
+            price_df = price_df.loc[keep_mask].copy()
 
-                if before_rows != after_rows:
-                    print(
-                        "DEBUG build_price_meta dedupe DWM",
-                        "| tf =", tf,
-                        "| before_rows =", before_rows,
-                        "| after_rows =", after_rows,
-                        "| removed =", before_rows - after_rows,
-                        flush=True,
-                    )
+            after_rows = len(price_df)
 
-        except Exception as exc:
-            print(
-                "DEBUG build_price_meta dedupe DWM failed",
-                "| tf =", tf,
-                "| error =", repr(exc),
-                flush=True,
-            )
-            price_df = df
+            if before_rows != after_rows:
+                print(
+                    "DEBUG build_price_meta dedupe DWM",
+                    "| tf =", tf,
+                    "| before_rows =", before_rows,
+                    "| after_rows =", after_rows,
+                    "| removed =", before_rows - after_rows,
+                    flush=True,
+                )
 
-        try:
-            latest = float(price_df["Close"].iloc[-1])
-        except Exception:
-            latest = float(df["Close"].iloc[-1])
-
-        try:
-            prev = float(price_df["Close"].iloc[-2]) if len(price_df) > 1 else latest
-        except Exception:
-            prev = latest
-
-        change = latest - prev
-        pct = (change / prev * 100) if prev else 0.0
-
-        try:
-            stamp = price_df.index[-1].strftime("%Y-%m-%d")
-        except Exception:
-            stamp = df.index[-1].strftime("%Y-%m-%d")
-
+    except Exception as exc:
         print(
-            "DEBUG build_price_meta DWM",
+            "DEBUG build_price_meta dedupe DWM failed",
             "| tf =", tf,
-            "| latest =", latest,
-            "| prev =", prev,
-            "| change =", change,
-            "| pct =", pct,
-            "| stamp =", stamp,
-            "| rows =", len(price_df) if price_df is not None else 0,
+            "| error =", repr(exc),
             flush=True,
         )
+        price_df = df
 
-        return PriceMeta(
-            price_info=f"{latest:.2f}",
-            change_info=f"{signed_number(change)} ({signed_percent(pct)})",
-            time_stamp=stamp,
-            price_change=change,
-            latest_price=latest,
-        )
-    
+    try:
+        latest = float(price_df["Close"].iloc[-1])
+    except Exception:
+        latest = float(df["Close"].iloc[-1])
+
+    try:
+        prev = float(price_df["Close"].iloc[-2]) if len(price_df) > 1 else latest
+    except Exception:
+        prev = latest
+
+    change = latest - prev
+    pct = (change / prev * 100) if prev else 0.0
+
+    try:
+        stamp = price_df.index[-1].strftime("%Y-%m-%d")
+    except Exception:
+        stamp = df.index[-1].strftime("%Y-%m-%d")
+
+    print(
+        "DEBUG build_price_meta DWM",
+        "| tf =", tf,
+        "| latest =", latest,
+        "| prev =", prev,
+        "| change =", change,
+        "| pct =", pct,
+        "| stamp =", stamp,
+        "| rows =", len(price_df) if price_df is not None else 0,
+        flush=True,
+    )
+
+    return PriceMeta(
+        price_info=f"{latest:.2f}",
+        change_info=f"{signed_number(change)} ({signed_percent(pct)})",
+        time_stamp=stamp,
+        price_change=change,
+        latest_price=latest,
+    )
