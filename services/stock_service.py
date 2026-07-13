@@ -14,7 +14,7 @@ import yfinance as yf
 from utils.formatter import normalize_time_frame, signed_number, signed_percent
 
 
-STOCK_SERVICE_VERSION = "stock_service_v5_quote_reconcile"
+STOCK_SERVICE_VERSION = "stock_service_v8_finmind_cache"
 
 TW_SUFFIX = ".TW"
 TWO_SUFFIX = ".TWO"
@@ -24,8 +24,12 @@ DISPLAY_TIMESTAMP_COL = "_display_timestamp"
 QUOTE_PRICE_COL = "_quote_price"
 QUOTE_CACHE_TTL_SECONDS = 20
 _QUOTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-DWM_CACHE_TTL_SECONDS = 60
+DWM_CACHE_TTL_SECONDS = int(os.getenv("DWM_CACHE_TTL_SECONDS", "900"))
 _DWM_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+
+FINMIND_DAILY_CACHE_TTL_SECONDS = int(os.getenv("FINMIND_DAILY_CACHE_TTL_SECONDS", "1800"))
+FINMIND_DAILY_CACHE_MAX_ITEMS = int(os.getenv("FINMIND_DAILY_CACHE_MAX_ITEMS", "120"))
+_FINMIND_DAILY_CACHE: dict[tuple[str, int, str], tuple[float, pd.DataFrame]] = {}
 
 @dataclass
 class StockMeta:
@@ -609,6 +613,112 @@ def _finmind_token() -> str:
     ).strip()
 
 
+
+
+def _copy_df_with_attrs(df: pd.DataFrame) -> pd.DataFrame:
+    copied = df.copy()
+
+    try:
+        copied.attrs.update(dict(getattr(df, "attrs", {}) or {}))
+    except Exception:
+        pass
+
+    return copied
+
+
+def _cleanup_finmind_daily_cache(now: float | None = None) -> None:
+    if now is None:
+        now = time_module.time()
+
+    ttl = FINMIND_DAILY_CACHE_TTL_SECONDS
+
+    for key, (ts, _) in list(_FINMIND_DAILY_CACHE.items()):
+        if now - ts > ttl:
+            _FINMIND_DAILY_CACHE.pop(key, None)
+
+    if len(_FINMIND_DAILY_CACHE) <= FINMIND_DAILY_CACHE_MAX_ITEMS:
+        return
+
+    # 超過上限時，移除最舊的快取。
+    sorted_items = sorted(
+        _FINMIND_DAILY_CACHE.items(),
+        key=lambda item: item[1][0],
+    )
+
+    remove_count = len(_FINMIND_DAILY_CACHE) - FINMIND_DAILY_CACHE_MAX_ITEMS
+
+    for key, _ in sorted_items[:remove_count]:
+        _FINMIND_DAILY_CACHE.pop(key, None)
+
+
+def _get_finmind_daily_cache(cache_key: tuple[str, int, str]) -> pd.DataFrame:
+    if str(os.getenv("USE_FINMIND_DAILY_CACHE", "1")).strip() == "0":
+        return pd.DataFrame()
+
+    now = time_module.time()
+    cached = _FINMIND_DAILY_CACHE.get(cache_key)
+
+    if not cached:
+        return pd.DataFrame()
+
+    ts, cached_df = cached
+
+    if now - ts > FINMIND_DAILY_CACHE_TTL_SECONDS:
+        _FINMIND_DAILY_CACHE.pop(cache_key, None)
+        return pd.DataFrame()
+
+    stock_id, days, start_date = cache_key
+
+    print(
+        "stock_service | finmind_daily_cache_hit",
+        "| stock =",
+        stock_id,
+        "| days =",
+        days,
+        "| start_date =",
+        start_date,
+        "| rows =",
+        len(cached_df),
+        "| age_sec =",
+        round(now - ts, 1),
+        flush=True,
+    )
+
+    return _copy_df_with_attrs(cached_df)
+
+
+def _set_finmind_daily_cache(
+    cache_key: tuple[str, int, str],
+    df: pd.DataFrame,
+) -> None:
+    if str(os.getenv("USE_FINMIND_DAILY_CACHE", "1")).strip() == "0":
+        return
+
+    if df is None or df.empty:
+        return
+
+    now = time_module.time()
+    _cleanup_finmind_daily_cache(now)
+
+    _FINMIND_DAILY_CACHE[cache_key] = (now, _copy_df_with_attrs(df))
+
+    stock_id, days, start_date = cache_key
+
+    print(
+        "stock_service | finmind_daily_cache_set",
+        "| stock =",
+        stock_id,
+        "| days =",
+        days,
+        "| start_date =",
+        start_date,
+        "| rows =",
+        len(df),
+        "| ttl =",
+        FINMIND_DAILY_CACHE_TTL_SECONDS,
+        flush=True,
+    )
+
 def _get_finmind_daily_history(meta: StockMeta, days: int = 900) -> pd.DataFrame:
     """
     用 FinMind TaiwanStockPrice 一次取得台股日成交資訊。
@@ -622,7 +732,14 @@ def _get_finmind_daily_history(meta: StockMeta, days: int = 900) -> pd.DataFrame
     if not stock_id:
         return pd.DataFrame()
 
+    days = int(days)
     start_date = _date_days_ago(days)
+    cache_key = (stock_id, days, start_date)
+
+    cached_df = _get_finmind_daily_cache(cache_key)
+
+    if cached_df is not None and not cached_df.empty:
+        return cached_df
 
     params = {
         "dataset": "TaiwanStockPrice",
@@ -743,7 +860,9 @@ def _get_finmind_daily_history(meta: StockMeta, days: int = 900) -> pd.DataFrame
             flush=True,
         )
 
-        return out
+        _set_finmind_daily_cache(cache_key, out)
+
+        return _copy_df_with_attrs(out)
 
     except Exception as exc:
         print(
@@ -799,7 +918,19 @@ def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
     if cached:
         ts, cached_df = cached
         if now - ts <= DWM_CACHE_TTL_SECONDS:
-            return cached_df.copy()
+            print(
+                "stock_service | dwm_cache_hit",
+                "| stock =",
+                getattr(meta, "stock_id", ""),
+                "| tf =",
+                tf,
+                "| rows =",
+                len(cached_df),
+                "| age_sec =",
+                round(now - ts, 1),
+                flush=True,
+            )
+            return _copy_df_with_attrs(cached_df)
 
     # 重要：不要在 LINE webhook 內逐月打 TWSE / TPEx，會造成 Render worker timeout。
     # 改用 FinMind TaiwanStockPrice，一次 request 拿日成交資訊。
@@ -886,7 +1017,7 @@ def _get_dwm_history_from_daily(meta, time_frame: str) -> pd.DataFrame:
     except Exception:
         pass
 
-    _DWM_CACHE[cache_key] = (now, out.copy())
+    _DWM_CACHE[cache_key] = (now, _copy_df_with_attrs(out))
 
     print(
         "stock_service_v7_finmind_dwm | dwm_history | "
