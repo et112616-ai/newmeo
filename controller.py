@@ -318,14 +318,14 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             "cornerRadius": "sm",
             "contents": [
                 _cell("日期", 2, "#555555", "bold", "start"),
-                _cell("融資增減", 3, "#555555", "bold", "end"),
+                _cell("融資金額增減", 4, "#555555", "bold", "end"),
                 _cell("融券增減", 3, "#555555", "bold", "end"),
                 _cell("資券比", 2, "#555555", "bold", "end"),
             ],
         }
 
     def _table_row(item: dict) -> dict[str, Any]:
-        margin_change = int(item.get("margin_change") or 0)
+        margin_money_change = float(item.get("margin_money_change") or 0)
         short_change = int(item.get("short_change") or 0)
         ratio = float(item.get("margin_short_ratio") or 0)
 
@@ -334,10 +334,28 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             "layout": "horizontal",
             "paddingAll": "6px",
             "contents": [
-                _cell(_fmt_margin_mmdd(item.get("date", "--")), 2, "#333333", "regular", "start"),
-                _cell(_fmt_margin_int(margin_change, signed=True), 3, _margin_change_color(margin_change)),
-                _cell(_fmt_margin_int(short_change, signed=True), 3, _margin_change_color(short_change)),
-                _cell(_fmt_margin_ratio(ratio), 2, "#333333"),
+                _cell(
+                    _fmt_margin_mmdd(item.get("date", "--")),
+                    2,
+                    "#333333",
+                    "regular",
+                    "start",
+                ),
+                _cell(
+                    _fmt_margin_money_yi(margin_money_change, signed=True),
+                    4,
+                    _margin_change_color(margin_money_change),
+                ),
+                _cell(
+                    _fmt_margin_int(short_change, signed=True),
+                    3,
+                    _margin_change_color(short_change),
+                ),
+                _cell(
+                    _fmt_margin_ratio(ratio),
+                    2,
+                    "#333333",
+                ),
             ],
         }
 
@@ -398,7 +416,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
 
     ratio = float(getattr(snapshot, "margin_short_ratio", 0.0) or 0.0)
 
-    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-10:]
+    recent_rows = list(getattr(snapshot, "recent_rows", []) or [])[-5:]
     recent_rows = list(reversed(recent_rows))
 
     table_contents: list[dict[str, Any]] = [_table_header()]
@@ -454,7 +472,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": "近5日融資融券變化",
+            "text": "近5日融資金額與融券變化",
             "size": "md",
             "weight": "bold",
             "color": "#222222",
@@ -472,7 +490,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": "融資/融券單位：張；融資金額單位：元換算億元；盤後資料。",
+            "text": "融資金額增減：億元；融券增減：張；資券比：融券餘額 ÷ 融資餘額。盤後資料。",
             "size": "xs",
             "color": "#888888",
             "wrap": True,
