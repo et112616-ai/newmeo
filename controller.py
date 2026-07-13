@@ -134,6 +134,31 @@ def _normalize_action(action: str | None) -> str:
         "holder": "large_holder",
         "大戶": "large_holder",
 
+        "large_holder_400": "large_holder_400",
+        "large_holder_600": "large_holder_600",
+        "large_holder_800": "large_holder_800",
+        "large_holder_1000": "large_holder_1000",
+        "holder_400": "large_holder_400",
+        "holder_600": "large_holder_600",
+        "holder_800": "large_holder_800",
+        "holder_1000": "large_holder_1000",
+        "400": "large_holder_400",
+        "600": "large_holder_600",
+        "800": "large_holder_800",
+        "1000": "large_holder_1000",
+        "400大戶": "large_holder_400",
+        "600大戶": "large_holder_600",
+        "800大戶": "large_holder_800",
+        "1000大戶": "large_holder_1000",
+        "400張": "large_holder_400",
+        "600張": "large_holder_600",
+        "800張": "large_holder_800",
+        "1000張": "large_holder_1000",
+        "400張大戶": "large_holder_400",
+        "600張大戶": "large_holder_600",
+        "800張大戶": "large_holder_800",
+        "1000張大戶": "large_holder_1000",
+
         # EPS
         "financial": "financial",
         "finance": "financial",
@@ -3014,18 +3039,111 @@ def _lh_row_to_computed(row, sorted_rows: list) -> dict[str, Any]:
         "change_color": _lh_change_color(change_value),
     }
 
-def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: str = "D"):
+
+def _large_holder_threshold_from_action(action: str | None) -> int:
+    text = str(action or "").strip().lower()
+
+    for threshold in [400, 600, 800, 1000]:
+        if str(threshold) in text:
+            return threshold
+
+    return 1000
+
+
+def _large_holder_threshold_label(threshold: int) -> str:
+    try:
+        threshold = int(threshold)
+    except Exception:
+        threshold = 1000
+
+    return f"{threshold}張以上"
+
+
+def _large_holder_threshold_buttons(
+    stock_id: str,
+    active_threshold: int,
+    current_tf: str = "D",
+) -> dict[str, Any]:
+    try:
+        active_threshold = int(active_threshold)
+    except Exception:
+        active_threshold = 1000
+
+    tf = normalize_time_frame(current_tf)
+
+    buttons = []
+
+    for threshold in [400, 600, 800, 1000]:
+        action_name = f"large_holder_{threshold}"
+        is_active = active_threshold == threshold
+
+        buttons.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "height": "36px",
+                "cornerRadius": "8px",
+                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                "justifyContent": "center",
+                "alignItems": "center",
+                "action": {
+                    "type": "postback",
+                    "label": str(threshold),
+                    "data": f"{stock_id},{action_name},{action_name},{tf}",
+                    "displayText": f"{stock_id} 大戶{threshold}",
+                },
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": str(threshold),
+                        "size": "sm",
+                        "weight": "bold" if is_active else "regular",
+                        "align": "center",
+                        "gravity": "center",
+                        "color": "#FFFFFF" if is_active else "#111111",
+                    }
+                ],
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "md",
+        "contents": buttons,
+    }
+
+
+def _build_large_holder_flex(
+    stock_id: str,
+    stock_name: str,
+    rows,
+    current_tf: str = "D",
+    threshold: int = 1000,
+):
     """
     顯示個股大戶持股近 5 週。
     欄位：
-    日期 | 千張大戶人數 | 持股比 | 增減
+    日期 | 大戶人數 | 持股比 | 增減
     """
+    try:
+        threshold = int(threshold)
+    except Exception:
+        threshold = 1000
+
+    if threshold not in {400, 600, 800, 1000}:
+        threshold = 1000
+
+    threshold_label = _large_holder_threshold_label(threshold)
     raw_rows = list(rows or [])
 
     print(
         "DEBUG large_holder flex",
         "| stock_id =",
         stock_id,
+        "| threshold =",
+        threshold,
         "| rows_count =",
         len(raw_rows),
         "| sample =",
@@ -3049,16 +3167,18 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
             [
                 {
                     "type": "text",
-                    "text": "大戶持股",
+                    "text": f"大戶持股｜{threshold_label}",
                     "weight": "bold",
                     "size": "lg",
                     "color": "#444444",
                     "margin": "sm",
+                    "wrap": True,
                 },
+                _large_holder_threshold_buttons(stock_id, threshold, current_tf),
                 {"type": "separator", "margin": "md"},
                 {
                     "type": "text",
-                    "text": "目前查無大戶持股資料。",
+                    "text": f"目前查無{threshold_label}大戶持股資料。",
                     "size": "sm",
                     "color": "#777777",
                     "margin": "md",
@@ -3087,7 +3207,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
             [
                 {
                     "type": "text",
-                    "text": f"大戶持股｜最新 {latest.get('date', '--')}",
+                    "text": f"大戶持股｜{threshold_label}｜最新 {latest.get('date', '--')}",
                     "weight": "bold",
                     "size": "lg",
                     "color": "#444444",
@@ -3101,7 +3221,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
                     "margin": "md",
                     "contents": [
                         _lh_metric_box(
-                            "千張大戶人數",
+                            f"{threshold_label}人數",
                             _lh_with_unit_people(latest.get("people", "--")),
                         ),
                         _lh_metric_box(
@@ -3134,6 +3254,7 @@ def _build_large_holder_flex(stock_id: str, stock_name: str, rows, current_tf: s
                         },
                     ],
                 },
+                _large_holder_threshold_buttons(stock_id, threshold, current_tf),
                 {"type": "separator", "margin": "md"},
                 {
                     "type": "text",
@@ -5428,10 +5549,15 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # -------------------------
         # 3. 大戶持股
         # -------------------------
-        if action == "large_holder":
+        if action in {"large_holder", "large_holder_400", "large_holder_600", "large_holder_800", "large_holder_1000"}:
             t_data0 = time.perf_counter()
 
-            rows = get_large_holder_table(meta.stock_id)
+            holder_threshold = _large_holder_threshold_from_action(action)
+
+            rows = get_large_holder_table(
+                meta.stock_id,
+                threshold=holder_threshold,
+            )
 
             t_data1 = time.perf_counter()
 
@@ -5440,6 +5566,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 stock_name=stock_name,
                 rows=rows,
                 current_tf=requested_tf,
+                threshold=holder_threshold,
             )
 
             t_flex1 = time.perf_counter()
@@ -5447,6 +5574,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             print(
                 "DEBUG stock timing large_holder",
                 "| stock_id =", getattr(meta, "stock_id", ""),
+                "| threshold =", holder_threshold,
                 "| rows =", 0 if rows is None else len(rows),
                 "| data_sec =", round(t_data1 - t_data0, 3),
                 "| flex_sec =", round(t_flex1 - t_data1, 3),
