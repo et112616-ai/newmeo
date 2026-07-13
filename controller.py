@@ -4373,8 +4373,9 @@ def _margin_table_row_v2(
                 "size": "xs",
                 "weight": weight,
                 "color": text_color,
-                "flex": 2,
+                "flex": 4,
                 "align": "end",
+                "wrap": True,
             },
         ],
     }
@@ -4435,13 +4436,12 @@ def _build_margin_flex(
         default="--",
     )
 
-    latest_maintenance = _margin_get(
+    latest_margin_usage = _margin_get(
         latest,
-        "maintenance_ratio",
-        "maintenance",
-        "maintenance_rate",
-        "融資維持率",
-        "維持率",
+        "margin_usage_rate",
+        "margin_usage",
+        "financing_usage_rate",
+        "融資使用率",
         default="--",
     )
 
@@ -4525,8 +4525,8 @@ def _build_margin_flex(
                     _margin_fmt_ratio(latest_ratio),
                 ),
                 _margin_metric_box(
-                    "維持率",
-                    _margin_fmt_ratio(latest_maintenance),
+                    "融資使用率",
+                    _margin_fmt_ratio(latest_margin_usage),
                 ),
             ],
         },
@@ -4552,7 +4552,7 @@ def _build_margin_flex(
                     "日期",
                     "融資餘額",
                     "融券餘額",
-                    "維持率",
+                    "融資使用率",
                     is_header=True,
                 ),
                 *[
@@ -4593,11 +4593,10 @@ def _build_margin_flex(
                         _margin_fmt_ratio(
                             _margin_get(
                                 r,
-                                "maintenance_ratio",
-                                "maintenance",
-                                "maintenance_rate",
-                                "融資維持率",
-                                "維持率",
+                                "margin_usage_rate",
+                                "margin_usage",
+                                "financing_usage_rate",
+                                "融資使用率",
                                 default="--",
                             )
                         ),
