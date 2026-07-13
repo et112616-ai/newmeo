@@ -471,6 +471,310 @@ def _is_large_holder_level(level_raw: Any) -> bool:
         return False
 
 
+
+LARGE_HOLDER_THRESHOLDS = [400, 600, 800, 1000]
+
+
+def _normalize_large_holder_threshold(value: Any = 1000) -> int:
+    try:
+        num = int(float(str(value).replace("張", "").replace("+", "").strip()))
+    except Exception:
+        num = 1000
+
+    if num in {400, 600, 800, 1000}:
+        return num
+
+    return 1000
+
+
+def _tdcc_holding_level_num(level_raw: Any) -> int:
+    """
+    TDCC 股權分散表持股分級：
+    12 = 400,001 ~ 600,000 股
+    13 = 600,001 ~ 800,000 股
+    14 = 800,001 ~ 1,000,000 股
+    15 = 1,000,001 股以上
+
+    回傳 0 代表無法辨識或合計列。
+    """
+    import re
+
+    text = str(level_raw or "").replace(",", "").replace(" ", "").strip()
+
+    if not text:
+        return 0
+
+    lowered = text.lower()
+
+    if "合計" in text or "total" in lowered:
+        return 0
+
+    # 直接是 1~15 分級代碼。
+    try:
+        if re.fullmatch(r"\d+(\.0)?", text):
+            level_num = int(float(text))
+            if 1 <= level_num <= 20:
+                return level_num
+    except Exception:
+        pass
+
+    # 文字級距。
+    if "1000001" in text and ("以上" in text or "up" in lowered):
+        return 15
+    if "800001" in text and "1000000" in text:
+        return 14
+    if "600001" in text and "800000" in text:
+        return 13
+    if "400001" in text and "600000" in text:
+        return 12
+
+    # 備援：從文字中的第一個數字推估。
+    nums = re.findall(r"\d+", text)
+
+    if not nums:
+        return 0
+
+    try:
+        first = int(nums[0])
+
+        if first >= 1000001:
+            return 15
+        if first >= 800001:
+            return 14
+        if first >= 600001:
+            return 13
+        if first >= 400001:
+            return 12
+
+    except Exception:
+        pass
+
+    return 0
+
+
+def _threshold_from_tdcc_level(level_num: int) -> list[int]:
+    """
+    回傳此 TDCC 分級應該累計到哪些門檻。
+    """
+    if level_num == 15:
+        return [400, 600, 800, 1000]
+    if level_num == 14:
+        return [400, 600, 800]
+    if level_num == 13:
+        return [400, 600]
+    if level_num == 12:
+        return [400]
+    return []
+
+
+def _empty_large_holder_metrics() -> dict[int, dict[str, float]]:
+    return {
+        threshold: {
+            "ratio": 0.0,
+            "people": 0,
+        }
+        for threshold in LARGE_HOLDER_THRESHOLDS
+    }
+
+
+def _calc_large_holder_threshold_metrics(rows: list[dict]) -> dict[int, dict[str, float]]:
+    """
+    從同一天同一檔股票的 TDCC 分級 rows，
+    加總 400 / 600 / 800 / 1000 張以上人數與持股比。
+    """
+    metrics = _empty_large_holder_metrics()
+
+    for r in rows or []:
+        level_num = _tdcc_holding_level_num(r.get("持股分級", ""))
+
+        if level_num <= 0:
+            continue
+
+        ratio = _to_float(r.get("占集保庫存數比例%"))
+        people = _extract_holder_people(r)
+
+        for threshold in _threshold_from_tdcc_level(level_num):
+            metrics[threshold]["ratio"] += ratio
+            metrics[threshold]["people"] += people
+
+    return metrics
+
+
+def _large_holder_payload_from_metrics(
+    stock_id: str,
+    trade_date: str,
+    metrics: dict[int, dict[str, float]],
+    source: str = "TDCC",
+) -> dict[str, Any]:
+    sid = _clean_stock_id(stock_id)
+
+    ratio_1000 = float(metrics.get(1000, {}).get("ratio", 0.0) or 0.0)
+    people_1000 = int(metrics.get(1000, {}).get("people", 0) or 0)
+
+    payload: dict[str, Any] = {
+        "stock_id": sid,
+        "trade_date": trade_date,
+        "large_holder_ratio": ratio_1000,
+        "large_holder_people": people_1000,
+        "source": source,
+    }
+
+    for threshold in LARGE_HOLDER_THRESHOLDS:
+        item = metrics.get(threshold, {}) or {}
+        payload[f"large_holder_{threshold}_ratio"] = float(item.get("ratio", 0.0) or 0.0)
+        payload[f"large_holder_{threshold}_people"] = int(item.get("people", 0) or 0)
+
+    return payload
+
+
+def _supabase_headers_for_large_holder() -> dict[str, str]:
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_table_url(table: str) -> str:
+    base = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+
+    if not base:
+        return ""
+
+    return f"{base}/rest/v1/{table}"
+
+
+def _upsert_large_holder_history_full(payload: dict[str, Any]) -> bool:
+    """
+    寫入含 400 / 600 / 800 / 1000 欄位的大戶資料。
+    若新欄位尚未建立，會失敗並回 False，呼叫端會 fallback 舊版 upsert。
+    """
+    url = _supabase_table_url("tdcc_large_holder_history")
+
+    if not url:
+        return False
+
+    headers = _supabase_headers_for_large_holder()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+
+    try:
+        res = requests.post(
+            url,
+            headers=headers,
+            params={"on_conflict": "stock_id,trade_date"},
+            json=payload,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "DEBUG large_holder full upsert failed",
+                "| stock_id =",
+                payload.get("stock_id"),
+                "| trade_date =",
+                payload.get("trade_date"),
+                "| status =",
+                res.status_code,
+                "| body =",
+                res.text[:300],
+                flush=True,
+            )
+            return False
+
+        return True
+
+    except Exception as exc:
+        print(
+            "DEBUG large_holder full upsert exception",
+            "| stock_id =",
+            payload.get("stock_id"),
+            "| trade_date =",
+            payload.get("trade_date"),
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return False
+
+
+def _upsert_large_holder_payload(payload: dict[str, Any], source: str = "TDCC") -> bool:
+    """
+    優先寫入新版完整欄位；
+    若還沒跑 SQL 新增欄位，就 fallback 寫舊欄位，避免既有 1000 張功能中斷。
+    """
+    if not payload:
+        return False
+
+    payload = dict(payload)
+    payload["source"] = source
+
+    if _upsert_large_holder_history_full(payload):
+        return True
+
+    return bool(
+        upsert_large_holder_history(
+            stock_id=payload.get("stock_id"),
+            trade_date=payload.get("trade_date"),
+            large_holder_ratio=payload.get("large_holder_ratio"),
+            large_holder_people=payload.get("large_holder_people"),
+            source=source,
+        )
+    )
+
+
+def _fetch_large_holder_history_rows_full(stock_id: str, limit: int = 8) -> list[dict]:
+    """
+    直接從 Supabase 讀完整欄位，避免 supabase_service 舊版 select 沒有帶到新增欄位。
+    """
+    sid = _clean_stock_id(stock_id)
+    url = _supabase_table_url("tdcc_large_holder_history")
+
+    if not url:
+        return []
+
+    try:
+        res = requests.get(
+            url,
+            headers=_supabase_headers_for_large_holder(),
+            params={
+                "stock_id": f"eq.{sid}",
+                "select": "*",
+                "order": "trade_date.desc",
+                "limit": str(max(1, int(limit))),
+            },
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "DEBUG large_holder full select failed",
+                "| stock_id =",
+                sid,
+                "| status =",
+                res.status_code,
+                "| body =",
+                res.text[:300],
+                flush=True,
+            )
+            return []
+
+        rows = res.json()
+
+        return rows if isinstance(rows, list) else []
+
+    except Exception as exc:
+        print(
+            "DEBUG large_holder full select exception",
+            "| stock_id =",
+            sid,
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return []
+
 def _extract_holder_percent(row: dict) -> float:
     candidates = [
         "percentage",
@@ -647,9 +951,7 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
 
 def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
     """
-    從 TDCC latest CSV 抓出可取得日期的千張大戶比例與人數。
-
-    因為 latest CSV 通常只包含最新一個日期，所以這裡通常只會回 1 筆。
+    從 TDCC latest CSV 抓出最新一週 400 / 600 / 800 / 1000 張以上資料。
     """
     sid = _clean_stock_id(stock_id)
     rows = _request_tdcc_latest_rows(sid)
@@ -665,40 +967,39 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
         )
         return []
 
-    by_date: dict[str, dict] = {}
+    by_date: dict[str, list[dict]] = {}
 
     for r in rows:
         raw_date = str(r.get("資料日期", "")).strip()
         trade_date = _normalize_date_for_db(raw_date)
-        level = r.get("持股分級", "")
 
         if not trade_date:
             continue
 
-        if not _is_large_holder_level(level):
-            continue
+        by_date.setdefault(trade_date, []).append(r)
 
-        ratio = _to_float(r.get("占集保庫存數比例%"))
-        people = _extract_holder_people(r)
+    records = []
 
-        if trade_date not in by_date:
-            by_date[trade_date] = {
-                "ratio": 0.0,
-                "people": 0,
+    for trade_date, date_rows in sorted(by_date.items(), reverse=True):
+        metrics = _calc_large_holder_threshold_metrics(date_rows)
+
+        payload = _large_holder_payload_from_metrics(
+            stock_id=sid,
+            trade_date=trade_date,
+            metrics=metrics,
+            source="TDCC",
+        )
+
+        records.append(
+            {
+                "stock_id": sid,
+                "trade_date": trade_date,
+                "ratio": payload["large_holder_ratio"],
+                "people": payload["large_holder_people"],
+                "payload": payload,
+                "metrics": metrics,
             }
-
-        by_date[trade_date]["ratio"] += ratio
-        by_date[trade_date]["people"] += people
-
-    records = [
-        {
-            "stock_id": sid,
-            "trade_date": trade_date,
-            "ratio": item["ratio"],
-            "people": item["people"],
-        }
-        for trade_date, item in sorted(by_date.items(), reverse=True)
-    ]
+        )
 
     print(
         "DEBUG large_holder tdcc records",
@@ -709,7 +1010,7 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
         "| records_count =",
         len(records),
         "| records =",
-        records[:10],
+        records[:3],
         flush=True,
     )
 
@@ -775,31 +1076,64 @@ def _large_holder_unavailable(reason: str = "資料未取得") -> list[dict]:
     ]
 
 
-def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[dict]:
+def _large_holder_from_supabase_history(
+    stock_id: str,
+    limit: int = 6,
+    threshold: int = 1000,
+) -> list[dict]:
     """
     從 Supabase 撈最近幾週大戶資料。
+
+    threshold:
+    - 400 / 600 / 800 / 1000
     """
     sid = _clean_stock_id(stock_id)
+    threshold = _normalize_large_holder_threshold(threshold)
 
-    rows = get_large_holder_history_rows(sid, limit=limit + 1)
+    rows = _fetch_large_holder_history_rows_full(sid, limit=limit + 1)
+
+    if not rows:
+        # fallback 舊版 supabase_service
+        rows = get_large_holder_history_rows(sid, limit=limit + 1)
 
     if not rows:
         return []
+
+    if threshold == 1000:
+        ratio_col = "large_holder_ratio"
+        people_col = "large_holder_people"
+    else:
+        ratio_col = f"large_holder_{threshold}_ratio"
+        people_col = f"large_holder_{threshold}_people"
 
     normalized = []
 
     for r in rows:
         date = str(r.get("trade_date", "")).strip()
-        ratio = _to_float(r.get("large_holder_ratio"))
 
         if not date:
+            continue
+
+        ratio = _to_float(r.get(ratio_col))
+        people = _to_int(r.get(people_col))
+
+        # 1000 張欄位若新欄位不存在，回到舊欄位。
+        if threshold == 1000 and ratio <= 0:
+            ratio = _to_float(r.get("large_holder_1000_ratio") or r.get("large_holder_ratio"))
+
+        if threshold == 1000 and people <= 0:
+            people = _to_int(r.get("large_holder_1000_people") or r.get("large_holder_people"))
+
+        # 400/600/800 若尚未同步新欄位，不硬拿 1000 欄位誤導。
+        if threshold != 1000 and ratio <= 0:
             continue
 
         normalized.append(
             {
                 "date": date,
                 "ratio": ratio,
-                "people": _to_int(r.get("large_holder_people")),
+                "people": people,
+                "threshold": threshold,
             }
         )
 
@@ -826,6 +1160,7 @@ def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[d
                 "people": item.get("people", 0),
                 "ratio": f"{ratio:.2f}%",
                 "diff": diff_text,
+                "threshold": threshold,
             }
         )
 
@@ -834,7 +1169,7 @@ def _large_holder_from_supabase_history(stock_id: str, limit: int = 6) -> list[d
 
 def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
     """
-    同步單檔 TDCC latest CSV 的最新一週千張大戶資料。
+    同步單檔 TDCC latest CSV 的最新一週 400 / 600 / 800 / 1000 張以上資料。
     """
     sid = _clean_stock_id(stock_id)
     record = _extract_tdcc_latest_large_holder_record(sid)
@@ -846,29 +1181,44 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
             "message": "TDCC 最新資料未取得",
         }
 
-    ok = upsert_large_holder_history(
-        stock_id=record["stock_id"],
-        trade_date=record["trade_date"],
-        large_holder_ratio=record["ratio"],
-        large_holder_people=record.get("people"),
-        source="TDCC",
-    )
+    payload = dict(record.get("payload") or {})
+
+    if not payload:
+        payload = _large_holder_payload_from_metrics(
+            stock_id=record["stock_id"],
+            trade_date=record["trade_date"],
+            metrics=record.get("metrics") or {
+                1000: {
+                    "ratio": record.get("ratio", 0.0),
+                    "people": record.get("people", 0),
+                }
+            },
+            source="TDCC",
+        )
+
+    ok = _upsert_large_holder_payload(payload, source="TDCC")
 
     return {
         "stock_id": sid,
         "ok": bool(ok),
-        "trade_date": record.get("trade_date"),
-        "ratio": record.get("ratio"),
-        "people": record.get("people"),
+        "trade_date": payload.get("trade_date"),
+        "ratio": payload.get("large_holder_ratio"),
+        "people": payload.get("large_holder_people"),
+        "ratio_400": payload.get("large_holder_400_ratio"),
+        "people_400": payload.get("large_holder_400_people"),
+        "ratio_600": payload.get("large_holder_600_ratio"),
+        "people_600": payload.get("large_holder_600_people"),
+        "ratio_800": payload.get("large_holder_800_ratio"),
+        "people_800": payload.get("large_holder_800_people"),
+        "ratio_1000": payload.get("large_holder_1000_ratio"),
+        "people_1000": payload.get("large_holder_1000_people"),
         "message": "synced" if ok else "Supabase 寫入失敗",
     }
 
 def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     """
     相容舊函式名稱。
-
-    注意：
-    TDCC latest CSV 本身通常只有最新一週，所以這裡不保證能補歷史。
+    TDCC latest CSV 本身通常只有最新一週。
     """
     sid = _clean_stock_id(stock_id)
 
@@ -886,12 +1236,22 @@ def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     failed_count = 0
 
     for record in records[: max(1, int(weeks))]:
-        ok = upsert_large_holder_history(
-            stock_id=record["stock_id"],
-            trade_date=record["trade_date"],
-            large_holder_ratio=record["ratio"],
-            source="TDCC",
-        )
+        payload = dict(record.get("payload") or {})
+
+        if not payload:
+            payload = _large_holder_payload_from_metrics(
+                stock_id=record["stock_id"],
+                trade_date=record["trade_date"],
+                metrics=record.get("metrics") or {
+                    1000: {
+                        "ratio": record.get("ratio", 0.0),
+                        "people": record.get("people", 0),
+                    }
+                },
+                source="TDCC",
+            )
+
+        ok = _upsert_large_holder_payload(payload, source="TDCC")
 
         if ok:
             synced_count += 1
@@ -1314,20 +1674,16 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
         return None
 
     trade_date = _yyyymmdd_to_db_date(sca_date)
+    metrics = _calc_large_holder_threshold_metrics(rows)
 
-    ratio = 0.0
-    people = 0
+    payload = _large_holder_payload_from_metrics(
+        stock_id=sid,
+        trade_date=trade_date,
+        metrics=metrics,
+        source="TDCC_HISTORY",
+    )
 
-    for r in rows:
-        level = r.get("持股分級", "")
-
-        if not _is_large_holder_level(level):
-            continue
-
-        ratio += _to_float(r.get("占集保庫存數比例%"))
-        people += _extract_holder_people(r)
-
-    if ratio <= 0:
+    if _to_float(payload.get("large_holder_ratio")) <= 0:
         print(
             "DEBUG tdcc history no large holder ratio",
             "| stock_id =",
@@ -1336,6 +1692,8 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
             sca_date,
             "| rows =",
             rows[:3],
+            "| payload =",
+            payload,
             flush=True,
         )
         return None
@@ -1343,8 +1701,10 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
     return {
         "stock_id": sid,
         "trade_date": trade_date,
-        "ratio": ratio,
-        "people": people,
+        "ratio": payload["large_holder_ratio"],
+        "people": payload["large_holder_people"],
+        "payload": payload,
+        "metrics": metrics,
     }
 
 def sync_tdcc_large_holder_history_since(
@@ -1393,13 +1753,22 @@ def sync_tdcc_large_holder_history_since(
     failed_count = 0
 
     for record in records:
-        ok = upsert_large_holder_history(
-            stock_id=record["stock_id"],
-            trade_date=record["trade_date"],
-            large_holder_ratio=record["ratio"],
-            large_holder_people=record.get("people"),
-            source="TDCC_HISTORY",
-        )
+        payload = dict(record.get("payload") or {})
+
+        if not payload:
+            payload = _large_holder_payload_from_metrics(
+                stock_id=record["stock_id"],
+                trade_date=record["trade_date"],
+                metrics=record.get("metrics") or {
+                    1000: {
+                        "ratio": record.get("ratio", 0.0),
+                        "people": record.get("people", 0),
+                    }
+                },
+                source="TDCC_HISTORY",
+            )
+
+        ok = _upsert_large_holder_payload(payload, source="TDCC_HISTORY")
 
         if ok:
             synced_count += 1
@@ -1738,28 +2107,34 @@ def sync_finmind_large_holder_history(stock_id: str, weeks: int = 8) -> dict:
     }
 
 
-def get_large_holder_table(stock_id: str) -> list[dict]:
+def get_large_holder_table(stock_id: str, threshold: int = 1000) -> list[dict]:
     """
-    千張大戶持股比率。
+    大戶持股比率。
 
-    重要設計：
-    1. 預設只讀 Supabase，避免每次 LINE 查詢都打 TDCC / FinMind。
-    2. 若 Supabase 有近 5 週，會顯示近 5 週。
-    3. 若 Supabase 只有 1 週，只能顯示 1 週。
-    4. TDCC latest CSV 只能同步最新一週，歷史需要每週排程累積。
-    5. 若設定 USE_FINMIND_LARGE_HOLDER_HISTORY=1，才會嘗試 FinMind sponsor-only dataset。
+    threshold:
+    - 400：400張以上
+    - 600：600張以上
+    - 800：800張以上
+    - 1000：1000張以上
     """
     import time
 
     t0 = time.perf_counter()
     sid = _clean_stock_id(stock_id)
+    threshold = _normalize_large_holder_threshold(threshold)
 
-    history = _large_holder_from_supabase_history(sid, limit=6)
+    history = _large_holder_from_supabase_history(
+        sid,
+        limit=6,
+        threshold=threshold,
+    )
 
     print(
         "DEBUG large_holder table supabase_first",
         "| stock_id =",
         sid,
+        "| threshold =",
+        threshold,
         "| history_count =",
         len(history or []),
         "| history =",
@@ -1768,8 +2143,7 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
     )
 
     # 如果 Supabase 目前不足 2 週，第一次查詢時自動補歷史。
-    # 這樣不用先手動跑 /sync_tdcc_large_holder，第一次查某檔也會嘗試顯示 2 週以上。
-    # 缺點：第一次查詢會慢約 5~10 秒。
+    # 這會把 400 / 600 / 800 / 1000 一起寫入。
     if len(history or []) < 2:
         try:
             start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
@@ -1781,12 +2155,18 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
                 max_weeks=max_weeks,
             )
 
-            history = _large_holder_from_supabase_history(sid, limit=6)
+            history = _large_holder_from_supabase_history(
+                sid,
+                limit=6,
+                threshold=threshold,
+            )
 
             print(
                 "DEBUG large_holder table after_auto_history_sync",
                 "| stock_id =",
                 sid,
+                "| threshold =",
+                threshold,
                 "| sync_result =",
                 sync_result,
                 "| history_count =",
@@ -1801,22 +2181,27 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
                 "DEBUG large_holder table auto_history_sync_failed",
                 "| stock_id =",
                 sid,
+                "| threshold =",
+                threshold,
                 "| error =",
                 repr(exc),
                 flush=True,
             )
-    
+
     if len(history or []) >= 5:
         return history[:5]
 
-    if _bool_env("USE_FINMIND_LARGE_HOLDER_HISTORY", default=False):
+    # FinMind fallback 目前只維持 1000 張以上相容，不用它誤補 400/600/800。
+    if threshold == 1000 and _bool_env("USE_FINMIND_LARGE_HOLDER_HISTORY", default=False):
         finmind_sync = sync_finmind_large_holder_history(sid, weeks=8)
-        history = _large_holder_from_supabase_history(sid, limit=6)
+        history = _large_holder_from_supabase_history(sid, limit=6, threshold=threshold)
 
         print(
             "DEBUG large_holder table after_finmind",
             "| stock_id =",
             sid,
+            "| threshold =",
+            threshold,
             "| finmind_sync =",
             finmind_sync,
             "| history_count =",
@@ -1831,16 +2216,17 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
         if len(history or []) >= 5:
             return history[:5]
 
-    # 預設不在每次 LINE 查詢同步 TDCC，避免查一次大戶就等 5~10 秒。
-    # 若你想在查詢時自動補最新一週，設 LARGE_HOLDER_SYNC_ON_QUERY=1。
+    # 預設不在每次 LINE 查詢同步 TDCC latest，避免查一次大戶就等太久。
     if _bool_env("LARGE_HOLDER_SYNC_ON_QUERY", default=False):
         sync_result = sync_tdcc_latest_large_holder(sid)
-        history = _large_holder_from_supabase_history(sid, limit=6)
+        history = _large_holder_from_supabase_history(sid, limit=6, threshold=threshold)
 
         print(
             "DEBUG large_holder table after_tdcc_latest",
             "| stock_id =",
             sid,
+            "| threshold =",
+            threshold,
             "| sync_result =",
             sync_result,
             "| history_count =",
@@ -1857,21 +2243,23 @@ def get_large_holder_table(stock_id: str) -> list[dict]:
 
     # 如果資料庫完全沒有資料，最後才即時抓 TDCC latest CSV 補一筆。
     sync_result = sync_tdcc_latest_large_holder(sid)
-    history = _large_holder_from_supabase_history(sid, limit=6)
+    history = _large_holder_from_supabase_history(sid, limit=6, threshold=threshold)
 
     if history:
         return history[:5]
 
-    if sync_result.get("ok"):
+    if sync_result.get("ok") and threshold == 1000:
         return [
             {
                 "date": _fmt_md(sync_result.get("trade_date", "")),
+                "people": _to_int(sync_result.get("people")),
                 "ratio": f"{_to_float(sync_result.get('ratio')):.2f}%",
                 "diff": "--",
+                "threshold": threshold,
             }
         ]
 
-    return _large_holder_unavailable("Supabase/TDCC皆無資料")
+    return _large_holder_unavailable(f"{threshold}張以上資料未取得")
 
 
 # ============================================================
