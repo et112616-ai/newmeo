@@ -481,9 +481,22 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
             stock_name=name,
         )
 
+    # reset_index() 後，如果原本 index 沒有名稱，欄位會叫 "index"；
+    # 如果 index 名稱是 Date，欄位才會叫 "Date"。
+    # Render 上這次錯誤就是 left_on="date" 找不到欄位，所以這裡統一改名。
+    weekly_for_merge = weekly.reset_index()
+    weekly_date_col = weekly_for_merge.columns[0]
+    weekly_for_merge = weekly_for_merge.rename(columns={weekly_date_col: "date"})
+    weekly_for_merge["date"] = pd.to_datetime(weekly_for_merge["date"], errors="coerce")
+    weekly_for_merge = weekly_for_merge.dropna(subset=["date"]).sort_values("date")
+
+    eps_for_merge = eps_df.rename(columns={"effective_date": "eps_date"}).copy()
+    eps_for_merge["eps_date"] = pd.to_datetime(eps_for_merge["eps_date"], errors="coerce")
+    eps_for_merge = eps_for_merge.dropna(subset=["eps_date"]).sort_values("eps_date")
+
     merged = pd.merge_asof(
-        weekly.reset_index().rename(columns={"Date": "date"}),
-        eps_df.rename(columns={"effective_date": "eps_date"}).sort_values("eps_date"),
+        weekly_for_merge,
+        eps_for_merge,
         left_on="date",
         right_on="eps_date",
         direction="backward",
