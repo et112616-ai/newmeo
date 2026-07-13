@@ -2282,7 +2282,7 @@ def _mock_margin_table() -> list[dict]:
 
     for r in rows:
         r["ratio"] = f"{(r['short'] / r['margin'] * 100):.2f}%" if r["margin"] else "--"
-        r["maintenance_ratio"] = "--"
+        r["margin_usage_rate"] = "--"
 
     return rows
 
@@ -2296,46 +2296,35 @@ def _pick_first_number(row: dict, keys: list[str]) -> float:
 
 
 
-def _extract_margin_money_balance(row: dict) -> float:
+def _extract_margin_limit(row: dict) -> float:
     """
-    嘗試抓融資金額餘額，單位統一轉成「元」。
+    嘗試抓融資限額，單位通常是「張」。
+
+    融資使用率 = 融資餘額 ÷ 融資限額 × 100%
 
     不同資料源欄位名稱不完全一致，所以採多組候選欄位。
     若資料源沒有提供，回傳 0，前端會顯示 --。
     """
     candidates = [
-        # English candidates
-        "MarginPurchaseMoneyBalance",
-        "MarginPurchaseTodayMoneyBalance",
-        "MarginPurchaseAmountBalance",
-        "MarginPurchaseTodayBalanceMoney",
-        "MarginPurchaseBalanceMoney",
-        "margin_purchase_money_balance",
-        "margin_purchase_today_money_balance",
-        "margin_purchase_amount_balance",
-        "margin_purchase_balance_money",
-        "margin_financing_amount",
-        "financing_amount",
-        "margin_money",
-        "loan_balance",
-        "financing_balance",
+        # FinMind / English common candidates
+        "MarginPurchaseLimit",
+        "MarginPurchaseQuota",
+        "MarginPurchaseCeiling",
+        "MarginPurchaseTodayLimit",
+        "margin_purchase_limit",
+        "margin_purchase_quota",
+        "margin_purchase_ceiling",
+        "financing_limit",
+        "margin_limit",
+        "margin_quota",
 
         # Chinese candidates
-        "融資金額餘額",
-        "融資餘額金額",
-        "融資金額",
-        "融資金額(元)",
-        "融資餘額(元)",
-        "融資金額餘額(元)",
-        "融資餘額金額(元)",
-        "融資金額(千元)",
-        "融資餘額(千元)",
-        "融資金額餘額(千元)",
-        "融資餘額金額(千元)",
-        "融資金額(萬元)",
-        "融資餘額(萬元)",
-        "融資金額餘額(萬元)",
-        "融資餘額金額(萬元)",
+        "融資限額",
+        "融資最高限額",
+        "融資額度",
+        "融資限額張數",
+        "融資限額(張)",
+        "融資額度(張)",
     ]
 
     for key in candidates:
@@ -2344,90 +2333,29 @@ def _extract_margin_money_balance(row: dict) -> float:
 
         value = _to_float(row.get(key), 0.0)
 
-        if value <= 0:
-            continue
-
-        key_text = str(key)
-
-        if "千元" in key_text or "thousand" in key_text.lower():
-            return value * 1000
-
-        if "萬元" in key_text:
-            return value * 10000
-
-        return value
+        if value > 0:
+            return value
 
     return 0.0
 
 
-def _extract_close_price_from_row(row: dict) -> float:
-    candidates = [
-        "close",
-        "Close",
-        "close_price",
-        "ClosePrice",
-        "closing_price",
-        "ClosingPrice",
-        "收盤價",
-        "收盤",
-    ]
-
-    for key in candidates:
-        if key in row and row.get(key) not in (None, "", "--", "-"):
-            value = _to_float(row.get(key), 0.0)
-
-            if value > 0:
-                return value
-
-    return 0.0
-
-
-def _get_close_price_map(stock_id: str, start_date: str) -> dict[str, float]:
-    """
-    從 FinMind TaiwanStockPrice 補收盤價。
-    用來計算融資維持率。
-    """
-    rows = _request_finmind(
-        dataset="TaiwanStockPrice",
-        stock_id=stock_id,
-        start_date=start_date,
-    )
-
-    result: dict[str, float] = {}
-
-    for r in rows or []:
-        date = str(r.get("date", ""))[:10]
-        close_price = _extract_close_price_from_row(r)
-
-        if date and close_price > 0:
-            result[date] = close_price
-
-    return result
-
-
-def _calculate_margin_maintenance_ratio(
+def _calculate_margin_usage_rate(
     margin_balance_lots: float,
-    close_price: float,
-    margin_money_balance: float,
+    margin_limit_lots: float,
 ) -> float:
     """
-    個股整體融資維持率估算：
+    融資使用率：
 
-    維持率 = 融資餘額張數 × 1000 × 收盤價 ÷ 融資金額餘額 × 100
-
-    若資料源沒有提供融資金額餘額，無法計算，回傳 0。
+    融資使用率 = 融資餘額 ÷ 融資限額 × 100%
     """
     try:
         margin_balance_lots = float(margin_balance_lots)
-        close_price = float(close_price)
-        margin_money_balance = float(margin_money_balance)
+        margin_limit_lots = float(margin_limit_lots)
 
-        if margin_balance_lots <= 0 or close_price <= 0 or margin_money_balance <= 0:
+        if margin_balance_lots <= 0 or margin_limit_lots <= 0:
             return 0.0
 
-        market_value = margin_balance_lots * 1000 * close_price
-
-        return market_value / margin_money_balance * 100
+        return margin_balance_lots / margin_limit_lots * 100
 
     except Exception:
         return 0.0
@@ -2439,10 +2367,10 @@ def get_margin_table(stock_id: str) -> list[dict]:
     優先使用 FinMind TaiwanStockMarginPurchaseShortSale。
 
     券資比 = 融券餘額 / 融資餘額 * 100%
-    維持率 = 融資餘額張數 × 1000 × 收盤價 / 融資金額餘額 * 100%
+    融資使用率 = 融資餘額 / 融資限額 * 100%
 
     注意：
-    若資料源沒有提供「融資金額餘額」，維持率會顯示 --，不硬推估。
+    若資料源沒有提供「融資限額」，融資使用率會顯示 --，不硬推估。
     """
     start_date = _start_date(45)
 
@@ -2456,7 +2384,6 @@ def get_margin_table(stock_id: str) -> list[dict]:
         return _mock_margin_table()
 
     rows = sorted(rows, key=lambda r: str(r.get("date", "")))
-    close_price_map = _get_close_price_map(stock_id, start_date)
 
     output: list[dict] = []
 
@@ -2487,17 +2414,11 @@ def get_margin_table(stock_id: str) -> list[dict]:
 
         ratio = (short_balance / margin_balance * 100) if margin_balance else 0.0
 
-        close_price = _extract_close_price_from_row(r)
+        margin_limit = _extract_margin_limit(r)
 
-        if close_price <= 0:
-            close_price = close_price_map.get(date, 0.0)
-
-        margin_money_balance = _extract_margin_money_balance(r)
-
-        maintenance_ratio = _calculate_margin_maintenance_ratio(
+        margin_usage_rate = _calculate_margin_usage_rate(
             margin_balance_lots=margin_balance,
-            close_price=close_price,
-            margin_money_balance=margin_money_balance,
+            margin_limit_lots=margin_limit,
         )
 
         output.append(
@@ -2507,9 +2428,8 @@ def get_margin_table(stock_id: str) -> list[dict]:
                 "margin": _to_int(margin_balance),
                 "short": _to_int(short_balance),
                 "ratio": f"{ratio:.2f}%" if margin_balance else "--",
-                "maintenance_ratio": f"{maintenance_ratio:.2f}%" if maintenance_ratio > 0 else "--",
-                "close_price": close_price,
-                "margin_money_balance": margin_money_balance,
+                "margin_usage_rate": f"{margin_usage_rate:.2f}%" if margin_usage_rate > 0 else "--",
+                "margin_limit": margin_limit,
             }
         )
 
@@ -2519,8 +2439,8 @@ def get_margin_table(stock_id: str) -> list[dict]:
         _clean_stock_id(stock_id),
         "| rows =",
         len(output),
-        "| maintenance_available =",
-        sum(1 for r in output if r.get("maintenance_ratio") not in (None, "", "--")),
+        "| margin_usage_available =",
+        sum(1 for r in output if r.get("margin_usage_rate") not in (None, "", "--")),
         flush=True,
     )
 
