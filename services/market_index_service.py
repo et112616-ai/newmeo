@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+from services.market_turnover_service import apply_twse_turnover_to_market_df
 from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
 import pandas as pd
@@ -353,7 +354,21 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             )
 
         raw = _to_dict(snapshots[0])
+        total_amount_raw = _safe_float(
+            raw.get("total_amount")
+            or raw.get("amount")
+            or 0
+        )
 
+        market_turnover_yi = 0.0
+
+        if total_amount_raw > 0:
+            # Shioaji amount / total_amount 通常是「元」
+            # 大盤畫面要顯示「億元」
+            if total_amount_raw >= 100_000_000:
+                market_turnover_yi = total_amount_raw / 100_000_000
+            else:
+                market_turnover_yi = total_amount_raw
         data = {
             "available": True,
             "message": "ok",
@@ -368,8 +383,10 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             "change": _safe_float(raw.get("change_price")),
             "change_pct": _safe_float(raw.get("change_rate")),
 
-            "volume": _safe_int(raw.get("volume")),
-            "total_volume": _safe_int(raw.get("total_volume")),
+            # 大盤這裡不要用 total_volume。
+            # 台股看盤軟體的大盤「量」通常看成交金額，單位億元。
+            "volume": market_turnover_yi,
+            "total_volume": market_turnover_yi,
             "amount": _safe_int(raw.get("amount")),
             "total_amount": _safe_int(raw.get("total_amount")),
 
@@ -401,8 +418,12 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             data["change"],
             "| change_pct =",
             data["change_pct"],
-            "| volume =",
+            "| turnover_yi =",
             data["total_volume"],
+            "| raw_total_volume =",
+            raw.get("total_volume"),
+            "| raw_total_amount =",
+            raw.get("total_amount"),
             "| time =",
             data["quote_time"],
             "| chart_url =",
@@ -441,7 +462,6 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             available=False,
             message=f"取得加權指數即時資料失敗：{exc}",
         )
-
 
 def _get_stale_market_index_snapshot() -> MarketIndexSnapshot | None:
     """
@@ -559,6 +579,18 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
 
         if snapshot is not None and getattr(snapshot, "available", False):
             df = _append_snapshot_to_history(df, snapshot)
+
+        # 大盤 K 線副圖不要用 yfinance / Shioaji 的 Volume。
+        # 改用 TWSE 成交金額，單位：億元。
+        try:
+            df = apply_twse_turnover_to_market_df(df)
+        except Exception as exc:
+            print(
+                "DEBUG market_index apply turnover failed",
+                "| error =",
+                repr(exc),
+                flush=True,
+            )
 
         t_append1 = time.perf_counter()
 
