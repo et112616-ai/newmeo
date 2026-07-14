@@ -5574,7 +5574,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 f"{stock_name} 本益比河流圖",
                 flex,
             )
-
         # -------------------------
         # 2.5 盤後分析
         # -------------------------
@@ -5598,30 +5597,53 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
                 df_for_post = df
 
-            branch_snapshot = get_top_broker_branches(
-                meta.stock_id,
-                trade_days=3,
-                lookback_days=20,
-                top_n=3,
-            )
+            # 先給預設值，避免 price_meta 建立失敗時整個查詢失敗。
+            price_info = "--"
+            change_info = "--"
+            update_time = "--"
+            price_change = 0.0
 
-            if getattr(branch_snapshot, "available", False):
-                branch_buy_rows = list(getattr(branch_snapshot, "buy_rows", []) or [])
-                branch_sell_rows = list(getattr(branch_snapshot, "sell_rows", []) or [])
-            else:
-                branch_buy_rows = []
-                branch_sell_rows = []
+            try:
+                price_meta = build_price_meta(df_for_post, "D")
 
-        except Exception as exc:
-            print(
-                "DEBUG post_market broker branch failed",
-                "| stock_id =", meta.stock_id,
-                "| error =", repr(exc),
-                flush=True,
-            )
+                price_info = getattr(price_meta, "price_info", "--")
+                change_info = getattr(price_meta, "change_info", "--")
+                update_time = getattr(price_meta, "time_stamp", "--")
+                price_change = float(getattr(price_meta, "price_change", 0.0) or 0.0)
+
+            except Exception as exc:
+                print(
+                    "DEBUG post_market price_meta failed",
+                    "| stock_id =", meta.stock_id,
+                    "| error =", repr(exc),
+                    flush=True,
+                )
 
             branch_buy_rows = []
             branch_sell_rows = []
+
+            try:
+                branch_snapshot = get_top_broker_branches(
+                    meta.stock_id,
+                    trade_days=3,
+                    lookback_days=20,
+                    top_n=3,
+                )
+
+                if getattr(branch_snapshot, "available", False):
+                    branch_buy_rows = list(getattr(branch_snapshot, "buy_rows", []) or [])
+                    branch_sell_rows = list(getattr(branch_snapshot, "sell_rows", []) or [])
+
+            except Exception as exc:
+                print(
+                    "DEBUG post_market broker branch failed",
+                    "| stock_id =", meta.stock_id,
+                    "| error =", repr(exc),
+                    flush=True,
+                )
+
+                branch_buy_rows = []
+                branch_sell_rows = []
 
             image_url = generate_post_market_analysis_chart(
                 df_for_post,
@@ -5635,6 +5657,14 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "DEBUG stock timing post_market",
                 "| stock_id =", meta.stock_id,
                 "| rows =", 0 if df_for_post is None else len(df_for_post),
+                "| branch_buy_rows =", [
+                    (getattr(x, "display_name", "--"), getattr(x, "net_lots", 0))
+                    for x in branch_buy_rows
+                ],
+                "| branch_sell_rows =", [
+                    (getattr(x, "display_name", "--"), getattr(x, "net_lots", 0))
+                    for x in branch_sell_rows
+                ],
                 "| image_url =", image_url,
                 "| sec =", round(time.perf_counter() - t_post0, 3),
                 flush=True,
@@ -5644,17 +5674,17 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 stock_id=meta.stock_id,
                 stock_name=stock_name,
                 image_url=image_url,
-                price_info=price_meta.price_info,
-                change_info=price_meta.change_info,
-                update_time=price_meta.time_stamp,
-                price_change=price_meta.price_change,
+                price_info=price_info,
+                change_info=change_info,
+                update_time=update_time,
+                price_change=price_change,
                 active_mode="post_market",
                 current_tf="D",
                 image_aspect_ratio="1:1",
             )
 
             return _reply_with_title(f"{stock_name} 盤後分析", flex)
-        
+                
         # -------------------------
         # 2. 即時 / K 線 / 法人
         # -------------------------
