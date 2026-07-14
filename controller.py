@@ -1629,7 +1629,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             ("融資券", "margin"),
             ("財務", "financial"),
             ("期貨", "futures"),
-            ("盤後", "post_market"),
+            ("盤後分析", "post_market"),
         ],
     ]
 
@@ -1673,7 +1673,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
                         {
                             "type": "text",
                             "text": label,
-                            "size": "xxs" if label == "融資券" else "xs",
+                            "size": "xxs" if label in {"融資券", "盤後分析"} else "xs",
                             "weight": "bold" if is_active else "regular",
                             "align": "center",
                             "gravity": "center",
