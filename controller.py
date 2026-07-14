@@ -2287,7 +2287,7 @@ def _build_market_future_realtime_flex(
     open_price = _to_float(getattr(snapshot, "open_price", 0.0))
     high_price = _to_float(getattr(snapshot, "high_price", 0.0))
     low_price = _to_float(getattr(snapshot, "low_price", 0.0))
-     = _to_int(
+    total_volume = _to_float(
         getattr(snapshot, "", None)
         if getattr(snapshot, "", None) is not None
         else getattr(snapshot, "volume", 0)
