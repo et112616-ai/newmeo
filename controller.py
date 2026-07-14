@@ -167,6 +167,18 @@ def _normalize_action(action: str | None) -> str:
         "財務": "financial",
         "eps": "financial",
 
+        # 盤後分析
+        "post_market": "post_market",
+        "postmarket": "post_market",
+        "afterhours": "post_market",
+        "after_hours": "post_market",
+        "after_market": "post_market",
+        "盤後": "post_market",
+        "盤後分析": "post_market",
+        "支撐壓力": "post_market",
+        "支撐": "post_market",
+        "壓力": "post_market",
+
         # 本益比河流圖
         "pe_river": "pe_river",
         "periver": "pe_river",
@@ -1606,70 +1618,82 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
     mode = _normalize_action(active_mode)
     tf = normalize_time_frame(current_tf)
 
-    items = [
-        ("即時", "instant"),
-        ("K線", "k_line"),
-        ("法人", "chip"),
-        ("大戶", "large_holder"),
-        ("融資券", "margin"),
-        ("財務", "financial"),
-        ("期貨", "futures"),
-
+    rows = [
+        [
+            ("即時", "instant"),
+            ("K線", "k_line"),
+            ("法人", "chip"),
+            ("大戶", "large_holder"),
+        ],
+        [
+            ("融資券", "margin"),
+            ("財務", "financial"),
+            ("期貨", "futures"),
+            ("盤後", "post_market"),
+        ],
     ]
 
-    buttons = []
-
-    for label, action_name in items:
-        is_active = mode == action_name
-
-        # 重要：
-        # 從 K線切回即時，如果目前是 D/W/M，要自動改成 1m
-        # 從即時切回 K線，如果目前是 1m/5m，要自動改成 D
+    def _target_tf_for(action_name: str) -> str:
         if action_name == "instant":
-            target_tf = tf if tf in {"1m", "5m"} else "1m"
-        elif action_name == "k_line":
-            target_tf = tf if tf in {"D", "W", "M"} else "D"
-        else:
-            target_tf = tf
+            return tf if tf in {"1m", "5m"} else "1m"
 
-        buttons.append(
+        if action_name == "k_line":
+            return tf if tf in {"D", "W", "M"} else "D"
+
+        if action_name == "post_market":
+            return "D"
+
+        return tf
+
+    output: list[dict[str, Any]] = []
+
+    for row_idx, row_items in enumerate(rows):
+        buttons = []
+
+        for label, action_name in row_items:
+            is_active = mode == action_name
+            target_tf = _target_tf_for(action_name)
+
+            buttons.append(
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "height": "25px",
+                    "cornerRadius": "8px",
+                    "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                    "justifyContent": "center",
+                    "alignItems": "center",
+                    "action": {
+                        "type": "postback",
+                        "label": label,
+                        "data": f"{stock_id},{action_name},{action_name},{target_tf}",
+                        "displayText": f"{stock_id} {label}",
+                    },
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": label,
+                            "size": "xxs" if label == "融資券" else "xs",
+                            "weight": "bold" if is_active else "regular",
+                            "align": "center",
+                            "gravity": "center",
+                            "color": "#FFFFFF" if is_active else "#111111",
+                        }
+                    ],
+                }
+            )
+
+        output.append(
             {
                 "type": "box",
-                "layout": "vertical",
-                "height": "34px",
-                "cornerRadius": "8px",
-                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
-                "justifyContent": "center",
-                "alignItems": "center",
-                "action": {
-                    "type": "postback",
-                    "label": label,
-                    "data": f"{stock_id},{action_name},{action_name},{target_tf}",
-                    "displayText": f"{stock_id} {label}",
-                },
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": label,
-                        "size": "xxs" if label == "融資券" else "xs",
-                        "weight": "bold" if is_active else "regular",
-                        "align": "center",
-                        "gravity": "center",
-                        "color": "#FFFFFF" if is_active else "#111111",
-                    }
-                ],
+                "layout": "horizontal",
+                "spacing": "xs",
+                "margin": "md" if row_idx == 0 else "xs",
+                "contents": buttons,
             }
         )
 
-    return [
-        {
-            "type": "box",
-            "layout": "horizontal",
-            "spacing": "xs",
-            "margin": "md",
-            "contents": buttons,
-        }
-    ]
+    return output
 
 def _futures_session_buttons(
     stock_id: str,
@@ -2559,6 +2583,7 @@ def _build_chart_flex(
         "large_holder": "大戶持股",
         "margin": "融資券",
         "futures": "個股期貨",
+        "post_market": "盤後分析",
     }
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
@@ -5549,6 +5574,61 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 flex,
             )
 
+        # -------------------------
+        # 2.5 盤後分析
+        # -------------------------
+        if action == "post_market":
+            t_post0 = time.perf_counter()
+
+            df, tf = _get_history_df_tf_safe(meta, "D")
+
+            if df is None or len(df) == 0:
+                return text_message("目前暫時抓不到這檔股票的日K資料，無法產生盤後分析。")
+
+            try:
+                # 若 FinMind 日K尚未更新到今日，補 Shioaji snapshot。
+                df_for_post = _apply_shioaji_stock_realtime(df, meta.stock_id)
+            except Exception as exc:
+                print(
+                    "DEBUG post_market realtime append failed",
+                    "| stock_id =", meta.stock_id,
+                    "| error =", repr(exc),
+                    flush=True,
+                )
+                df_for_post = df
+
+            price_meta = build_price_meta(df_for_post, "D")
+
+            image_url = generate_post_market_analysis_chart(
+                df_for_post,
+                meta.stock_id,
+                stock_name,
+            )
+
+            print(
+                "DEBUG stock timing post_market",
+                "| stock_id =", meta.stock_id,
+                "| rows =", 0 if df_for_post is None else len(df_for_post),
+                "| image_url =", image_url,
+                "| sec =", round(time.perf_counter() - t_post0, 3),
+                flush=True,
+            )
+
+            flex = _build_chart_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                image_url=image_url,
+                price_info=price_meta.price_info,
+                change_info=price_meta.change_info,
+                update_time=price_meta.time_stamp,
+                price_change=price_meta.price_change,
+                active_mode="post_market",
+                current_tf="D",
+                image_aspect_ratio="1:1",
+            )
+
+            return _reply_with_title(f"{stock_name} 盤後分析", flex)
+        
         # -------------------------
         # 2. 即時 / K 線 / 法人
         # -------------------------
