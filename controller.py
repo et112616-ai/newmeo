@@ -5598,12 +5598,28 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
                 df_for_post = df
 
-            price_meta = build_price_meta(df_for_post, "D")
+            branch_snapshot = get_key_broker_branch(
+                meta.stock_id,
+                trade_days=3,
+                lookback_days=20,
+            )
+
+            if getattr(branch_snapshot, "available", False):
+                branch_name = getattr(branch_snapshot, "display_name", "") or "資料建置中"
+                branch_net_lots = getattr(branch_snapshot, "net_lots", "--")
+                branch_avg_price = getattr(branch_snapshot, "avg_price", "--")
+            else:
+                branch_name = "資料建置中"
+                branch_net_lots = "--"
+                branch_avg_price = "--"
 
             image_url = generate_post_market_analysis_chart(
                 df_for_post,
                 meta.stock_id,
                 stock_name,
+                branch_name=branch_name,
+                branch_net_lots=branch_net_lots,
+                branch_avg_price=branch_avg_price,
             )
 
             print(
