@@ -1315,7 +1315,7 @@ def _append_realtime_snapshot_row(df, snapshot: dict):
     high_price = _snap_float(snapshot, "high", "High", default=close_price) or close_price
     low_price = _snap_float(snapshot, "low", "Low", default=close_price) or close_price
 
-    # snapshot 的 volume / total_volume 多半是累積量，
+    # snapshot 的 volume /  多半是累積量，
     # 不適合直接塞到 1 分K當單根成交量，所以這裡用 0，
     # 避免圖下方成交量突然爆大。
     volume = 0
@@ -1835,7 +1835,7 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
         ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
         ("收", close_text, change_color),
         ("漲", change_text, change_color),
-        ("量", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
+        ("成交金額(億)", _fmt_market_int(getattr(snapshot, "total_volume", 0)), "#222222"),
     ]
 
     contents: list[dict[str, Any]] = [
@@ -1982,7 +1982,7 @@ def _build_market_future_placeholder_flex(
         },
         {
             "type": "text",
-            "text": "之後這裡會顯示：期貨價、漲跌、漲跌幅、開、高、低、量、更新時間。",
+            "text": "之後這裡會顯示：期貨價、漲跌、漲跌幅、開、高、低、、更新時間。",
             "size": "xs",
             "color": "#888888",
             "wrap": True,
@@ -2287,9 +2287,9 @@ def _build_market_future_realtime_flex(
     open_price = _to_float(getattr(snapshot, "open_price", 0.0))
     high_price = _to_float(getattr(snapshot, "high_price", 0.0))
     low_price = _to_float(getattr(snapshot, "low_price", 0.0))
-    total_volume = _to_int(
-        getattr(snapshot, "total_volume", None)
-        if getattr(snapshot, "total_volume", None) is not None
+     = _to_int(
+        getattr(snapshot, "", None)
+        if getattr(snapshot, "", None) is not None
         else getattr(snapshot, "volume", 0)
     )
 
@@ -2411,7 +2411,7 @@ def _build_market_future_realtime_flex(
                 "margin": "md",
                 "contents": [
                     _metric_box("現貨", _fmt_market_price(spot_price)),
-                    _metric_box("成交量", _fmt_market_int(total_volume)),
+                    _metric_box("成交量", _fmt_market_int()),
                 ],
             },
             {
