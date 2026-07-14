@@ -160,6 +160,14 @@ def _upsert_rows(rows: list[dict]) -> dict:
 
 def _read_csv_text(csv_text: str) -> pd.DataFrame:
     text = str(csv_text or "").replace("\ufeff", "").strip()
+    print(
+        "DEBUG broker csv text",
+        "| chars =",
+        len(text),
+        "| preview =",
+        text[:200].replace("\n", "\\n"),
+        flush=True,
+    )
 
     if not text:
         return pd.DataFrame()
