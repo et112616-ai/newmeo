@@ -10,9 +10,7 @@ import os
 import pandas as pd
 import requests
 
-
 SUPABASE_TABLE = "broker_branch_trading_daily"
-
 
 @dataclass
 class KeyBrokerBranchSnapshot:
@@ -29,6 +27,20 @@ class KeyBrokerBranchSnapshot:
     trade_dates: list[str] | None = None
     side: str = ""
 
+@dataclass
+class TopBrokerBranchItem:
+    display_name: str
+    net_lots: float
+
+
+@dataclass
+class BrokerBranchTopListSnapshot:
+    available: bool
+    message: str
+    stock_id: str
+    buy_rows: list[TopBrokerBranchItem]
+    sell_rows: list[TopBrokerBranchItem]
+    trade_dates: list[str] | None = None
 
 def _clean_stock_id(stock_id: str) -> str:
     return str(stock_id or "").replace(".TW", "").replace(".TWO", "").strip()
@@ -749,4 +761,131 @@ def get_key_broker_branch(
         latest_date=latest_date,
         trade_dates=selected_dates,
         side=side,
+    )
+def _branch_display_name(item: dict) -> str:
+    broker_name = str(item.get("broker_name") or "").strip()
+    branch_name = str(item.get("branch_name") or "").strip()
+    branch_key = str(item.get("branch_key") or "").strip()
+
+    if broker_name and branch_name:
+        return f"{broker_name}-{branch_name}"
+
+    return branch_key or broker_name or branch_name or "--"
+
+
+def get_top_broker_branches(
+    stock_id: str,
+    trade_days: int = 3,
+    lookback_days: int = 20,
+    top_n: int = 3,
+) -> BrokerBranchTopListSnapshot:
+    """
+    近 N 個交易日三大買超 / 賣超分點。
+
+    買超：
+    - 近 N 日 net_lots 加總 > 0
+    - 依 net_lots 由大到小排序
+
+    賣超：
+    - 近 N 日 net_lots 加總 < 0
+    - 依 net_lots 由小到大排序
+    """
+    sid = _clean_stock_id(stock_id)
+    rows = _query_recent_rows(sid, lookback_days=lookback_days)
+
+    if not rows:
+        return BrokerBranchTopListSnapshot(
+            available=False,
+            message="尚無分點資料",
+            stock_id=sid,
+            buy_rows=[],
+            sell_rows=[],
+            trade_dates=[],
+        )
+
+    all_dates = sorted(
+        {
+            str(r.get("trade_date", "")).strip()
+            for r in rows
+            if str(r.get("trade_date", "")).strip()
+        },
+        reverse=True,
+    )
+
+    selected_dates = all_dates[: max(1, int(trade_days))]
+
+    selected_rows = [
+        r for r in rows
+        if str(r.get("trade_date", "")).strip() in selected_dates
+    ]
+
+    if not selected_rows:
+        return BrokerBranchTopListSnapshot(
+            available=False,
+            message="近3日分點資料不足",
+            stock_id=sid,
+            buy_rows=[],
+            sell_rows=[],
+            trade_dates=selected_dates,
+        )
+
+    agg_rows = _aggregate_branch(selected_rows)
+
+    buy_candidates = [
+        r for r in agg_rows
+        if _to_float(r.get("net_lots"), 0.0) > 0
+    ]
+
+    sell_candidates = [
+        r for r in agg_rows
+        if _to_float(r.get("net_lots"), 0.0) < 0
+    ]
+
+    buy_candidates = sorted(
+        buy_candidates,
+        key=lambda r: _to_float(r.get("net_lots"), 0.0),
+        reverse=True,
+    )[: max(1, int(top_n))]
+
+    sell_candidates = sorted(
+        sell_candidates,
+        key=lambda r: _to_float(r.get("net_lots"), 0.0),
+    )[: max(1, int(top_n))]
+
+    buy_rows = [
+        TopBrokerBranchItem(
+            display_name=_branch_display_name(item),
+            net_lots=_to_float(item.get("net_lots"), 0.0),
+        )
+        for item in buy_candidates
+    ]
+
+    sell_rows = [
+        TopBrokerBranchItem(
+            display_name=_branch_display_name(item),
+            net_lots=_to_float(item.get("net_lots"), 0.0),
+        )
+        for item in sell_candidates
+    ]
+
+    print(
+        "DEBUG top broker branches",
+        "| stock_id =",
+        sid,
+        "| dates =",
+        selected_dates,
+        "| buy_rows =",
+        [(r.display_name, r.net_lots) for r in buy_rows],
+        "| sell_rows =",
+        [(r.display_name, r.net_lots) for r in sell_rows],
+        flush=True,
+    )
+
+    return BrokerBranchTopListSnapshot(
+        available=bool(buy_rows or sell_rows),
+        message="ok" if (buy_rows or sell_rows) else "查無近3日主買賣分點",
+        stock_id=sid,
+        buy_rows=buy_rows,
+        sell_rows=sell_rows,
+        trade_dates=selected_dates,
     )
