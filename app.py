@@ -622,16 +622,31 @@ def sync_broker_branch_csv_route():
 
         csv_text = ""
 
-        if request.files:
-            upload = request.files.get("file")
+        if upload:
+            raw = upload.read()
 
-            if upload:
-                raw = upload.read()
+            csv_text = ""
 
+            for encoding in ["utf-8-sig", "utf-16", "cp950", "big5", "utf-8"]:
                 try:
-                    csv_text = raw.decode("utf-8-sig")
+                    csv_text = raw.decode(encoding)
+                    if csv_text.strip():
+                        print(
+                            "DEBUG broker csv decoded",
+                            "| encoding =",
+                            encoding,
+                            "| chars =",
+                            len(csv_text),
+                            "| preview =",
+                            csv_text[:120].replace("\n", "\\n"),
+                            flush=True,
+                        )
+                        break
                 except Exception:
-                    csv_text = raw.decode("big5", errors="ignore")
+                    continue
+
+            if not csv_text.strip():
+                csv_text = raw.decode("utf-8", errors="ignore")
 
         elif request.is_json:
             payload = request.get_json(silent=True) or {}
