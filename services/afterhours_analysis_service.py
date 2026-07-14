@@ -168,13 +168,13 @@ def _calc_levels(work: pd.DataFrame) -> dict[str, Any]:
         "avg3": _round_to_tick(avg3, close),
     }
 
-
 def generate_post_market_analysis_chart(
     df: pd.DataFrame,
     stock_id: str,
     stock_name: str,
     branch_name: str = "資料建置中",
     branch_net_lots: Any = "--",
+    branch_avg_price: Any = "--",
 ) -> str:
     work = _prepare_daily_df(df)
 
@@ -279,23 +279,33 @@ def generate_post_market_analysis_chart(
     )
     y -= 0.10
 
+    avg_text = "--"
+
+    try:
+        if isinstance(branch_avg_price, (int, float)) and float(branch_avg_price) > 0:
+            avg_text = _fmt_price(branch_avg_price)
+        elif str(branch_avg_price or "").strip() not in {"", "--"}:
+            avg_text = str(branch_avg_price)
+    except Exception:
+        avg_text = "--"
+
     ax.text(
         x_label,
         y,
-        f"3日均價：{_fmt_price(levels['avg3'])}",
+        f"3日均價：{avg_text}",
         fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
-
+    
     # 底部備註縮小，避免干擾主資訊
     ax.text(
         0.08,
         0.045,
-        "支撐壓力為 Pivot 推估，僅供盤後觀察。",
-        fontsize=13,
+        "支撐壓力為推估，僅供盤後觀察。",
+        fontsize=12,
         color="#777777",
         va="bottom",
         **font_kwargs,
