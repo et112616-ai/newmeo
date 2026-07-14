@@ -2103,7 +2103,7 @@ def _build_market_future_realtime_flex(
     - 上方顯示台指期價格、漲跌、漲跌幅。
     - 期現價差獨立成摘要區。
     - 日盤 / 全盤按鈕保留。
-    - 現貨、成交量、開高低、買賣、更新時間整理成資訊卡。
+    - 現貨、次月期貨、開高低、買賣、更新時間整理成資訊卡。
     - 與個股期貨卡片視覺一致。
     """
 
@@ -2293,6 +2293,21 @@ def _build_market_future_realtime_flex(
         else getattr(snapshot, "volume", 0)
     )
 
+    next_future_price = _to_float(getattr(snapshot, "next_future_price", 0.0))
+    next_future_change = _to_float(getattr(snapshot, "next_future_change", 0.0))
+    next_future_change_pct = _to_float(getattr(snapshot, "next_future_change_pct", 0.0))
+    next_contract_code = str(getattr(snapshot, "next_contract_code", "") or "").strip()
+
+    next_future_color = _calc_color(next_future_change)
+    next_future_text = _fmt_market_price(next_future_price) if next_future_price > 0 else "--"
+
+    if next_future_price > 0 and (next_future_change != 0 or next_future_change_pct != 0):
+        next_future_sub_text = f"{next_contract_code}｜{_fmt_signed(next_future_change)} ({_fmt_signed_pct(next_future_change_pct)})"
+    elif next_contract_code:
+        next_future_sub_text = next_contract_code
+    else:
+        next_future_sub_text = ""
+
     buy_price = _to_float(
         getattr(snapshot, "buy_price", None)
         if getattr(snapshot, "buy_price", None) is not None
@@ -2411,7 +2426,12 @@ def _build_market_future_realtime_flex(
                 "margin": "md",
                 "contents": [
                     _metric_box("現貨", _fmt_market_price(spot_price)),
-                    _metric_box("成交量", _fmt_market_int(total_volume)),
+                    _metric_box(
+                        "次月期貨",
+                        next_future_text,
+                        next_future_sub_text,
+                        next_future_color if next_future_price > 0 else "#111111",
+                    ),
                 ],
             },
             {
