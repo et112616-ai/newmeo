@@ -224,8 +224,8 @@ def generate_post_market_analysis_chart(
     # -------------------------
     # 上半部：支撐壓力
     # -------------------------
-    x_label = 0.12
-    x_value = 0.47
+    x_label = 0.24
+    x_value = 0.52
     y = 0.93
 
     rows = [
@@ -261,24 +261,26 @@ def generate_post_market_analysis_chart(
 
     # 說明文字移到撐2下面
     ax.text(
-        0.10,
+        0.50,
         y + 0.01,
         "支撐壓力為 Pivot 推估；分點為近3個交易日累計。",
-        fontsize=12,
+        fontsize=14,
         color="#777777",
         va="top",
+        ha="center",
         **font_kwargs,
     )
 
     y -= 0.045
 
     ax.text(
-        0.10,
+        0.50,
         y,
         "────────────",
         fontsize=22,
         color="#777777",
         va="top",
+        ha="center",
         **font_kwargs,
     )
 
@@ -295,6 +297,7 @@ def generate_post_market_analysis_chart(
         fontweight="bold",
         color="#111111",
         va="top",
+        ha="center",
         **font_kwargs,
     )
 
@@ -304,12 +307,16 @@ def generate_post_market_analysis_chart(
     green = "#00A84F"
 
     # 表頭，字體與壓撐同級
+    x_buy_lots = 0.18
+    x_buy_name = 0.36
+    x_sell_name = 0.62
+    x_sell_lots = 0.82
     ax.text(0.08, y, "買超", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
     ax.text(0.27, y, "券商", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
     ax.text(0.57, y, "券商", fontsize=34, fontweight="bold", color=green, va="top", **font_kwargs)
     ax.text(0.94, y, "賣超", fontsize=34, fontweight="bold", color=green, va="top", ha="right", **font_kwargs)
 
-    y -= 0.073
+    y -= 0.105
 
     buy_rows = list(branch_buy_rows or [])
     sell_rows = list(branch_sell_rows or [])
@@ -325,51 +332,54 @@ def generate_post_market_analysis_chart(
         sell_net = _get_item_net(sell_item) if sell_item else 0.0
 
         ax.text(
-            0.08,
+            x_buy_lots,
             y,
             _fmt_signed_lots(buy_net) if buy_item else "--",
             fontsize=34,
             fontweight="bold",
             color=red,
             va="top",
+            ha="center",
             **font_kwargs,
         )
 
         ax.text(
-            0.27,
+            x_buy_name,
             y,
             buy_name,
             fontsize=34,
             fontweight="bold",
             color=red,
             va="top",
+            ha="center",
             **font_kwargs,
         )
 
         ax.text(
-            0.57,
+            x_sell_name,
             y,
             sell_name,
             fontsize=34,
             fontweight="bold",
             color=green,
             va="top",
+            ha="center",
             **font_kwargs,
         )
 
         ax.text(
-            0.94,
+            x_sell_lots,
             y,
             _fmt_signed_lots(sell_net) if sell_item else "--",
             fontsize=34,
             fontweight="bold",
             color=green,
             va="top",
-            ha="right",
+            ha="center",
             **font_kwargs,
         )
 
-        y -= 0.073
+        y -= 0.20
 
     print(
         "DEBUG post_market analysis",
