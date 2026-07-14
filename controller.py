@@ -2288,8 +2288,8 @@ def _build_market_future_realtime_flex(
     high_price = _to_float(getattr(snapshot, "high_price", 0.0))
     low_price = _to_float(getattr(snapshot, "low_price", 0.0))
     total_volume = _to_float(
-        getattr(snapshot, "", None)
-        if getattr(snapshot, "", None) is not None
+        getattr(snapshot, "total_volume", None)
+        if getattr(snapshot, "total_volume", None) is not None
         else getattr(snapshot, "volume", 0)
     )
 
@@ -2411,7 +2411,7 @@ def _build_market_future_realtime_flex(
                 "margin": "md",
                 "contents": [
                     _metric_box("現貨", _fmt_market_price(spot_price)),
-                    _metric_box("成交量", _fmt_market_int()),
+                    _metric_box("成交量", _fmt_market_int(total_volume)),
                 ],
             },
             {
