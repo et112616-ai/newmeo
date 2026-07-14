@@ -212,20 +212,21 @@ def generate_post_market_analysis_chart(
         except Exception:
             return "--"
 
-    def _short_name(value: str, max_len: int = 6) -> str:
+    def _short_name(value: str, max_len: int = 4) -> str:
         text = str(value or "--").strip()
-
-        # 常見格式：統一-南京，畫面上去掉連字號會比較短。
-        text = text.replace("－", "-")
+        text = text.replace("－", "-").replace("-", "")
 
         if len(text) > max_len:
             return text[:max_len]
 
         return text
 
+    # -------------------------
+    # 上半部：支撐壓力
+    # -------------------------
     x_label = 0.12
     x_value = 0.47
-    y = 0.91
+    y = 0.93
 
     rows = [
         ("壓 2", levels["r2"], "#D32F2F"),
@@ -256,9 +257,20 @@ def generate_post_market_analysis_chart(
             va="top",
             **font_kwargs,
         )
-        y -= 0.119
+        y -= 0.105
 
-    y -= 0.005
+    # 說明文字移到撐2下面
+    ax.text(
+        0.10,
+        y + 0.01,
+        "支撐壓力為 Pivot 推估；分點為近3個交易日累計。",
+        fontsize=12,
+        color="#777777",
+        va="top",
+        **font_kwargs,
+    )
+
+    y -= 0.045
 
     ax.text(
         0.10,
@@ -269,30 +281,35 @@ def generate_post_market_analysis_chart(
         va="top",
         **font_kwargs,
     )
-    y -= 0.075
 
+    y -= 0.060
+
+    # -------------------------
+    # 下半部：近3日主買賣
+    # -------------------------
     ax.text(
         0.12,
         y,
         "近3日主買賣",
-        fontsize=24,
+        fontsize=34,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
-    y -= 0.07
+
+    y -= 0.078
 
     red = "#D32F2F"
     green = "#00A84F"
 
-    # 表頭
-    ax.text(0.11, y, "買超", fontsize=18, fontweight="bold", color=red, va="top", **font_kwargs)
-    ax.text(0.27, y, "券商", fontsize=18, fontweight="bold", color=red, va="top", **font_kwargs)
-    ax.text(0.57, y, "券商", fontsize=18, fontweight="bold", color=green, va="top", **font_kwargs)
-    ax.text(0.82, y, "賣超", fontsize=18, fontweight="bold", color=green, va="top", ha="right", **font_kwargs)
+    # 表頭，字體與壓撐同級
+    ax.text(0.08, y, "買超", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
+    ax.text(0.27, y, "券商", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
+    ax.text(0.57, y, "券商", fontsize=34, fontweight="bold", color=green, va="top", **font_kwargs)
+    ax.text(0.94, y, "賣超", fontsize=34, fontweight="bold", color=green, va="top", ha="right", **font_kwargs)
 
-    y -= 0.057
+    y -= 0.073
 
     buy_rows = list(branch_buy_rows or [])
     sell_rows = list(branch_sell_rows or [])
@@ -308,10 +325,10 @@ def generate_post_market_analysis_chart(
         sell_net = _get_item_net(sell_item) if sell_item else 0.0
 
         ax.text(
-            0.11,
+            0.08,
             y,
             _fmt_signed_lots(buy_net) if buy_item else "--",
-            fontsize=19,
+            fontsize=34,
             fontweight="bold",
             color=red,
             va="top",
@@ -322,7 +339,7 @@ def generate_post_market_analysis_chart(
             0.27,
             y,
             buy_name,
-            fontsize=19,
+            fontsize=34,
             fontweight="bold",
             color=red,
             va="top",
@@ -333,7 +350,7 @@ def generate_post_market_analysis_chart(
             0.57,
             y,
             sell_name,
-            fontsize=19,
+            fontsize=34,
             fontweight="bold",
             color=green,
             va="top",
@@ -341,10 +358,10 @@ def generate_post_market_analysis_chart(
         )
 
         ax.text(
-            0.82,
+            0.94,
             y,
             _fmt_signed_lots(sell_net) if sell_item else "--",
-            fontsize=19,
+            fontsize=34,
             fontweight="bold",
             color=green,
             va="top",
@@ -352,17 +369,7 @@ def generate_post_market_analysis_chart(
             **font_kwargs,
         )
 
-        y -= 0.058
-
-    ax.text(
-        0.08,
-        0.045,
-        "支撐壓力為 Pivot 推估；分點為近3個交易日累計。",
-        fontsize=12,
-        color="#777777",
-        va="bottom",
-        **font_kwargs,
-    )
+        y -= 0.073
 
     print(
         "DEBUG post_market analysis",
@@ -391,3 +398,4 @@ def generate_post_market_analysis_chart(
         return publish_figure(fig, f"{stock_id}_post_market")
     finally:
         plt.close(fig)
+
