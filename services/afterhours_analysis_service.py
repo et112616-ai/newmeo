@@ -172,9 +172,8 @@ def generate_post_market_analysis_chart(
     df: pd.DataFrame,
     stock_id: str,
     stock_name: str,
-    branch_name: str = "資料建置中",
-    branch_net_lots: Any = "--",
-    branch_avg_price: Any = "--",
+    branch_buy_rows: list[Any] | None = None,
+    branch_sell_rows: list[Any] | None = None,
 ) -> str:
     work = _prepare_daily_df(df)
 
@@ -184,17 +183,50 @@ def generate_post_market_analysis_chart(
     font_kwargs = _setup_font()
     levels = _calc_levels(work)
 
-    # 白底，不再使用綠色卡片底色
     fig = plt.figure(figsize=(7.0, 7.0), dpi=150, facecolor="white")
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
     ax.set_facecolor("white")
 
-    x_label = 0.13
-    x_value = 0.46
-    y = 0.88
+    def _get_item_name(item: Any) -> str:
+        try:
+            if isinstance(item, dict):
+                return str(item.get("display_name") or item.get("branch_key") or "--")
+            return str(getattr(item, "display_name", "--") or "--")
+        except Exception:
+            return "--"
 
-    # 壓力 / 支撐區塊放大
+    def _get_item_net(item: Any) -> float:
+        try:
+            if isinstance(item, dict):
+                return float(item.get("net_lots") or 0)
+            return float(getattr(item, "net_lots", 0) or 0)
+        except Exception:
+            return 0.0
+
+    def _fmt_signed_lots(value: Any) -> str:
+        try:
+            num = float(value)
+            sign = "+" if num > 0 else ""
+            return f"{sign}{num:,.0f}"
+        except Exception:
+            return "--"
+
+    def _short_name(value: str, max_len: int = 6) -> str:
+        text = str(value or "--").strip()
+
+        # 常見格式：統一-南京，畫面上去掉連字號會比較短。
+        text = text.replace("－", "-")
+
+        if len(text) > max_len:
+            return text[:max_len]
+
+        return text
+
+    x_label = 0.12
+    x_value = 0.47
+    y = 0.91
+
     rows = [
         ("壓 2", levels["r2"], "#D32F2F"),
         ("壓 1", levels["r1"], "#F44336"),
@@ -224,87 +256,108 @@ def generate_post_market_analysis_chart(
             va="top",
             **font_kwargs,
         )
-        y -= 0.125
+        y -= 0.119
 
-    # 分隔線
-    y -= 0.015
+    y -= 0.005
+
     ax.text(
-        0.11,
+        0.10,
         y,
         "────────────",
+        fontsize=22,
+        color="#777777",
+        va="top",
+        **font_kwargs,
+    )
+    y -= 0.075
+
+    ax.text(
+        0.12,
+        y,
+        "近3日主買賣",
         fontsize=24,
-        color="#666666",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.105
-
-    # 關鍵分點區塊
-    ax.text(
-        x_label,
-        y,
-        "關鍵分點：",
-        fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
-    ax.text(
-        x_label + 0.36,
-        y,
-        str(branch_name or "資料建置中"),
-        fontsize=25,
-        fontweight="bold",
-        color="#111111",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.10
+    y -= 0.07
 
-    if isinstance(branch_net_lots, (int, float)):
-        branch_net_text = _fmt_lots(branch_net_lots)
-    else:
-        branch_net_text = str(branch_net_lots or "--")
+    red = "#D32F2F"
+    green = "#00A84F"
 
-    ax.text(
-        x_label,
-        y,
-        f"買賣超：{branch_net_text}",
-        fontsize=25,
-        fontweight="bold",
-        color="#111111",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.10
+    # 表頭
+    ax.text(0.11, y, "買超", fontsize=18, fontweight="bold", color=red, va="top", **font_kwargs)
+    ax.text(0.27, y, "券商", fontsize=18, fontweight="bold", color=red, va="top", **font_kwargs)
+    ax.text(0.57, y, "券商", fontsize=18, fontweight="bold", color=green, va="top", **font_kwargs)
+    ax.text(0.82, y, "賣超", fontsize=18, fontweight="bold", color=green, va="top", ha="right", **font_kwargs)
 
-    avg_text = "--"
+    y -= 0.057
 
-    try:
-        if isinstance(branch_avg_price, (int, float)) and float(branch_avg_price) > 0:
-            avg_text = _fmt_price(branch_avg_price)
-        elif str(branch_avg_price or "").strip() not in {"", "--"}:
-            avg_text = str(branch_avg_price)
-    except Exception:
-        avg_text = "--"
+    buy_rows = list(branch_buy_rows or [])
+    sell_rows = list(branch_sell_rows or [])
 
-    ax.text(
-        x_label,
-        y,
-        f"3日均價：{avg_text}",
-        fontsize=25,
-        fontweight="bold",
-        color="#111111",
-        va="top",
-        **font_kwargs,
-    )
-    
-    # 底部備註縮小，避免干擾主資訊
+    for i in range(3):
+        buy_item = buy_rows[i] if i < len(buy_rows) else None
+        sell_item = sell_rows[i] if i < len(sell_rows) else None
+
+        buy_name = _short_name(_get_item_name(buy_item)) if buy_item else "--"
+        sell_name = _short_name(_get_item_name(sell_item)) if sell_item else "--"
+
+        buy_net = _get_item_net(buy_item) if buy_item else 0.0
+        sell_net = _get_item_net(sell_item) if sell_item else 0.0
+
+        ax.text(
+            0.11,
+            y,
+            _fmt_signed_lots(buy_net) if buy_item else "--",
+            fontsize=19,
+            fontweight="bold",
+            color=red,
+            va="top",
+            **font_kwargs,
+        )
+
+        ax.text(
+            0.27,
+            y,
+            buy_name,
+            fontsize=19,
+            fontweight="bold",
+            color=red,
+            va="top",
+            **font_kwargs,
+        )
+
+        ax.text(
+            0.57,
+            y,
+            sell_name,
+            fontsize=19,
+            fontweight="bold",
+            color=green,
+            va="top",
+            **font_kwargs,
+        )
+
+        ax.text(
+            0.82,
+            y,
+            _fmt_signed_lots(sell_net) if sell_item else "--",
+            fontsize=19,
+            fontweight="bold",
+            color=green,
+            va="top",
+            ha="right",
+            **font_kwargs,
+        )
+
+        y -= 0.058
+
     ax.text(
         0.08,
         0.045,
-        "支撐壓力為推估，僅供盤後觀察。",
+        "支撐壓力為 Pivot 推估；分點為近3個交易日累計。",
         fontsize=12,
         color="#777777",
         va="bottom",
@@ -327,8 +380,10 @@ def generate_post_market_analysis_chart(
         levels["s1"],
         "| s2 =",
         levels["s2"],
-        "| avg3 =",
-        levels["avg3"],
+        "| buy_rows =",
+        [(_get_item_name(x), _get_item_net(x)) for x in buy_rows],
+        "| sell_rows =",
+        [(_get_item_name(x), _get_item_net(x)) for x in sell_rows],
         flush=True,
     )
 
