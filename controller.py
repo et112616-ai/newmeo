@@ -10,7 +10,7 @@ from services.sinopac_quote_service import (
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
 from services.afterhours_analysis_service import generate_post_market_analysis_chart
-from services.broker_branch_service import get_key_broker_branch
+from services.broker_branch_service import get_top_broker_branches
 from services.pe_river_service import get_pe_river_snapshot
 
 from typing import Any
@@ -5598,28 +5598,37 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
                 df_for_post = df
 
-            branch_snapshot = get_key_broker_branch(
+            branch_snapshot = get_top_broker_branches(
                 meta.stock_id,
                 trade_days=3,
                 lookback_days=20,
+                top_n=3,
             )
 
             if getattr(branch_snapshot, "available", False):
-                branch_name = getattr(branch_snapshot, "display_name", "") or "資料建置中"
-                branch_net_lots = getattr(branch_snapshot, "net_lots", "--")
-                branch_avg_price = getattr(branch_snapshot, "avg_price", "--")
+                branch_buy_rows = list(getattr(branch_snapshot, "buy_rows", []) or [])
+                branch_sell_rows = list(getattr(branch_snapshot, "sell_rows", []) or [])
             else:
-                branch_name = "資料建置中"
-                branch_net_lots = "--"
-                branch_avg_price = "--"
+                branch_buy_rows = []
+                branch_sell_rows = []
+
+        except Exception as exc:
+            print(
+                "DEBUG post_market broker branch failed",
+                "| stock_id =", meta.stock_id,
+                "| error =", repr(exc),
+                flush=True,
+            )
+
+            branch_buy_rows = []
+            branch_sell_rows = []
 
             image_url = generate_post_market_analysis_chart(
                 df_for_post,
                 meta.stock_id,
                 stock_name,
-                branch_name=branch_name,
-                branch_net_lots=branch_net_lots,
-                branch_avg_price=branch_avg_price,
+                branch_buy_rows=branch_buy_rows,
+                branch_sell_rows=branch_sell_rows,
             )
 
             print(
