@@ -9,8 +9,8 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
+from services.afterhours_analysis_service import generate_post_market_analysis_chart
 from services.pe_river_service import get_pe_river_snapshot
-
 
 from typing import Any
 
