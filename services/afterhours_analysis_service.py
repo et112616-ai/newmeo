@@ -9,7 +9,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib import font_manager
-from matplotlib.patches import FancyBboxPatch
 
 from services.upload_service import publish_figure
 
@@ -185,57 +184,17 @@ def generate_post_market_analysis_chart(
     font_kwargs = _setup_font()
     levels = _calc_levels(work)
 
-    fig = plt.figure(figsize=(7.0, 7.6), dpi=150, facecolor="white")
+    # 白底，不再使用綠色卡片底色
+    fig = plt.figure(figsize=(7.0, 7.0), dpi=150, facecolor="white")
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
+    ax.set_facecolor("white")
 
-    card = FancyBboxPatch(
-        (0.04, 0.04),
-        0.92,
-        0.92,
-        boxstyle="round,pad=0.025,rounding_size=0.04",
-        linewidth=0,
-        facecolor="#D9EFB8",
-    )
-    ax.add_patch(card)
+    x_label = 0.13
+    x_value = 0.46
+    y = 0.88
 
-    x0 = 0.10
-    y = 0.91
-
-    ax.text(
-        x0,
-        y,
-        f"【{stock_id} {stock_name}】",
-        fontsize=22,
-        fontweight="bold",
-        color="#111111",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.075
-
-    ax.text(
-        x0,
-        y,
-        f"資料時間：{levels['date']}",
-        fontsize=19,
-        color="#111111",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.07
-
-    ax.text(
-        x0,
-        y,
-        "----------------------",
-        fontsize=20,
-        color="#222222",
-        va="top",
-        **font_kwargs,
-    )
-    y -= 0.075
-
+    # 壓力 / 支撐區塊放大
     rows = [
         ("壓 2", levels["r2"], "#D32F2F"),
         ("壓 1", levels["r1"], "#F44336"),
@@ -246,61 +205,62 @@ def generate_post_market_analysis_chart(
 
     for label, price, color in rows:
         ax.text(
-            x0,
+            x_label,
             y,
             f"{label}：",
-            fontsize=22,
+            fontsize=34,
             fontweight="bold",
             color=color,
             va="top",
             **font_kwargs,
         )
         ax.text(
-            x0 + 0.22,
+            x_value,
             y,
             _fmt_price(price),
-            fontsize=22,
+            fontsize=34,
             fontweight="bold",
             color="#111111",
             va="top",
             **font_kwargs,
         )
-        y -= 0.071
+        y -= 0.125
 
+    # 分隔線
     y -= 0.015
-
     ax.text(
-        x0,
+        0.11,
         y,
-        "----------------------",
-        fontsize=20,
-        color="#222222",
+        "────────────",
+        fontsize=24,
+        color="#666666",
         va="top",
         **font_kwargs,
     )
-    y -= 0.075
+    y -= 0.105
 
+    # 關鍵分點區塊
     ax.text(
-        x0,
+        x_label,
         y,
         "關鍵分點：",
-        fontsize=20,
+        fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
     ax.text(
-        x0 + 0.26,
+        x_label + 0.36,
         y,
         str(branch_name or "資料建置中"),
-        fontsize=20,
+        fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
-    y -= 0.072
+    y -= 0.10
 
     if isinstance(branch_net_lots, (int, float)):
         branch_net_text = _fmt_lots(branch_net_lots)
@@ -308,34 +268,35 @@ def generate_post_market_analysis_chart(
         branch_net_text = str(branch_net_lots or "--")
 
     ax.text(
-        x0,
+        x_label,
         y,
         f"買賣超：{branch_net_text}",
-        fontsize=20,
+        fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
-    y -= 0.072
+    y -= 0.10
 
     ax.text(
-        x0,
+        x_label,
         y,
         f"3日均價：{_fmt_price(levels['avg3'])}",
-        fontsize=20,
+        fontsize=25,
         fontweight="bold",
         color="#111111",
         va="top",
         **font_kwargs,
     )
 
+    # 底部備註縮小，避免干擾主資訊
     ax.text(
         0.08,
-        0.065,
+        0.045,
         "支撐壓力為 Pivot 推估，僅供盤後觀察。",
         fontsize=13,
-        color="#555555",
+        color="#777777",
         va="bottom",
         **font_kwargs,
     )
