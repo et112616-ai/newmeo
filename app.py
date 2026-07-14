@@ -608,81 +608,69 @@ def get_chart():
             )
         ), 200
 
-@app.route("/debug_tej_branch", methods=["GET"])
-def debug_tej_branch():
+@app.route("/sync_broker_branch_csv", methods=["POST"])
+def sync_broker_branch_csv_route():
     if not _check_internal_token():
         return jsonify({"status": "forbidden"}), 403
 
-    import os
-    import requests
-
-    api_key = os.getenv("TEJ_API_KEY", "").strip()
-
-    if not api_key:
-        return jsonify({
-            "status": "error",
-            "message": "TEJ_API_KEY is missing in Render environment.",
-        }), 500
-
-    table = request.args.get("table", "TWN/AMTOPA").strip()
-    stock_id = request.args.get("stock_id", "2337").strip()
-    start_date = request.args.get("start_date", "2026-07-08").strip()
-    end_date = request.args.get("end_date", "2026-07-13").strip()
-
-    url = f"https://api.tej.com.tw/api/datatables/{table}.json"
-
-    params = {
-        "api_key": api_key,
-        "coid": stock_id,
-        "mdate.gte": start_date,
-        "mdate.lte": end_date,
-    }
-
     try:
-        res = requests.get(url, params=params, timeout=20)
+        from services.broker_branch_service import sync_broker_branch_csv
 
-        try:
-            payload = res.json()
-        except Exception:
-            payload = {"raw_text": res.text[:1000]}
+        stock_id = request.args.get("stock_id", "").strip()
+        trade_date = request.args.get("trade_date", "").strip()
+        source = request.args.get("source", "MANUAL_CSV").strip()
 
-        rows = []
+        csv_text = ""
 
-        if isinstance(payload, dict):
-            rows = (
-                payload.get("datatable", {}).get("data")
-                or payload.get("data")
-                or []
+        if request.files:
+            upload = request.files.get("file")
+
+            if upload:
+                raw = upload.read()
+
+                try:
+                    csv_text = raw.decode("utf-8-sig")
+                except Exception:
+                    csv_text = raw.decode("big5", errors="ignore")
+
+        elif request.is_json:
+            payload = request.get_json(silent=True) or {}
+            csv_text = (
+                payload.get("csv_text")
+                or payload.get("csv")
+                or payload.get("text")
+                or ""
             )
 
-        columns = []
+        else:
+            csv_text = request.get_data(as_text=True) or ""
 
-        if isinstance(payload, dict):
-            columns = (
-                payload.get("datatable", {}).get("columns")
-                or payload.get("columns")
-                or []
-            )
+        if not csv_text.strip():
+            return jsonify({
+                "status": "error",
+                "message": "CSV text or file is required.",
+            }), 400
+
+        result = sync_broker_branch_csv(
+            csv_text=csv_text,
+            stock_id=stock_id,
+            trade_date=trade_date,
+            source=source,
+        )
 
         return jsonify({
-            "status": "ok" if res.status_code < 400 else "http_error",
-            "http_status": res.status_code,
-            "table": table,
-            "stock_id": stock_id,
-            "start_date": start_date,
-            "end_date": end_date,
-            "columns": columns,
-            "rows_count": len(rows) if isinstance(rows, list) else 0,
-            "sample_rows": rows[:5] if isinstance(rows, list) else rows,
-            "message": payload.get("msg") if isinstance(payload, dict) else "",
+            "status": "ok" if result.get("ok") else "error",
+            "result": result,
         }), 200
 
     except Exception as exc:
+        import traceback
+
+        print(traceback.format_exc(), flush=True)
+
         return jsonify({
             "status": "error",
-            "table": table,
-            "stock_id": stock_id,
-            "error": repr(exc),
+            "message": repr(exc),
         }), 500
 
 @app.route("/line_webhook", methods=["GET", "POST"])
