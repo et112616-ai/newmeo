@@ -41,6 +41,15 @@ class MarketFutureSnapshot:
     volume: int = 0
     total_volume: int = 0
 
+    # 次月台指期（TXFR2）
+    next_contract_code: str = ""
+    next_future_price: float = 0.0
+    next_future_change: float = 0.0
+    next_future_change_pct: float = 0.0
+    next_buy_price: float = 0.0
+    next_sell_price: float = 0.0
+    next_quote_time: str = ""
+
     buy_price: float = 0.0
     sell_price: float = 0.0
 
@@ -154,10 +163,13 @@ def _try_get_contract(container, code: str):
     return None
 
 
-def _get_txf_contract(api):
+def _get_txf_contract(api, preferred_code: str = "TXFR1"):
     """
-    取得台指期 TXF 近月 contract。
-    優先使用 TXFR1。
+    取得台指期 TXF contract。
+
+    preferred_code:
+    - TXFR1：近月
+    - TXFR2：次月
     """
     futures_root = getattr(api.Contracts, "Futures", None)
 
@@ -165,12 +177,16 @@ def _get_txf_contract(api):
         return None
 
     txf_group = _try_get_contract(futures_root, "TXF")
+    preferred_code = str(preferred_code or "").strip().upper()
 
-    candidates = [
-        "TXFR1",
-        "TXFR2",
-        "TXF",
-    ]
+    candidates = []
+
+    if preferred_code:
+        candidates.append(preferred_code)
+
+    # 近月才允許退回 TXF，避免次月抓不到時誤抓近月。
+    if preferred_code == "TXFR1":
+        candidates.extend(["TXF"])
 
     # 先從 TXF 群組找
     for code in candidates:
@@ -187,7 +203,6 @@ def _get_txf_contract(api):
             return contract
 
     return None
-
 
 def _snapshot_from_dict(data: dict[str, Any]) -> MarketFutureSnapshot:
     return MarketFutureSnapshot(
@@ -210,6 +225,14 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketFutureSnapshot:
 
         volume=_safe_int(data.get("volume")),
         total_volume=_safe_int(data.get("total_volume")),
+
+        next_contract_code=str(data.get("next_contract_code") or ""),
+        next_future_price=_safe_float(data.get("next_future_price")),
+        next_future_change=_safe_float(data.get("next_future_change")),
+        next_future_change_pct=_safe_float(data.get("next_future_change_pct")),
+        next_buy_price=_safe_float(data.get("next_buy_price")),
+        next_sell_price=_safe_float(data.get("next_sell_price")),
+        next_quote_time=str(data.get("next_quote_time") or ""),
 
         buy_price=_safe_float(data.get("buy_price")),
         sell_price=_safe_float(data.get("sell_price")),
@@ -258,7 +281,7 @@ def get_market_future_snapshot(session_mode: str = "day") -> MarketFutureSnapsho
             trading_session=trading_session,
         )
 
-    contract = _get_txf_contract(api)
+    contract = _get_txf_contract(api, "TXFR1")
 
     if contract is None:
         return MarketFutureSnapshot(
@@ -269,7 +292,18 @@ def get_market_future_snapshot(session_mode: str = "day") -> MarketFutureSnapsho
         )
 
     try:
-        snapshots = api.snapshots([contract])
+        next_contract = _get_txf_contract(api, "TXFR2")
+
+        contracts = [contract]
+
+        if next_contract is not None:
+            try:
+                if getattr(next_contract, "code", "") != getattr(contract, "code", ""):
+                    contracts.append(next_contract)
+            except Exception:
+                contracts.append(next_contract)
+
+        snapshots = api.snapshots(contracts)
 
         if not snapshots:
             return MarketFutureSnapshot(
@@ -280,12 +314,22 @@ def get_market_future_snapshot(session_mode: str = "day") -> MarketFutureSnapsho
             )
 
         raw = _to_dict(snapshots[0])
+        next_raw = _to_dict(snapshots[1]) if len(snapshots) >= 2 else {}
 
         contract_code = str(
             raw.get("code")
             or getattr(contract, "code", "")
             or "TXFR1"
         )
+
+        next_contract_code = ""
+
+        if next_raw:
+            next_contract_code = str(
+                next_raw.get("code")
+                or getattr(next_contract, "code", "")
+                or "TXFR2"
+            )
 
         data = {
             "available": True,
@@ -307,6 +351,14 @@ def get_market_future_snapshot(session_mode: str = "day") -> MarketFutureSnapsho
 
             "volume": _safe_int(raw.get("volume")),
             "total_volume": _safe_int(raw.get("total_volume")),
+
+            "next_contract_code": next_contract_code,
+            "next_future_price": _safe_float(next_raw.get("close")),
+            "next_future_change": _safe_float(next_raw.get("change_price")),
+            "next_future_change_pct": _safe_float(next_raw.get("change_rate")),
+            "next_buy_price": _safe_float(next_raw.get("buy_price")),
+            "next_sell_price": _safe_float(next_raw.get("sell_price")),
+            "next_quote_time": _normalize_ts(next_raw.get("ts")),
 
             "buy_price": _safe_float(raw.get("buy_price")),
             "sell_price": _safe_float(raw.get("sell_price")),
@@ -330,6 +382,10 @@ def get_market_future_snapshot(session_mode: str = "day") -> MarketFutureSnapsho
             data["future_change_pct"],
             "volume =",
             data["total_volume"],
+            "next_contract =",
+            data["next_contract_code"],
+            "next_close =",
+            data["next_future_price"],
             "time =",
             data["quote_time"],
         )
