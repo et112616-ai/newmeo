@@ -99,6 +99,42 @@ def _font_kwargs() -> dict:
     return {}
 
 
+DEFAULT_AXIS_TICK_FONTSIZE = 11
+
+
+def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
+    try:
+        y_min, y_max = ax.get_ylim()
+
+        if pd.isna(y_min) or pd.isna(y_max) or y_max <= y_min:
+            return
+
+        span = y_max - y_min
+
+        if span <= 0:
+            return
+
+        for ratio in (0.25, 0.50, 0.75):
+            level = y_min + span * ratio
+            ax.axhline(level, color=color, linewidth=0.8, linestyle="--", alpha=alpha, zorder=0)
+
+    except Exception:
+        pass
+
+
+def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
+    ax.set_axisbelow(True)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
+    _add_quarter_grid(ax)
+    ax.tick_params(axis="x", labelsize=x_labelsize)
+    ax.tick_params(axis="y", labelsize=y_labelsize)
+
+
+def _hide_top_right_spines(ax) -> None:
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -463,10 +499,10 @@ def _draw_market_future_bollinger_chart(
     font_kwargs = _font_kwargs()
 
     # 單圖：刪除成交量副圖，降低高度，讓 K 線更清楚。
-    fig = plt.figure(figsize=(7.0, 4.2), dpi=110, facecolor="white")
+    fig = plt.figure(figsize=(8.6, 5.6), dpi=118, facecolor="white")
 
     # 上方預留空間放「現價 / BB」
-    ax_k = fig.add_axes([0.10, 0.12, 0.86, 0.72])
+    ax_k = fig.add_axes([0.08, 0.14, 0.88, 0.72])
     ax_k.set_facecolor("#F8F9FA")
 
     x_values = list(range(len(plot_df)))
@@ -540,12 +576,12 @@ def _draw_market_future_bollinger_chart(
     )
 
     fig.text(
-        0.10,
-        0.925,
+        0.08,
+        0.94,
         bb_text,
         ha="left",
         va="top",
-        fontsize=13,
+        fontsize=14,
         fontweight="bold",
         color="#111111",
         **font_kwargs,
@@ -554,8 +590,7 @@ def _draw_market_future_bollinger_chart(
     # 刪除圖內標題，避免和 LINE 圖卡標題重複。
     # ax_k.set_title(...) 不再使用。
 
-    ax_k.grid(True, linestyle=":", alpha=0.35)
-    ax_k.tick_params(axis="y", labelsize=9)
+    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
 
     labels = []
 
@@ -578,12 +613,11 @@ def _draw_market_future_bollinger_chart(
     ax_k.set_xticklabels(
         [labels[i] for i in ticks],
         rotation=0,
-        fontsize=8,
+        fontsize=11,
         **font_kwargs,
     )
 
-    for spine in ["top", "right"]:
-        ax_k.spines[spine].set_visible(False)
+    _hide_top_right_spines(ax_k)
 
     image_key = f"TXF_bollinger_{tf}_{rows}_{int(time.time() // TTL_MAP.get(tf, 60))}"
 
