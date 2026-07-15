@@ -1490,11 +1490,6 @@ def _postback_button(
     flex: int = 1,
     display_text: str | None = None,
     height: str = "52px",
-    data: str,
-    active: bool = False,
-    flex: int = 1,
-    display_text: str | None = None,
-    height: str = "52px",
     text_size: str = "md",
 ) -> dict[str, Any]:
     action = {
