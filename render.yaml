@@ -3,7 +3,8 @@ services:
     name: stock-line-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 app:app
+    healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.11
@@ -11,3 +12,9 @@ services:
         sync: false
       - key: FINMIND_TOKEN
         sync: false
+      - key: ALLOW_COLD_SHIOAJI_STOCK_APPEND
+        value: "0"
+      - key: ENABLE_BACKGROUND_SHIOAJI_WARMUP
+        value: "1"
+      - key: SHIOAJI_WARMUP_DELAY_SECONDS
+        value: "1"
