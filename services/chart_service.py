@@ -207,6 +207,19 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
 
     return ref_price
 
+def _fmt_high_low_price(value) -> str:
+    """最高／最低價最多保留 2 位小數，並移除尾端多餘的 0。"""
+    try:
+        number = float(value)
+
+        if pd.isna(number):
+            return "--"
+
+        return f"{number:,.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "--"
+
+
 def _annotate_high_low(
     ax,
     plot_df,
@@ -250,7 +263,7 @@ def _annotate_high_low(
         ax.text(
             high_x,
             high_y + y_pad,
-            f"高 {high_y:,.2f}",
+            f"高 {_fmt_high_low_price(high_y)}",
             ha="center",
             va="bottom",
             fontsize=fontsize,
@@ -262,7 +275,7 @@ def _annotate_high_low(
         ax.text(
             low_x,
             low_y - y_pad,
-            f"低 {low_y:,.2f}",
+            f"低 {_fmt_high_low_price(low_y)}",
             ha="center",
             va="top",
             fontsize=fontsize,
@@ -532,166 +545,7 @@ def _fmt_lots(value) -> str:
     except Exception:
         return "--"
     
-    def _fmt_price(value) -> str:
-        try:
-            return f"{float(value):,.2f}"
-        except Exception:
-            return "--"
 
-    def _fmt_volume_lots(value) -> str:
-        try:
-            return f"{float(value):,.0f} 張"
-        except Exception:
-            return "--"
-
-    # ===== 畫布：資訊列 + 主圖 + 成交量 =====
-    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
-    gs = gridspec.GridSpec(
-        3,
-        1,
-        height_ratios=[0.95, 4.6, 1.45],
-        hspace=0.05,
-    )
-
-    ax_info = fig.add_subplot(gs[0])
-    ax = fig.add_subplot(gs[1])
-    ax_v = fig.add_subplot(gs[2], sharex=ax)
-
-    ax_info.axis("off")
-    ax.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
-
-    # ===== 上方資訊列：改成 2 排 x 3 欄 =====
-    info_items = [
-        ("昨收", _fmt_price(prev_close)),
-        ("開盤", _fmt_price(open_price)),
-        ("最高", _fmt_price(high_price)),
-        ("最低", _fmt_price(low_price)),
-        ("參考", _fmt_price(ref_price)),
-        ("成交量", _fmt_volume_lots(volume_lots)),
-    ]
-
-    positions = [
-        (0.00, 0.68),
-        (0.34, 0.68),
-        (0.68, 0.68),
-        (0.00, 0.25),
-        (0.34, 0.25),
-        (0.68, 0.25),
-    ]
-
-    for (label, value), (x, y) in zip(info_items, positions):
-        ax_info.text(
-            x,
-            y,
-            f"{label} {value}",
-            ha="left",
-            va="center",
-            fontsize=16,
-            fontweight="bold",
-            color="#333333",
-            transform=ax_info.transAxes,
-            **_get_font_kwargs_safe(),
-        )
-
-    # ===== 主圖：即時折線 =====
-    line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
-
-    ax.plot(
-        df.index,
-        close,
-        linewidth=2.6,
-        color=line_color,
-        zorder=3,
-    )
-
-    ax.fill_between(
-        df.index,
-        close,
-        ref_price,
-        where=close >= ref_price,
-        alpha=0.12,
-        color="#E74C3C",
-        interpolate=True,
-        zorder=2,
-    )
-
-    ax.fill_between(
-        df.index,
-        close,
-        ref_price,
-        where=close < ref_price,
-        alpha=0.10,
-        color="#27AE60",
-        interpolate=True,
-        zorder=2,
-    )
-
-    # 參考線 / 昨收線
-    ax.axhline(
-        ref_price,
-        linestyle="--",
-        linewidth=1.3,
-        color="#7F8C8D",
-        alpha=0.85,
-        zorder=1,
-    )
-
-    # 自動置中價格軸 + 右側漲跌幅
-    _set_tw_stock_intraday_axis(ax, df)
-    _set_centered_price_axis(ax, df)
-
-    ax.grid(True, linestyle=":", alpha=0.35)
-    ax.tick_params(axis="x", labelsize=11)
-    ax.tick_params(axis="y", labelsize=11)
-
-    # ===== 成交量圖 =====
-    vol_colors = []
-
-    for _, row in df.iterrows():
-        try:
-            o = float(row["Open"])
-            c = float(row["Close"])
-            vol_colors.append("#E74C3C" if c >= o else "#27AE60")
-        except Exception:
-            vol_colors.append("#E74C3C")
-
-    volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
-
-    # Matplotlib 日期座標的 width 單位是「天」
-    # 0.0025 約等於 3.6 分鐘，視覺上比較飽滿。
-    bar_width = 0.0025 if len(df) > 100 else 0.0045
-
-    ax_v.bar(
-        df.index,
-        volume_lot_series,
-        width=bar_width,
-        color=vol_colors,
-        edgecolor="none",
-    )
-
-    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
-    ax_v.grid(True, linestyle=":", alpha=0.30)
-    ax_v.tick_params(axis="x", labelsize=10)
-    ax_v.tick_params(axis="y", labelsize=10)
-
-    # X 軸格式
-    ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
-    ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-
-    plt.setp(ax.get_xticklabels(), visible=False)
-
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-        ax_v.spines[spine].set_visible(False)
-
-    fig.tight_layout()
-
-    try:
-        return publish_figure(fig, f"{stock_id}_instant")
-    finally:
-        plt.close(fig)
-    
 def _fmt_ma_value(value) -> str:
     try:
         if value is None or pd.isna(value):
@@ -1001,18 +855,38 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         if col in plot_df.columns:
             ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
 
+    # 個股分 K 與日／週／月 K：標示目前顯示範圍內的最高、最低價。
+    if tf in {"1m", "5m", "15m", "30m", "60m", "D", "W", "M"}:
+        _annotate_high_low(
+            ax_k,
+            plot_df,
+            x_values,
+            fontsize=12,
+        )
+
     ax_k.grid(True, linestyle=":", alpha=0.35)
     ax_v.grid(True, linestyle=":", alpha=0.30)
 
-    if tf == "D":
+    if tf in {"1m", "5m", "15m", "30m", "60m"}:
+        index_dates = [idx.date() for idx in plot_df.index]
+        multi_day = bool(index_dates and min(index_dates) != max(index_dates))
+
+        if multi_day:
+            labels = [idx.strftime("%m/%d\n%H:%M") for idx in plot_df.index]
+        else:
+            labels = [idx.strftime("%H:%M") for idx in plot_df.index]
+    elif tf == "D":
         labels = [idx.strftime("%m/%d") for idx in plot_df.index]
-    elif tf == "W":
+    elif tf in {"W", "M"}:
         labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
     else:
-        labels = [idx.strftime("%Y/%m") for idx in plot_df.index]
+        labels = [str(idx) for idx in plot_df.index]
 
     step = max(1, len(labels) // 6)
     ticks = list(range(0, len(labels), step))
+
+    if labels and len(labels) - 1 not in ticks:
+        ticks.append(len(labels) - 1)
 
     ax_v.set_xticks(ticks)
     ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=9, **font_kwargs)
@@ -1191,11 +1065,7 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
 
     fig.tight_layout(rect=[0.03, 0.02, 0.98, 0.965])
 
-    _annotate_high_low(
-        ax_k,
-        plot_df,
-        x_values,
-        fontsize=12,
-    )
-    
-    return publish_figure(fig, f"{stock_id}_chip")
+    try:
+        return publish_figure(fig, f"{stock_id}_chip")
+    finally:
+        plt.close(fig)
