@@ -518,6 +518,13 @@ def _draw_market_future_bollinger_chart(
         zorder=4,
     )
 
+    _annotate_high_low(
+        ax_k,
+        plot_df,
+        x_values,
+        fontsize=12,
+    )
+
     # 移到原本標題的位置，不跟 K 線重疊。
     bb_text = (
         f"現價 {_fmt_price(latest_close)}   "
