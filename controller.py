@@ -2110,6 +2110,154 @@ def _build_market_future_placeholder_flex(
         },
     }
 
+def _build_market_future_kline_flex(snapshot, active_tf: str = "1m") -> dict[str, Any]:
+    tf = str(active_tf or "1m").strip()
+
+    label_map = {
+        "1m": "1分",
+        "5m": "5分",
+        "15m": "15分",
+        "30m": "30分",
+        "60m": "60分",
+    }
+
+    label = label_map.get(tf, tf)
+
+    def _info_row(label_text: str, value_text: str) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label_text,
+                    "size": "sm",
+                    "color": "#888888",
+                    "flex": 4,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(value_text),
+                    "size": "sm",
+                    "color": "#222222",
+                    "weight": "bold",
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "台指期 K線",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": f"TXF 近月｜全盤｜{label}K",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+            "wrap": True,
+        },
+    ]
+
+    if getattr(snapshot, "available", False):
+        image_url = str(getattr(snapshot, "image_url", "") or "").strip()
+
+        if image_url:
+            contents.append(
+                {
+                    "type": "image",
+                    "url": image_url,
+                    "size": "full",
+                    "aspectRatio": "4:3",
+                    "aspectMode": "fit",
+                    "margin": "md",
+                }
+            )
+
+        contents.extend(
+            [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        _info_row("契約", getattr(snapshot, "contract_code", "TXFR1")),
+                        _info_row("最新時間", str(getattr(snapshot, "latest_time", "") or "--")),
+                        _info_row("K棒數", str(getattr(snapshot, "rows", 0) or 0)),
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": "布林通道：20期中線 ± 2倍標準差；數值顯示於圖上方。",
+                    "size": "xs",
+                    "color": "#888888",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+            ]
+        )
+
+    else:
+        contents.extend(
+            [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": getattr(snapshot, "message", "台指期 K 線暫時查無資料。"),
+                    "size": "sm",
+                    "color": "#666666",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+            ]
+        )
+
+    contents.extend(_market_future_nav_buttons("market_future_k"))
+    contents.extend(_market_future_kline_tf_buttons(tf))
+
+    return {
+        "type": "flex",
+        "altText": f"台指期 {label}K",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 def _build_market_future_kline_placeholder_flex(active_tf: str = "1m") -> dict[str, Any]:
     """
     台指期 K 線第二階段佔位卡。
@@ -5606,14 +5754,23 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             if action == "market_future_k":
-                tf = str(requested_tf or "1m").strip()
+                tf = str(
+                    getattr(req, "time_frame", "")
+                    or requested_tf
+                    or "1m"
+                ).strip()
 
                 if tf not in {"1m", "5m", "15m", "30m", "60m"}:
                     tf = "1m"
 
+                kline_snapshot = get_market_future_kline_snapshot(
+                    time_frame=tf,
+                    rows=120,
+                )
+
                 return _reply_with_title(
                     f"台指期 {tf.replace('m', '分')}K",
-                    _build_market_future_kline_placeholder_flex(tf),
+                    _build_market_future_kline_flex(kline_snapshot, tf),
                 )
 
             return _reply_with_title(
