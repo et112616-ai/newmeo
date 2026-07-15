@@ -1191,4 +1191,11 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
 
     fig.tight_layout(rect=[0.03, 0.02, 0.98, 0.965])
 
+    _annotate_high_low(
+        ax_k,
+        plot_df,
+        x_values,
+        fontsize=12,
+    )
+    
     return publish_figure(fig, f"{stock_id}_chip")
