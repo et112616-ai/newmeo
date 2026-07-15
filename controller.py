@@ -2731,8 +2731,8 @@ def _build_market_future_realtime_flex(
     )
 
     # 大盤功能按鈕 + 台指期日盤 / 全盤切換
-    contents.extend(_market_index_buttons(action))
-    contents.extend(_market_future_session_buttons(action))
+    contents.extend(_market_future_nav_buttons(action))
+    contents.extend(_market_future_kline_tf_buttons("1m"))
 
     # 主要數值卡片
     contents.extend(
