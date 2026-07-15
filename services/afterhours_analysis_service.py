@@ -183,50 +183,12 @@ def generate_post_market_analysis_chart(
     font_kwargs = _setup_font()
     levels = _calc_levels(work)
 
-    fig = plt.figure(figsize=(7.0, 7.0), dpi=150, facecolor="white")
+    # 降低解析度：原本 7x7 dpi150 約 1050x1050
+    # 這版約 696x696，比較不容易在 LINE 電腦版空白。
+    fig = plt.figure(figsize=(5.8, 5.8), dpi=120, facecolor="white")
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
     ax.set_facecolor("white")
-
-    def _get_item_name(item: Any) -> str:
-        try:
-            if isinstance(item, dict):
-                return str(item.get("display_name") or item.get("branch_key") or "--")
-            return str(getattr(item, "display_name", "--") or "--")
-        except Exception:
-            return "--"
-
-    def _get_item_net(item: Any) -> float:
-        try:
-            if isinstance(item, dict):
-                return float(item.get("net_lots") or 0)
-            return float(getattr(item, "net_lots", 0) or 0)
-        except Exception:
-            return 0.0
-
-    def _fmt_signed_lots(value: Any) -> str:
-        try:
-            num = float(value)
-            sign = "+" if num > 0 else ""
-            return f"{sign}{num:,.0f}"
-        except Exception:
-            return "--"
-
-    def _short_name(value: str, max_len: int = 4) -> str:
-        text = str(value or "--").strip()
-        text = text.replace("－", "-").replace("-", "")
-
-        if len(text) > max_len:
-            return text[:max_len]
-
-        return text
-
-    # -------------------------
-    # 上半部：支撐壓力
-    # -------------------------
-    x_label = 0.24
-    x_value = 0.52
-    y = 0.93
 
     rows = [
         ("壓 2", levels["r2"], "#D32F2F"),
@@ -235,6 +197,11 @@ def generate_post_market_analysis_chart(
         ("撐 1", levels["s1"], "#00A84F"),
         ("撐 2", levels["s2"], "#008C3A"),
     ]
+
+    # 置中排版：左側標籤靠右，右側價格靠左
+    x_label = 0.43
+    x_value = 0.54
+    y = 0.83
 
     for label, price, color in rows:
         ax.text(
@@ -245,6 +212,7 @@ def generate_post_market_analysis_chart(
             fontweight="bold",
             color=color,
             va="top",
+            ha="right",
             **font_kwargs,
         )
         ax.text(
@@ -255,134 +223,24 @@ def generate_post_market_analysis_chart(
             fontweight="bold",
             color="#111111",
             va="top",
+            ha="left",
             **font_kwargs,
         )
-        y -= 0.105
+        y -= 0.13
 
-    # 說明文字移到撐2下面
     ax.text(
-        0.50,
-        y + 0.01,
-        "支撐壓力為 Pivot 推估；分點為近3個交易日累計。",
-        fontsize=14,
+        0.5,
+        0.17,
+        "支撐壓力為 Pivot 推估，僅供區間觀察。",
+        fontsize=13,
         color="#777777",
-        va="top",
+        va="center",
         ha="center",
         **font_kwargs,
     )
-
-    y -= 0.045
-
-    ax.text(
-        0.50,
-        y,
-        "────────────",
-        fontsize=22,
-        color="#777777",
-        va="top",
-        ha="center",
-        **font_kwargs,
-    )
-
-    y -= 0.060
-
-    # -------------------------
-    # 下半部：近3日主買賣
-    # -------------------------
-    ax.text(
-        0.12,
-        y,
-        "近3日主買賣",
-        fontsize=34,
-        fontweight="bold",
-        color="#111111",
-        va="top",
-        ha="center",
-        **font_kwargs,
-    )
-
-    y -= 0.078
-
-    red = "#D32F2F"
-    green = "#00A84F"
-
-    # 表頭，字體與壓撐同級
-    x_buy_lots = 0.18
-    x_buy_name = 0.36
-    x_sell_name = 0.62
-    x_sell_lots = 0.82
-    ax.text(0.08, y, "買超", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
-    ax.text(0.27, y, "券商", fontsize=34, fontweight="bold", color=red, va="top", **font_kwargs)
-    ax.text(0.57, y, "券商", fontsize=34, fontweight="bold", color=green, va="top", **font_kwargs)
-    ax.text(0.94, y, "賣超", fontsize=34, fontweight="bold", color=green, va="top", ha="right", **font_kwargs)
-
-    y -= 0.105
-
-    buy_rows = list(branch_buy_rows or [])
-    sell_rows = list(branch_sell_rows or [])
-
-    for i in range(3):
-        buy_item = buy_rows[i] if i < len(buy_rows) else None
-        sell_item = sell_rows[i] if i < len(sell_rows) else None
-
-        buy_name = _short_name(_get_item_name(buy_item)) if buy_item else "--"
-        sell_name = _short_name(_get_item_name(sell_item)) if sell_item else "--"
-
-        buy_net = _get_item_net(buy_item) if buy_item else 0.0
-        sell_net = _get_item_net(sell_item) if sell_item else 0.0
-
-        ax.text(
-            x_buy_lots,
-            y,
-            _fmt_signed_lots(buy_net) if buy_item else "--",
-            fontsize=34,
-            fontweight="bold",
-            color=red,
-            va="top",
-            ha="center",
-            **font_kwargs,
-        )
-
-        ax.text(
-            x_buy_name,
-            y,
-            buy_name,
-            fontsize=34,
-            fontweight="bold",
-            color=red,
-            va="top",
-            ha="center",
-            **font_kwargs,
-        )
-
-        ax.text(
-            x_sell_name,
-            y,
-            sell_name,
-            fontsize=34,
-            fontweight="bold",
-            color=green,
-            va="top",
-            ha="center",
-            **font_kwargs,
-        )
-
-        ax.text(
-            x_sell_lots,
-            y,
-            _fmt_signed_lots(sell_net) if sell_item else "--",
-            fontsize=34,
-            fontweight="bold",
-            color=green,
-            va="top",
-            ha="center",
-            **font_kwargs,
-        )
-
-        y -= 0.20
 
     print(
-        "DEBUG post_market analysis",
+        "DEBUG post_market analysis support_only",
         "| stock_id =",
         stock_id,
         "| date =",
@@ -397,15 +255,10 @@ def generate_post_market_analysis_chart(
         levels["s1"],
         "| s2 =",
         levels["s2"],
-        "| buy_rows =",
-        [(_get_item_name(x), _get_item_net(x)) for x in buy_rows],
-        "| sell_rows =",
-        [(_get_item_name(x), _get_item_net(x)) for x in sell_rows],
         flush=True,
     )
 
     try:
-        return publish_figure(fig, f"{stock_id}_post_market")
+        return publish_figure(fig, f"{stock_id}_post_market_support_only")
     finally:
         plt.close(fig)
-
