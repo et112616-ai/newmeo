@@ -188,6 +188,77 @@ def _normalize_tf(value: str) -> str:
 
     return tf
 
+def _annotate_high_low(
+    ax,
+    plot_df,
+    x_values,
+    fontsize: int = 12,
+) -> None:
+    """
+    在目前圖表範圍內標出最高價與最低價。
+    plot_df 需要有 High / Low 欄位。
+    x_values 對應 plot_df 的 x 座標。
+    """
+    try:
+        if plot_df is None or plot_df.empty:
+            return
+
+        if "High" not in plot_df.columns or "Low" not in plot_df.columns:
+            return
+
+        high_series = pd.to_numeric(plot_df["High"], errors="coerce")
+        low_series = pd.to_numeric(plot_df["Low"], errors="coerce")
+
+        if high_series.dropna().empty or low_series.dropna().empty:
+            return
+
+        high_idx = high_series.idxmax()
+        low_idx = low_series.idxmin()
+
+        high_pos = list(plot_df.index).index(high_idx)
+        low_pos = list(plot_df.index).index(low_idx)
+
+        high_x = x_values[high_pos]
+        low_x = x_values[low_pos]
+
+        high_y = float(high_series.loc[high_idx])
+        low_y = float(low_series.loc[low_idx])
+
+        y_min = float(low_series.min())
+        y_max = float(high_series.max())
+        y_pad = max((y_max - y_min) * 0.035, y_max * 0.001)
+
+        ax.text(
+            high_x,
+            high_y + y_pad,
+            f"高 {high_y:,.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=fontsize,
+            fontweight="bold",
+            color="#D32F2F",
+            zorder=10,
+        )
+
+        ax.text(
+            low_x,
+            low_y - y_pad,
+            f"低 {low_y:,.2f}",
+            ha="center",
+            va="top",
+            fontsize=fontsize,
+            fontweight="bold",
+            color="#00A84F",
+            zorder=10,
+        )
+
+    except Exception as exc:
+        print(
+            "DEBUG annotate high low failed",
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
 
 def _kbars_to_df(kbars: Any) -> pd.DataFrame:
     try:
