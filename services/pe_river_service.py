@@ -328,7 +328,7 @@ def _make_pe_river_chart(
 ) -> str:
     font_kwargs = _setup_font()
 
-    fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=150, facecolor="white")
+    fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=100, facecolor="white")
     ax.set_facecolor("#F8F9FA")
 
     x = weekly.index
