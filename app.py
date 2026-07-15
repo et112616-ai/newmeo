@@ -2,10 +2,6 @@ from __future__ import annotations
 from services.futures_map_service import sync_stock_futures_map_from_taifex
 from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
-from services.sinopac_quote_service import get_stock_snapshot
-from services.sinopac_quote_service import get_api
-from services.market_index_service import get_market_index_snapshot
-from services.market_future_service import get_market_future_snapshot
 from services.sinopac_quote_service import get_api, get_stock_snapshot
 
 import base64
@@ -13,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import traceback
 from typing import Any, Dict
 
@@ -37,46 +34,6 @@ def _line_should_process_event(event: dict) -> bool:
 
     LINE redelivery 的 webhookEventId 和 replyToken 會跟原事件相同；
     所以用 webhookEventId 去重比較安全。
-    """
-    event_id = str(event.get("webhookEventId") or "").strip()
-
-    if not event_id:
-        return True
-
-    now = time.time()
-
-    expired_ids = [
-        k
-        for k, ts in list(_LINE_EVENT_SEEN.items())
-        if now - ts > _LINE_EVENT_SEEN_TTL_SECONDS
-    ]
-
-    for k in expired_ids:
-        _LINE_EVENT_SEEN.pop(k, None)
-
-    if event_id in _LINE_EVENT_SEEN:
-        print(
-            "LINE duplicate event ignored:",
-            event_id,
-            "| isRedelivery =",
-            event.get("deliveryContext", {}).get("isRedelivery"),
-            flush=True,
-        )
-        return False
-
-    _LINE_EVENT_SEEN[event_id] = now
-    return True
-
-import time
-
-_LINE_EVENT_SEEN: dict[str, float] = {}
-_LINE_EVENT_SEEN_TTL_SECONDS = 180
-
-
-def _line_should_process_event(event: dict) -> bool:
-    """
-    用 webhookEventId 去重複事件。
-    不要因為 isRedelivery=True 就直接忽略。
     """
     event_id = str(event.get("webhookEventId") or "").strip()
 
@@ -245,6 +202,145 @@ def reply_to_line(reply_token: str, messages: list[dict[str, Any]]) -> None:
     except Exception:
         print("LINE reply failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
+
+
+def push_to_line(target_id: str, messages: list[dict[str, Any]]) -> bool:
+    """使用 push API 傳送完成結果，不依賴可能失效的 replyToken。"""
+    target_id = str(target_id or "").strip()
+
+    if not LINE_CHANNEL_ACCESS_TOKEN or not target_id:
+        print("LINE push skipped: missing token or target_id", flush=True)
+        return False
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+    }
+    body = {
+        "to": target_id,
+        "messages": messages[:5],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=body, timeout=15)
+        print("LINE push status:", resp.status_code, resp.text, flush=True)
+        return 200 <= resp.status_code < 300
+    except Exception:
+        print("LINE push failed traceback:", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return False
+
+
+def _line_target_id(event: dict[str, Any]) -> str:
+    source = event.get("source") if isinstance(event, dict) else {}
+
+    if not isinstance(source, dict):
+        return ""
+
+    for key in ("userId", "groupId", "roomId"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            return value
+
+    return ""
+
+
+def _process_line_event_async(event: dict[str, Any]) -> None:
+    """在背景 thread 執行查詢，完成後以 push message 回傳。"""
+    event_id = str(event.get("webhookEventId") or "").strip()
+    target_id = _line_target_id(event)
+    reply_token = str(event.get("replyToken") or "").strip()
+    started = time.perf_counter()
+
+    try:
+        bot_req = parse_make_payload({"events": [event]})
+
+        print(
+            "line async parsed bot_req:",
+            {
+                "event_id": event_id,
+                "stock": getattr(bot_req, "stock", None),
+                "action": getattr(bot_req, "action", None),
+                "current_mode": getattr(bot_req, "current_mode", None),
+                "time_frame": getattr(bot_req, "time_frame", None),
+                "raw_text": getattr(bot_req, "raw_text", None),
+            },
+            flush=True,
+        )
+
+        msg = handle_request(bot_req)
+        messages = msg if isinstance(msg, list) else [msg]
+
+        sent = push_to_line(target_id, messages)
+
+        # 極少數事件沒有 userId/groupId/roomId 時，才退回 reply API。
+        if not sent and reply_token:
+            reply_to_line(reply_token, messages)
+
+        print(
+            "LINE async event complete",
+            "| event_id =", event_id,
+            "| target =", bool(target_id),
+            "| elapsed_sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+
+    except Exception:
+        print("LINE async event failed traceback:", flush=True)
+        print(traceback.format_exc(), flush=True)
+
+        error_messages = [{"type": "text", "text": "查詢失敗，請稍後再試。"}]
+
+        if not push_to_line(target_id, error_messages) and reply_token:
+            reply_to_line(reply_token, error_messages)
+
+
+_BACKGROUND_WARMUP_STARTED = False
+_BACKGROUND_WARMUP_LOCK = threading.Lock()
+
+
+def _background_shioaji_warmup() -> None:
+    """Gunicorn worker 啟動後背景登入 Shioaji，避免第一位使用者支付冷登入成本。"""
+    delay = float(os.getenv("SHIOAJI_WARMUP_DELAY_SECONDS", "1") or 1)
+    time.sleep(max(0.0, delay))
+
+    started = time.perf_counter()
+
+    try:
+        api = get_api()
+        print(
+            "DEBUG background shioaji warmup",
+            "| ok =", api is not None,
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+    except Exception:
+        print("DEBUG background shioaji warmup failed", flush=True)
+        print(traceback.format_exc(), flush=True)
+
+
+def _start_background_warmup_once() -> None:
+    global _BACKGROUND_WARMUP_STARTED
+
+    enabled = str(os.getenv("ENABLE_BACKGROUND_SHIOAJI_WARMUP", "1")).strip() == "1"
+
+    if not enabled:
+        return
+
+    with _BACKGROUND_WARMUP_LOCK:
+        if _BACKGROUND_WARMUP_STARTED:
+            return
+
+        _BACKGROUND_WARMUP_STARTED = True
+        threading.Thread(
+            target=_background_shioaji_warmup,
+            name="shioaji-warmup",
+            daemon=True,
+        ).start()
+
+
+_start_background_warmup_once()
 
 @app.route("/warmup_all", methods=["GET"])
 def warmup_all():
@@ -691,13 +787,11 @@ def sync_broker_branch_csv_route():
 @app.route("/line_webhook", methods=["GET", "POST"])
 def line_webhook():
     """
-    LINE 直接打 Render 的 webhook。
+    LINE webhook：驗證後立即排入背景 thread 並回 200。
 
-    正式流程：
-    LINE -> Render /line_webhook -> handle_request -> LINE Reply API
+    避免行情、Shioaji 登入與製圖阻塞 webhook，造成 redelivery 或 replyToken 失效。
+    完成結果改由 LINE push API 傳送。
     """
-
-    # 讓你可以用瀏覽器測試網址是否存在
     if request.method == "GET":
         return jsonify(
             {
@@ -715,95 +809,46 @@ def line_webhook():
             return jsonify({"status": "invalid signature"}), 400
 
         payload: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
-
-        print(
-            "line_webhook payload:",
-            json.dumps(payload, ensure_ascii=False),
-            flush=True,
-        )
-
         events = payload.get("events", [])
 
-        # LINE Verify 可能送空 events。
-        # 回 200 讓 Verify 通過。
         if not events:
             return jsonify({"status": "ok", "message": "no events"}), 200
 
+        accepted = 0
+
         for event in events:
-            is_redelivery = bool(event.get("deliveryContext", {}).get("isRedelivery"))
+            if not isinstance(event, dict):
+                continue
 
             if not _line_should_process_event(event):
                 continue
 
-            if is_redelivery:
-                print(
-                    "LINE redelivery event received; processing:",
-                    event.get("webhookEventId"),
-                    flush=True,
-                )
+            is_redelivery = bool(
+                event.get("deliveryContext", {}).get("isRedelivery")
+            )
 
-            reply_token = str(event.get("replyToken", "")).strip()
+            print(
+                "LINE event accepted",
+                "| event_id =", event.get("webhookEventId"),
+                "| isRedelivery =", is_redelivery,
+                "| target =", bool(_line_target_id(event)),
+                flush=True,
+            )
 
-            if not reply_token:
-                print(
-                    "LINE event skipped: missing replyToken",
-                    "| event_type =",
-                    event.get("type"),
-                    "| event_id =",
-                    event.get("webhookEventId"),
-                    flush=True,
-                )
-                continue
-            
-            bot_payload = {
-                "events": [event],
-            }
+            threading.Thread(
+                target=_process_line_event_async,
+                args=(dict(event),),
+                name=f"line-event-{accepted + 1}",
+                daemon=True,
+            ).start()
+            accepted += 1
 
-            try:
-                bot_req = parse_make_payload(bot_payload)
-
-                print(
-                    "line parsed bot_req:",
-                    {
-                        "stock": getattr(bot_req, "stock", None),
-                        "action": getattr(bot_req, "action", None),
-                        "current_mode": getattr(bot_req, "current_mode", None),
-                        "time_frame": getattr(bot_req, "time_frame", None),
-                        "raw_text": getattr(bot_req, "raw_text", None),
-                    },
-                    flush=True,
-                )
-
-                msg = handle_request(bot_req)
-
-                if isinstance(msg, list):
-                    messages = msg
-                else:
-                    messages = [msg]
-
-                reply_to_line(reply_token, messages)
-
-            except Exception:
-                print("line_webhook event failed traceback:", flush=True)
-                print(traceback.format_exc(), flush=True)
-
-                reply_to_line(
-                    reply_token,
-                    [
-                        {
-                            "type": "text",
-                            "text": "查詢失敗，請稍後再試。",
-                        }
-                    ],
-                )
-
-        return jsonify({"status": "ok"}), 200
+        # 重點：不要等待 handle_request / Shioaji / Matplotlib。
+        return jsonify({"status": "accepted", "events": accepted}), 200
 
     except Exception:
         print("line_webhook failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
-
-        # 先回 200，避免 LINE 一直重送
         return jsonify({"status": "error"}), 200
 
 
