@@ -5765,7 +5765,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
                 kline_snapshot = get_market_future_kline_snapshot(
                     time_frame=tf,
-                    rows=120,
+                    rows=60,
                 )
 
                 return _reply_with_title(
