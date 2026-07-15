@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ SHIOAJI_SIMULATION = os.getenv("SHIOAJI_SIMULATION", "false").strip().lower() ==
 
 _API = None
 _LOGIN_TS = 0.0
+_LOGIN_LOCK = threading.Lock()
 LOGIN_TTL_SECONDS = 60 * 60 * 12
 
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -115,8 +117,7 @@ def _normalize_ts(value: Any) -> str:
 
 def get_api():
     """
-    Lazy login。
-    不在 import 時登入，避免 Render boot 時卡住。
+    Lazy login，並用 lock 避免背景預熱與使用者查詢同時重複登入。
     """
     global _API, _LOGIN_TS
 
@@ -129,28 +130,36 @@ def get_api():
     if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
         return _API
 
-    try:
-        import shioaji as sj
+    with _LOGIN_LOCK:
+        # 等 lock 期間，其他 thread 可能已完成登入，所以必須再檢查一次。
+        now = time.time()
 
-        api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
+        if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
+            return _API
 
-        api.login(
-            api_key=SHIOAJI_API_KEY,
-            secret_key=SHIOAJI_SECRET_KEY,
-            contracts_timeout=10000,
-        )
+        try:
+            import shioaji as sj
 
-        _API = api
-        _LOGIN_TS = now
+            api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
 
-        _debug("login ok", "simulation =", SHIOAJI_SIMULATION)
+            api.login(
+                api_key=SHIOAJI_API_KEY,
+                secret_key=SHIOAJI_SECRET_KEY,
+                contracts_timeout=10000,
+            )
 
-        return _API
+            _API = api
+            _LOGIN_TS = time.time()
 
-    except Exception as exc:
-        _debug("login failed", exc)
-        _API = None
-        return None
+            _debug("login ok", "simulation =", SHIOAJI_SIMULATION)
+
+            return _API
+
+        except Exception as exc:
+            _debug("login failed", exc)
+            _API = None
+            _LOGIN_TS = 0.0
+            return None
 
 
 def _get_stock_contract(api, stock_id: str):
@@ -1008,41 +1017,22 @@ def get_stock_intraday_yahoo_direct(
 
 def is_shioaji_api_ready() -> bool:
     """
-    只檢查 Shioaji API 是否已經在目前 Render process 裡建立。
-    注意：這個函式不會呼叫 get_api()，所以不會觸發冷登入。
+    只檢查目前 process 的 Shioaji session，不觸發冷登入。
+
+    原版本漏掉真正使用的全域變數名稱 `_API`（大小寫不同），
+    因此即使登入成功也常被判定成 False。
     """
-    candidate_names = [
-        "_api",
-        "api",
-        "_SJ_API",
-        "SJ_API",
-        "_SHIOAJI_API",
-        "SHIOAJI_API",
-        "_shioaji_api",
-        "shioaji_api",
-    ]
+    if _API is None:
+        return False
 
-    for name in candidate_names:
-        value = globals().get(name)
+    if time.time() - _LOGIN_TS >= LOGIN_TTL_SECONDS:
+        return False
 
-        if value is None:
-            continue
+    try:
+        return hasattr(_API, "Contracts")
+    except Exception:
+        return False
 
-        # 避免把 imported module / function 誤判成 api instance。
-        if callable(value):
-            continue
-
-        module_name = str(getattr(value, "__module__", "") or "").lower()
-        class_name = str(value.__class__.__name__ or "").lower()
-
-        if "shioaji" in module_name or "shioaji" in class_name or "shioaji" in str(type(value)).lower():
-            return True
-
-        # 有些 Shioaji instance type 字串不明顯，但通常會有 Contracts。
-        if hasattr(value, "Contracts"):
-            return True
-
-    return False
 
 def append_stock_snapshot_to_intraday_df_fast(
     df,
