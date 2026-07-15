@@ -362,7 +362,7 @@ def _draw_market_future_bollinger_chart(
     df: pd.DataFrame,
     tf: str,
     contract_code: str,
-    rows: int = 120,
+    rows: int = 60,
 ) -> tuple[str, dict[str, Any]]:
     if df is None or df.empty:
         return "", {}
@@ -385,19 +385,12 @@ def _draw_market_future_bollinger_chart(
 
     font_kwargs = _font_kwargs()
 
-    fig = plt.figure(figsize=(7.0, 5.2), dpi=110, facecolor="white")
-    gs = gridspec.GridSpec(
-        2,
-        1,
-        height_ratios=[3.6, 1.05],
-        hspace=0.04,
-    )
+    # 單圖：刪除成交量副圖，降低高度，讓 K 線更清楚。
+    fig = plt.figure(figsize=(7.0, 4.2), dpi=110, facecolor="white")
 
-    ax_k = fig.add_subplot(gs[0])
-    ax_v = fig.add_subplot(gs[1], sharex=ax_k)
-
+    # 上方預留空間放「現價 / BB」
+    ax_k = fig.add_axes([0.10, 0.12, 0.86, 0.72])
     ax_k.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
 
     x_values = list(range(len(plot_df)))
     candle_width = 0.58
@@ -407,7 +400,6 @@ def _draw_market_future_bollinger_chart(
         h = _safe_float(row.get("High"))
         l = _safe_float(row.get("Low"))
         c = _safe_float(row.get("Close"))
-        v = _safe_float(row.get("Volume"))
 
         color = "#FF2D2D" if c >= o else "#00B050"
 
@@ -430,81 +422,56 @@ def _draw_market_future_bollinger_chart(
             zorder=3,
         )
 
-        ax_v.bar(
-            i,
-            v,
-            width=candle_width,
-            color=color,
-            edgecolor="none",
-            align="center",
-        )
-
     # 布林通道
     ax_k.plot(
         x_values,
         plot_df["BB_UPPER"].values,
-        linewidth=1.2,
+        linewidth=1.25,
         color="#D32F2F",
-        label="BB上",
         zorder=4,
     )
 
     ax_k.plot(
         x_values,
         plot_df["BB_MID"].values,
-        linewidth=1.1,
+        linewidth=1.15,
         color="#333333",
-        label="BB中",
         zorder=4,
     )
 
     ax_k.plot(
         x_values,
         plot_df["BB_LOWER"].values,
-        linewidth=1.2,
+        linewidth=1.25,
         color="#00A84F",
-        label="BB下",
         zorder=4,
     )
 
+    # 移到原本標題的位置，不跟 K 線重疊。
     bb_text = (
+        f"現價 {_fmt_price(latest_close)}   "
         f"BB上 {_fmt_price(bb_upper)}   "
         f"BB中 {_fmt_price(bb_mid)}   "
         f"BB下 {_fmt_price(bb_lower)}"
     )
 
-    ax_k.text(
-        0.01,
-        0.985,
+    fig.text(
+        0.10,
+        0.925,
         bb_text,
-        transform=ax_k.transAxes,
         ha="left",
         va="top",
         fontsize=13,
         fontweight="bold",
         color="#111111",
-        bbox={
-            "facecolor": "white",
-            "alpha": 0.78,
-            "edgecolor": "none",
-            "pad": 3,
-        },
         **font_kwargs,
     )
 
-    ax_k.set_title(
-        f"台指期 {contract_code}｜全盤｜{label}K｜120根",
-        fontsize=14,
-        fontweight="bold",
-        **font_kwargs,
-    )
+    # 刪除圖內標題，避免和 LINE 圖卡標題重複。
+    # ax_k.set_title(...) 不再使用。
 
     ax_k.grid(True, linestyle=":", alpha=0.35)
-    ax_v.grid(True, linestyle=":", alpha=0.30)
-
     ax_k.tick_params(axis="y", labelsize=9)
-    ax_v.tick_params(axis="y", labelsize=8)
-    ax_v.set_ylabel("量", fontsize=9, **font_kwargs)
 
     labels = []
 
@@ -523,23 +490,18 @@ def _draw_market_future_bollinger_chart(
     if len(labels) - 1 not in ticks:
         ticks.append(len(labels) - 1)
 
-    ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels(
+    ax_k.set_xticks(ticks)
+    ax_k.set_xticklabels(
         [labels[i] for i in ticks],
         rotation=0,
         fontsize=8,
         **font_kwargs,
     )
 
-    plt.setp(ax_k.get_xticklabels(), visible=False)
-
     for spine in ["top", "right"]:
         ax_k.spines[spine].set_visible(False)
-        ax_v.spines[spine].set_visible(False)
 
-    fig.tight_layout()
-
-    image_key = f"TXF_bollinger_{tf}_{int(time.time() // TTL_MAP.get(tf, 60))}"
+    image_key = f"TXF_bollinger_{tf}_{rows}_{int(time.time() // TTL_MAP.get(tf, 60))}"
 
     try:
         image_url = publish_figure(fig, image_key) or ""
@@ -557,10 +519,9 @@ def _draw_market_future_bollinger_chart(
 
     return image_url, meta
 
-
 def get_market_future_kline_snapshot(
     time_frame: str = "1m",
-    rows: int = 120,
+    rows: int = 60,
 ) -> MarketFutureKlineSnapshot:
     tf = _normalize_tf(time_frame)
     label = _tf_label(tf)
