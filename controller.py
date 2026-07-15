@@ -1379,7 +1379,7 @@ def _apply_shioaji_stock_realtime(df, stock_id: str):
         return df
 
     allow_cold_login = (
-        str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "1")).strip()
+        str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
         == "1"
     )
 
@@ -6082,7 +6082,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 import os
 
                 allow_cold_login = (
-                    str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "1")).strip()
+                    str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
                     == "1"
                 )
 
