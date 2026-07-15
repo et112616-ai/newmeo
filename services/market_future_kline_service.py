@@ -231,7 +231,7 @@ def _annotate_high_low(
         ax.text(
             high_x,
             high_y + y_pad,
-            f"高 {high_y:,.2f}",
+            f"高 {_fmt_price(high_y)}",
             ha="center",
             va="bottom",
             fontsize=fontsize,
@@ -243,7 +243,7 @@ def _annotate_high_low(
         ax.text(
             low_x,
             low_y - y_pad,
-            f"低 {low_y:,.2f}",
+            f"低 {_fmt_price(low_y)}",
             ha="center",
             va="top",
             fontsize=fontsize,
@@ -423,8 +423,14 @@ def _add_bollinger(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fmt_price(value: Any) -> str:
+    """價格最多保留 2 位小數，並移除尾端多餘的 0。"""
     try:
-        return f"{float(value):,.2f}"
+        number = float(value)
+
+        if pd.isna(number):
+            return "--"
+
+        return f"{number:,.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "--"
 
