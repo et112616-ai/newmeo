@@ -204,6 +204,7 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     secax.yaxis.set_major_formatter(
         mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
     )
+    secax.tick_params(axis="y", labelsize=DEFAULT_AXIS_TICK_FONTSIZE)
 
     return ref_price
 
@@ -218,6 +219,49 @@ def _fmt_high_low_price(value) -> str:
         return f"{number:,.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "--"
+
+DEFAULT_AXIS_TICK_FONTSIZE = 11
+
+
+def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
+    """在圖上加入 25% / 50% / 75% 的淡水平引導線。"""
+    try:
+        y_min, y_max = ax.get_ylim()
+
+        if pd.isna(y_min) or pd.isna(y_max) or y_max <= y_min:
+            return
+
+        span = y_max - y_min
+
+        if span <= 0:
+            return
+
+        for ratio in (0.25, 0.50, 0.75):
+            level = y_min + span * ratio
+            ax.axhline(
+                level,
+                color=color,
+                linewidth=0.8,
+                linestyle="--",
+                alpha=alpha,
+                zorder=0,
+            )
+
+    except Exception:
+        pass
+
+
+def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
+    ax.set_axisbelow(True)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
+    _add_quarter_grid(ax)
+    ax.tick_params(axis="x", labelsize=x_labelsize)
+    ax.tick_params(axis="y", labelsize=y_labelsize)
+
+
+def _hide_top_right_spines(ax) -> None:
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
 
 
 def _annotate_high_low(
@@ -350,7 +394,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
             return "--"
 
     # ===== 畫布：資訊列 + 主圖 + 成交量 =====
-    fig = plt.figure(figsize=(8.4, 7.6), dpi=140, facecolor="white")
+    fig = plt.figure(figsize=(8.8, 7.8), dpi=140, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
@@ -446,9 +490,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _set_tw_stock_intraday_axis(ax, df)
     _set_centered_price_axis(ax, df)
 
-    ax.grid(True, linestyle=":", alpha=0.35)
-    ax.tick_params(axis="x", labelsize=11)
-    ax.tick_params(axis="y", labelsize=11)
+    _apply_axis_style(ax, x_labelsize=11, y_labelsize=11)
 
     # ===== 成交量圖 =====
     vol_colors = []
@@ -473,21 +515,18 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         edgecolor="none",
     )
 
-    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
-    ax_v.grid(True, linestyle=":", alpha=0.30)
-    ax_v.tick_params(axis="x", labelsize=10)
-    ax_v.tick_params(axis="y", labelsize=10)
+    ax_v.set_ylabel("成交量(張)", fontsize=11, **_get_font_kwargs_safe())
+    _apply_axis_style(ax_v, x_labelsize=11, y_labelsize=11)
 
     ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
     plt.setp(ax.get_xticklabels(), visible=False)
 
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-        ax_v.spines[spine].set_visible(False)
+    _hide_top_right_spines(ax)
+    _hide_top_right_spines(ax_v)
 
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.97, bottom=0.08, hspace=0.05)
 
     try:
         image_url = publish_figure(fig, f"{stock_id}_instant")
@@ -782,7 +821,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=(9, 7), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=(9.4, 7.6), dpi=130, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
@@ -864,8 +903,8 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
             fontsize=12,
         )
 
-    ax_k.grid(True, linestyle=":", alpha=0.35)
-    ax_v.grid(True, linestyle=":", alpha=0.30)
+    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
+    _apply_axis_style(ax_v, x_labelsize=11, y_labelsize=11)
 
     if tf in {"1m", "5m", "15m", "30m", "60m"}:
         index_dates = [idx.date() for idx in plot_df.index]
@@ -889,21 +928,19 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         ticks.append(len(labels) - 1)
 
     ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=9, **font_kwargs)
+    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=11, **font_kwargs)
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    ax_v.set_ylabel("成交量", fontsize=10, **font_kwargs)
+    ax_v.set_ylabel("成交量", fontsize=11, **font_kwargs)
 
-    ax_k.tick_params(axis="y", labelsize=9)
-    ax_v.tick_params(axis="y", labelsize=9)
+    ax_k.tick_params(axis="y", labelsize=11)
+    ax_v.tick_params(axis="y", labelsize=11)
 
-    ax_k.spines["top"].set_visible(False)
-    ax_k.spines["right"].set_visible(False)
-    ax_v.spines["top"].set_visible(False)
-    ax_v.spines["right"].set_visible(False)
+    _hide_top_right_spines(ax_k)
+    _hide_top_right_spines(ax_v)
 
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.97, bottom=0.08, hspace=0.05)
 
     try:
         return publish_figure(fig, f"{stock_id}_{tf}_kline")
@@ -1038,7 +1075,7 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             ax_bar.set_xticks(x)
             ax_bar.set_xticklabels(
                 dates,
-                fontsize=12,
+                fontsize=11,
                 rotation=0,
             )
         else:
@@ -1055,8 +1092,10 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             )
             ax_bar.set_xticks([])
 
-        ax_bar.tick_params(axis="y", labelsize=12)
-        ax_bar.grid(True, axis="y", linestyle=":", alpha=0.35)
+        ax_bar.tick_params(axis="x", labelsize=11)
+        ax_bar.tick_params(axis="y", labelsize=11)
+        ax_bar.grid(True, axis="y", linestyle=":", alpha=0.12)
+        _add_quarter_grid(ax_bar, alpha=0.22)
 
         ax_bar.spines["top"].set_visible(False)
         ax_bar.spines["right"].set_visible(False)
