@@ -1562,6 +1562,67 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
 
     return [row1, row2]
 
+def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
+    mode = _normalize_action(active_mode)
+    tf = normalize_time_frame(current_tf)
+
+    items = [
+        ("1分", "1m"),
+        ("5分", "5m"),
+        ("日", "D"),
+        ("週", "W"),
+        ("月", "M"),
+    ]
+
+    buttons = []
+
+    for label, value in items:
+        is_active = tf == value
+
+        # 1分 / 5分 預設走即時圖
+        # 日 / 週 / 月 預設走 K 線圖
+        if value in {"1m", "5m"}:
+            target_action = "instant"
+        else:
+            target_action = "k_line"
+
+        buttons.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "height": "46px",
+                "cornerRadius": "12px",
+                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                "justifyContent": "center",
+                "alignItems": "center",
+                "action": {
+                    "type": "postback",
+                    "label": label,
+                    "data": f"{stock_id},{target_action},{target_action},{value}",
+                    "displayText": f"{stock_id} {label}",
+                },
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": label,
+                        "size": "md",
+                        "weight": "bold" if is_active else "regular",
+                        "align": "center",
+                        "gravity": "center",
+                        "color": "#FFFFFF" if is_active else "#111111",
+                    }
+                ],
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": buttons,
+    }
+        
 def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict[str, Any]]:
     mode = _normalize_action(active_mode)
     tf = normalize_time_frame(current_tf)
