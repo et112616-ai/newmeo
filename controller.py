@@ -88,19 +88,26 @@ def _normalize_action(action: str | None) -> str:
         "加權融資券": "market_margin",
 
         # 大盤 / 加權指數期貨：台指期 TXF
-        "market_future": "market_future_day",
-        "market_future_day": "market_future_day",
+        "market_future": "market_future_all",
+        "market_future_day": "market_future_all",
         "market_future_all": "market_future_all",
-        "index_future": "market_future_day",
-        "taiex_future": "market_future_day",
-        "txf": "market_future_day",
-        "台指期": "market_future_day",
-        "大盤期貨": "market_future_day",
-        "加權期貨": "market_future_day",
-        "台指期日盤": "market_future_day",
+        "index_future": "market_future_all",
+        "taiex_future": "market_future_all",
+        "txf": "market_future_all",
+        "台指期": "market_future_all",
+        "大盤期貨": "market_future_all",
+        "加權期貨": "market_future_all",
+        "台指期日盤": "market_future_all",
         "台指期全盤": "market_future_all",
-        "大盤期貨日盤": "market_future_day",
+        "大盤期貨日盤": "market_future_all",
         "大盤期貨全盤": "market_future_all",
+
+        "market_future_k": "market_future_k",
+        "market_future_kline": "market_future_k",
+        "台指期k": "market_future_k",
+        "台指期k線": "market_future_k",
+        "大盤期貨k": "market_future_k",
+        "大盤期貨k線": "market_future_k",
         
         # 即時
         "realtime": "instant",
@@ -1482,6 +1489,13 @@ def _postback_button(
     active: bool = False,
     flex: int = 1,
     display_text: str | None = None,
+    height: str = "52px",
+    data: str,
+    active: bool = False,
+    flex: int = 1,
+    display_text: str | None = None,
+    height: str = "52px",
+    text_size: str = "md",
 ) -> dict[str, Any]:
     action = {
         "type": "postback",
@@ -1496,7 +1510,7 @@ def _postback_button(
         "type": "box",
         "layout": "vertical",
         "flex": flex,
-        "height": "52px",
+        "height": height,
         "cornerRadius": "10px",
         "backgroundColor": ACTIVE_COLOR if active else INACTIVE_COLOR,
         "justifyContent": "center",
@@ -1508,59 +1522,65 @@ def _postback_button(
                 "text": label,
                 "align": "center",
                 "gravity": "center",
-                "size": "md",
+                "size": text_size,
                 "color": "#FFFFFF" if active else "#111111",
                 "weight": "bold" if active else "regular",
+                "wrap": True,
             }
         ],
     }
 
 def _market_index_buttons(active_action: str = "market_index") -> list[dict[str, Any]]:
-    active_action = str(active_action or "market_index").strip()
+    """
+    大盤主功能列：
+    現貨｜法人｜融資券｜期貨
 
-    row1 = {
+    大盤期貨一律導向全盤。
+    """
+    active_action = _normalize_action(active_action or "market_index")
+
+    row = {
         "type": "box",
         "layout": "horizontal",
-        "spacing": "sm",
+        "spacing": "xs",
         "margin": "md",
         "contents": [
             _postback_button(
-                label="即時",
+                label="現貨",
                 data="TAIEX,market_index,market_index,D",
                 active=active_action == "market_index",
-                display_text="大盤 即時",
+                display_text="大盤 現貨",
+                height="50px",
+                text_size="xs",
             ),
             _postback_button(
                 label="法人",
                 data="TAIEX,market_chip,market_index,D",
                 active=active_action == "market_chip",
                 display_text="大盤 法人",
+                height="50px",
+                text_size="xs",
             ),
-        ],
-    }
-
-    row2 = {
-        "type": "box",
-        "layout": "horizontal",
-        "spacing": "sm",
-        "margin": "sm",
-        "contents": [
             _postback_button(
                 label="融資券",
                 data="TAIEX,market_margin,market_index,D",
                 active=active_action == "market_margin",
                 display_text="大盤 融資券",
+                height="50px",
+                text_size="xxs",
             ),
             _postback_button(
                 label="期貨",
-                data="TAIEX,market_future_day,market_index,D",
-                active=active_action in {"market_future_day", "market_future_all"},
+                data="TAIEX,market_future_all,market_index,D",
+                active=active_action in {"market_future_all", "market_future_k"},
                 display_text="大盤 期貨",
+                height="50px",
+                text_size="xs",
             ),
         ],
     }
 
-    return [row1, row2]
+    return [row]
 
 def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
     mode = _normalize_action(active_mode)
@@ -1925,32 +1945,104 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
         },
     }
 
-def _market_future_session_buttons(active_action: str = "market_future_day") -> list[dict[str, Any]]:
-    active_action = str(active_action or "market_future_day").strip()
+def _market_future_nav_buttons(active_action: str = "market_future_all") -> list[dict[str, Any]]:
+    """
+    台指期頁面第一排：
+    現貨｜法人｜融資券｜期貨｜全盤
+    """
+    active_action = _normalize_action(active_action or "market_future_all")
 
     row = {
         "type": "box",
         "layout": "horizontal",
-        "spacing": "sm",
+        "spacing": "xs",
         "margin": "md",
         "contents": [
             _postback_button(
-                label="日盤",
-                data="TAIEX,market_future_day,market_index,D",
-                active=active_action == "market_future_day",
-                display_text="台指期 日盤",
+                label="現貨",
+                data="TAIEX,market_index,market_index,D",
+                active=active_action == "market_index",
+                display_text="大盤 現貨",
+                height="50px",
+                text_size="xxs",
+            ),
+            _postback_button(
+                label="法人",
+                data="TAIEX,market_chip,market_index,D",
+                active=active_action == "market_chip",
+                display_text="大盤 法人",
+                height="50px",
+                text_size="xxs",
+            ),
+            _postback_button(
+                label="融資券",
+                data="TAIEX,market_margin,market_index,D",
+                active=active_action == "market_margin",
+                display_text="大盤 融資券",
+                height="50px",
+                text_size="xxs",
+            ),
+            _postback_button(
+                label="期貨",
+                data="TAIEX,market_future_all,market_index,D",
+                active=active_action in {"market_future_all", "market_future_k"},
+                display_text="大盤 期貨",
+                height="50px",
+                text_size="xxs",
             ),
             _postback_button(
                 label="全盤",
                 data="TAIEX,market_future_all,market_index,D",
                 active=active_action == "market_future_all",
                 display_text="台指期 全盤",
+                height="50px",
+                text_size="xxs",
             ),
         ],
     }
 
     return [row]
 
+
+def _market_future_kline_tf_buttons(active_tf: str = "1m") -> list[dict[str, Any]]:
+    """
+    台指期 K 線週期列。
+    第二階段會接真正 K 線圖。
+    """
+    tf = str(active_tf or "1m").strip()
+
+    items = [
+        ("1分", "1m"),
+        ("5分", "5m"),
+        ("15分", "15m"),
+        ("30分", "30m"),
+        ("60分", "60m"),
+    ]
+
+    row = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "xs",
+        "contents": [
+            _postback_button(
+                label=label,
+                data=f"TAIEX,market_future_k,market_index,{value}",
+                active=tf == value,
+                display_text=f"台指期 {label}K",
+                height="42px",
+                text_size="xxs",
+            )
+            for label, value in items
+        ],
+    }
+
+    return [row]
+
+
+# 保留舊函式名稱，避免其他地方尚未改到時失敗。
+def _market_future_session_buttons(active_action: str = "market_future_all") -> list[dict[str, Any]]:
+    return _market_future_nav_buttons(active_action)
 
 def _build_market_future_placeholder_flex(
     action: str = "market_future_day",
@@ -2004,8 +2096,8 @@ def _build_market_future_placeholder_flex(
         },
     ]
 
-    contents.extend(_market_index_buttons(action))
-    contents.extend(_market_future_session_buttons(action))
+    contents.extend(_market_future_nav_buttons(action))
+    contents.extend(_market_future_kline_tf_buttons("1m"))
 
     return {
         "type": "flex",
@@ -2016,6 +2108,78 @@ def _build_market_future_placeholder_flex(
             "body": {
                 "type": "box",
                 "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
+def _build_market_future_kline_placeholder_flex(active_tf: str = "1m") -> dict[str, Any]:
+    """
+    台指期 K 線第二階段佔位卡。
+    先讓按鈕可點、不報錯；下一步接布林通道 K 線圖。
+    """
+    tf = str(active_tf or "1m").strip()
+
+    label_map = {
+        "1m": "1分",
+        "5m": "5分",
+        "15m": "15分",
+        "30m": "30分",
+        "60m": "60分",
+    }
+
+    label = label_map.get(tf, tf)
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "台指期 K線",
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": f"TXF 近月｜全盤｜{label}K",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "sm",
+            "wrap": True,
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "布林通道 K 線圖建置中。下一步會接 120 根 K 棒、BB上/中/下。",
+            "size": "sm",
+            "color": "#666666",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_future_nav_buttons("market_future_k"))
+    contents.extend(_market_future_kline_tf_buttons(tf))
+
+    return {
+        "type": "flex",
+        "altText": f"台指期 {label}K",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
                 "spacing": "sm",
                 "contents": contents,
             },
@@ -2213,8 +2377,8 @@ def _build_market_future_realtime_flex(
             "contents": box_contents,
         }
 
-    action = str(action or "market_future_day").strip()
-    session_text = "全盤" if action == "market_future_all" else "日盤"
+    action = _normalize_action(action or "market_future_all")
+    session_text = "全盤"
 
     contents: list[dict[str, Any]] = [
         {
@@ -2258,8 +2422,8 @@ def _build_market_future_realtime_flex(
             ]
         )
 
-        contents.extend(_market_index_buttons(action))
-        contents.extend(_market_future_session_buttons(action))
+        contents.extend(_market_future_nav_buttons(action))
+        contents.extend(_market_future_kline_tf_buttons("1m"))
 
         return {
             "type": "flex",
@@ -2489,7 +2653,7 @@ def _build_market_future_realtime_flex(
             },
             {
                 "type": "text",
-                "text": "期現價差＝台指期近月 − 加權指數現貨。日盤收盤後，日盤更新時間會以 13:45 顯示。",
+                "text": "期現價差＝台指期近月 − 加權指數現貨。台指期以全盤即時資料顯示。",
                 "size": "xs",
                 "color": "#888888",
                 "wrap": True,
@@ -4817,6 +4981,7 @@ MARKET_INDEX_ACTIONS = {
     "market_margin",
     "market_future_day",
     "market_future_all",
+    "market_future_k",
 }
 
 def _is_market_index_request(*values) -> bool:
@@ -5373,7 +5538,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         ):
             if action not in MARKET_INDEX_ACTIONS:
                 if _is_market_future_request(raw_stock, raw_text):
-                    action = "market_future_day"
+                    action = "market_future_all"
                 else:
                     action = "market_index"
 
@@ -5432,14 +5597,27 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
 
             if action in {"market_future_day", "market_future_all"}:
-                session_mode = "all" if action == "market_future_all" else "day"
+                # 大盤期貨一律走全盤；market_future_day 只保留舊按鈕相容。
+                action = "market_future_all"
+                session_mode = "all"
 
                 snapshot = get_market_future_snapshot(session_mode=session_mode)
                 index_snapshot = get_market_index_snapshot(with_chart=False)
 
                 return _reply_with_title(
-                    "台指期",
+                    "台指期 全盤",
                     _build_market_future_realtime_flex(snapshot, action, index_snapshot),
+                )
+
+            if action == "market_future_k":
+                tf = str(requested_tf or "1m").strip()
+
+                if tf not in {"1m", "5m", "15m", "30m", "60m"}:
+                    tf = "1m"
+
+                return _reply_with_title(
+                    f"台指期 {tf.replace('m', '分')}K",
+                    _build_market_future_kline_placeholder_flex(tf),
                 )
 
             return _reply_with_title(
