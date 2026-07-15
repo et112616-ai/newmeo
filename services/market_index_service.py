@@ -1,32 +1,22 @@
 from __future__ import annotations
 
-# market_index_service_full_v3.py
-# 完整版：Shioaji 即時大盤 + K線圖快取 + yfinance/Yahoo/TWSE fallback + stale snapshot fallback + get_api timing
-
-import os
 import time
-import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
-from services.market_turnover_service import apply_twse_turnover_to_market_df
-from matplotlib import font_manager
-from matplotlib.font_manager import FontProperties
 import pandas as pd
-import requests
+from matplotlib import font_manager
 
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
+from services.upload_service import publish_figure
 
 try:
     from services.sinopac_quote_service import get_api
@@ -34,99 +24,116 @@ except Exception:
     def get_api():
         return None
 
-try:
-    from services.upload_service import publish_figure
-except Exception:
-    def publish_figure(fig, name: str) -> str:
-        return ""
+
+MARKET_FUTURE_KLINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+TTL_MAP = {
+    "1m": 30,
+    "5m": 45,
+    "15m": 90,
+    "30m": 120,
+    "60m": 180,
+}
+
+LOOKBACK_DAYS_MAP = {
+    "1m": 2,
+    "5m": 3,
+    "15m": 7,
+    "30m": 14,
+    "60m": 30,
+}
+
+RESAMPLE_RULE_MAP = {
+    "1m": "",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "60m": "60min",
+}
 
 
-# =========================
-# Cache settings
-# =========================
-MARKET_INDEX_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CACHE_TTL_SECONDS", "5"))
-MARKET_INDEX_CHART_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CHART_CACHE_TTL_SECONDS", "900"))
+BASE_DIR = Path(__file__).resolve().parents[1]
+FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 
-# 歷史 OHLC 與「已補成交金額」資料不需要跟 5 秒即時 snapshot 一起重抓。
-# 預設快取 6 小時；盤中最新一根仍由 Shioaji snapshot 覆蓋。
-MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS = int(
-    os.getenv("MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS", "21600")
-)
-MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS = int(
-    os.getenv("MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS", "21600")
-)
+CHART_FONT_PROP = None
 
-MARKET_INDEX_YAHOO_TIMEOUT_SECONDS = float(
-    os.getenv("MARKET_INDEX_YAHOO_TIMEOUT_SECONDS", "4")
-)
-MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS = float(
-    os.getenv("MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS", "4")
-)
+if FONT_PATH.exists():
+    font_manager.fontManager.addfont(str(FONT_PATH))
+    CHART_FONT_PROP = font_manager.FontProperties(fname=str(FONT_PATH))
+    plt.rcParams["font.family"] = CHART_FONT_PROP.get_name()
+else:
+    plt.rcParams["font.sans-serif"] = [
+        "Noto Sans CJK TC",
+        "Microsoft JhengHei",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+        "sans-serif",
+    ]
 
-# direct Yahoo 通常比 yfinance 少一層包裝，冷啟動時優先使用。
-MARKET_INDEX_HISTORY_SOURCE_ORDER = [
-    item.strip().lower()
-    for item in os.getenv(
-        "MARKET_INDEX_HISTORY_SOURCE_ORDER",
-        "yahoo_direct,yfinance,twse",
-    ).split(",")
-    if item.strip()
-]
-
-_MARKET_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_MARKET_INDEX_CHART_CACHE: dict[str, tuple[float, str]] = {}
-_MARKET_INDEX_HISTORY_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
-_MARKET_INDEX_TURNOVER_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
-
-# 避免 Gunicorn threads 同時產生同一張大盤圖。
-_MARKET_INDEX_CHART_LOCK = threading.Lock()
-
-_FONT_SETUP_DONE = False
-_FONT_SETUP_LOCK = threading.Lock()
-_HTTP_SESSION = requests.Session()
+plt.rcParams["axes.unicode_minus"] = False
 
 
 @dataclass
-class MarketIndexSnapshot:
+class MarketFutureKlineSnapshot:
     available: bool
     message: str
-
-    index_id: str = "TAIEX"
-    index_name: str = "加權指數"
-
-    open_price: float = 0.0
-    high_price: float = 0.0
-    low_price: float = 0.0
-    close_price: float = 0.0
-
-    change: float = 0.0
-    change_pct: float = 0.0
-
-    volume: int = 0
-    total_volume: int = 0
-    amount: int = 0
-    total_amount: int = 0
-
-    quote_time: str = ""
-    quote_source: str = "永豐即時"
-
-    chart_url: str = ""
+    image_url: str = ""
+    time_frame: str = "1m"
+    label: str = "1分"
+    contract_code: str = "TXFR1"
+    latest_time: str = ""
+    latest_close: float = 0.0
+    bb_upper: float = 0.0
+    bb_mid: float = 0.0
+    bb_lower: float = 0.0
+    rows: int = 0
 
 
 def _debug(*args):
-    print("DEBUG market_index |", *args, flush=True)
+    print("DEBUG market_future_kline |", *args, flush=True)
 
-def _fmt_ma_value(value) -> str:
+
+def _font_kwargs() -> dict:
+    if CHART_FONT_PROP is not None:
+        return {"fontproperties": CHART_FONT_PROP}
+    return {}
+
+
+DEFAULT_AXIS_TICK_FONTSIZE = 11
+
+
+def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
     try:
-        num = float(value)
+        y_min, y_max = ax.get_ylim()
 
-        if num == 0:
-            return "--"
+        if pd.isna(y_min) or pd.isna(y_max) or y_max <= y_min:
+            return
 
-        return f"{num:,.2f}"
+        span = y_max - y_min
+
+        if span <= 0:
+            return
+
+        for ratio in (0.25, 0.50, 0.75):
+            level = y_min + span * ratio
+            ax.axhline(level, color=color, linewidth=0.8, linestyle="--", alpha=alpha, zorder=0)
 
     except Exception:
-        return "--"
+        pass
+
+
+def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
+    ax.set_axisbelow(True)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
+    _add_quarter_grid(ax)
+    ax.tick_params(axis="x", labelsize=x_labelsize)
+    ax.tick_params(axis="y", labelsize=y_labelsize)
+
+
+def _hide_top_right_spines(ax) -> None:
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -138,7 +145,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
         text = str(value).replace(",", "").replace("%", "").strip()
 
-        if not text or text in {"--", "-"}:
+        if not text:
             return default
 
         return float(text)
@@ -147,1051 +154,180 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(round(_safe_float(value, float(default))))
-    except Exception:
-        return default
-
-
-def _to_dict(obj: Any) -> dict[str, Any]:
-    if obj is None:
-        return {}
-
-    if isinstance(obj, dict):
-        return obj
-
-    if hasattr(obj, "dict"):
-        try:
-            return obj.dict()
-        except Exception:
-            pass
-
-    result: dict[str, Any] = {}
-
-    for key in dir(obj):
-        if key.startswith("_"):
-            continue
-
-        try:
-            value = getattr(obj, key)
-
-            if callable(value):
-                continue
-
-            if key in {"tick_type", "change_type"}:
-                result[key] = str(value)
-            else:
-                result[key] = value
-
-        except Exception:
-            continue
-
-    return result
-
-
-def _normalize_ts(value: Any) -> str:
-    if value is None or value == "":
-        return ""
+def _try_get_contract(container, code: str):
+    if container is None:
+        return None
 
     try:
-        if isinstance(value, datetime):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-
-        ts = pd.to_datetime(value, errors="coerce")
-
-        if pd.notna(ts):
-            if getattr(ts, "tzinfo", None) is not None:
-                ts = ts.tz_convert("Asia/Taipei")
-
-            return ts.strftime("%Y-%m-%d %H:%M:%S")
-
-    except Exception:
-        pass
-
-    return str(value)
-
-
-def _setup_chinese_font() -> None:
-    """
-    中文字型只初始化一次。
-
-    若專案同時有 Regular / Bold，兩個都註冊，避免：
-    findfont: Failed to find font weight bold
-    """
-    global _FONT_SETUP_DONE
-
-    if _FONT_SETUP_DONE:
-        return
-
-    with _FONT_SETUP_LOCK:
-        if _FONT_SETUP_DONE:
-            return
-
-        try:
-            font_dir_candidates = [
-                Path(__file__).resolve().parents[1] / "assets" / "fonts",
-                Path("/opt/render/project/src/assets/fonts"),
-                Path("/mnt/data"),
-            ]
-
-            regular_path = None
-
-            for font_dir in font_dir_candidates:
-                candidates = [
-                    font_dir / "NotoSansTC-Regular.ttf",
-                    font_dir / "NotoSansCJKtc-Regular.otf",
-                ]
-
-                for font_path in candidates:
-                    if font_path.exists():
-                        font_manager.fontManager.addfont(str(font_path))
-
-                        if regular_path is None:
-                            regular_path = font_path
-
-                bold_candidates = [
-                    font_dir / "NotoSansTC-Bold.ttf",
-                    font_dir / "NotoSansCJKtc-Bold.otf",
-                ]
-
-                for font_path in bold_candidates:
-                    if font_path.exists():
-                        font_manager.fontManager.addfont(str(font_path))
-
-            if regular_path is not None:
-                font_name = FontProperties(fname=str(regular_path)).get_name()
-                plt.rcParams["font.family"] = font_name
-
-            plt.rcParams["axes.unicode_minus"] = False
-
-        except Exception as exc:
-            _debug("font setup failed", exc)
-
-        _FONT_SETUP_DONE = True
-
-
-def _get_taiex_contract(api):
-    """
-    Shioaji 加權指數 contract 常見路徑：
-    api.Contracts.Indexs.TSE["001"]
-    或 api.Contracts.Indexs.TSE.TSE001
-    """
-    try:
-        return api.Contracts.Indexs.TSE["001"]
+        return container[code]
     except Exception:
         pass
 
     try:
-        return api.Contracts.Indexs.TSE.TSE001
-    except Exception:
-        pass
-
-    try:
-        return api.Contracts.Indexs["TSE"]["001"]
+        return getattr(container, code)
     except Exception:
         pass
 
     return None
 
 
-def _snapshot_from_dict(data: dict[str, Any]) -> MarketIndexSnapshot:
-    return MarketIndexSnapshot(
-        available=bool(data.get("available")),
-        message=str(data.get("message") or ""),
+def _get_txf_contract(api):
+    futures_root = getattr(api.Contracts, "Futures", None)
 
-        index_id=str(data.get("index_id") or "TAIEX"),
-        index_name=str(data.get("index_name") or "加權指數"),
+    if futures_root is None:
+        return None
 
-        open_price=_safe_float(data.get("open_price")),
-        high_price=_safe_float(data.get("high_price")),
-        low_price=_safe_float(data.get("low_price")),
-        close_price=_safe_float(data.get("close_price")),
+    txf_group = _try_get_contract(futures_root, "TXF")
 
-        change=_safe_float(data.get("change")),
-        change_pct=_safe_float(data.get("change_pct")),
+    candidates = [
+        "TXFR1",
+        "TXF",
+    ]
 
-        volume=_safe_int(data.get("volume")),
-        total_volume=_safe_int(data.get("total_volume")),
-        amount=_safe_int(data.get("amount")),
-        total_amount=_safe_int(data.get("total_amount")),
+    for code in candidates:
+        contract = _try_get_contract(txf_group, code)
 
-        quote_time=str(data.get("quote_time") or ""),
-        quote_source=str(data.get("quote_source") or "永豐即時"),
+        if contract is not None:
+            return contract
 
-        chart_url=str(data.get("chart_url") or ""),
-    )
+    for code in candidates:
+        contract = _try_get_contract(futures_root, code)
+
+        if contract is not None:
+            return contract
+
+    return None
 
 
-# =========================
-# Public APIs
-# =========================
-def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
-    """
-    取得加權指數即時 snapshot。
-    with_chart=True 時會附 chart_url；圖表有 15 分鐘快取。
-    """
-    route_t0 = time.perf_counter()
-
-    cache_key = "TAIEX"
-    now = time.time()
-
-    cached = _MARKET_INDEX_CACHE.get(cache_key)
-
-    if cached:
-        ts, data = cached
-        age = now - ts
-
-        if age <= MARKET_INDEX_CACHE_TTL_SECONDS:
-            snapshot = _snapshot_from_dict(data)
-
-            if with_chart and not snapshot.chart_url:
-                snapshot.chart_url = get_market_index_chart_url(snapshot)
-                data["chart_url"] = snapshot.chart_url
-                _MARKET_INDEX_CACHE[cache_key] = (ts, data)
-
-            _debug(
-                "snapshot cache hit",
-                "| age_sec =",
-                round(age, 2),
-                "| chart_url =",
-                bool(snapshot.chart_url),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-
-            return snapshot
-
-    t_api0 = time.perf_counter()
-
-    api = get_api()
-
-    t_api1 = time.perf_counter()
-
-    if api is None:
-        stale_snapshot = _get_stale_market_index_snapshot()
-
-        if stale_snapshot is not None:
-            _debug(
-                "snapshot fallback stale",
-                "| reason = api_none",
-                "| get_api_sec =",
-                round(t_api1 - t_api0, 3),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-            return stale_snapshot
-
-        return MarketIndexSnapshot(
-            available=False,
-            message="Shioaji 尚未登入，無法取得加權指數即時資料。",
-        )
-
-    t_contract0 = time.perf_counter()
-
-    contract = _get_taiex_contract(api)
-
-    t_contract1 = time.perf_counter()
-
-    if contract is None:
-        stale_snapshot = _get_stale_market_index_snapshot()
-
-        if stale_snapshot is not None:
-            _debug(
-                "snapshot fallback stale",
-                "| reason = contract_none",
-                "| get_api_sec =",
-                round(t_api1 - t_api0, 3),
-                "| contract_sec =",
-                round(t_contract1 - t_contract0, 3),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-            return stale_snapshot
-
-        return MarketIndexSnapshot(
-            available=False,
-            message="找不到加權指數 contract：TSE001。",
-        )
-
+def _contract_code(contract) -> str:
     try:
-        t_snapshot0 = time.perf_counter()
+        return str(getattr(contract, "code", "") or "TXFR1")
+    except Exception:
+        return "TXFR1"
 
-        snapshots = api.snapshots([contract])
 
-        t_snapshot1 = time.perf_counter()
+def _tf_label(tf: str) -> str:
+    return {
+        "1m": "1分",
+        "5m": "5分",
+        "15m": "15分",
+        "30m": "30分",
+        "60m": "60分",
+    }.get(tf, tf)
 
-        if not snapshots:
-            return MarketIndexSnapshot(
-                available=False,
-                message="Shioaji 沒有回傳加權指數 snapshot。",
-            )
 
-        raw = _to_dict(snapshots[0])
-        total_amount_raw = _safe_float(
-            raw.get("total_amount")
-            or raw.get("amount")
-            or 0
-        )
+def _normalize_tf(value: str) -> str:
+    tf = str(value or "1m").strip()
 
-        market_turnover_yi = 0.0
+    if tf not in {"1m", "5m", "15m", "30m", "60m"}:
+        return "1m"
 
-        if total_amount_raw > 0:
-            # Shioaji amount / total_amount 通常是「元」
-            # 大盤畫面要顯示「億元」
-            if total_amount_raw >= 100_000_000:
-                market_turnover_yi = total_amount_raw / 100_000_000
-            else:
-                market_turnover_yi = total_amount_raw
-        data = {
-            "available": True,
-            "message": "ok",
-            "index_id": "TAIEX",
-            "index_name": "加權指數",
+    return tf
 
-            "open_price": _safe_float(raw.get("open")),
-            "high_price": _safe_float(raw.get("high")),
-            "low_price": _safe_float(raw.get("low")),
-            "close_price": _safe_float(raw.get("close")),
-
-            "change": _safe_float(raw.get("change_price")),
-            "change_pct": _safe_float(raw.get("change_rate")),
-
-            # 大盤這裡不要用 total_volume。
-            # 台股看盤軟體的大盤「量」通常看成交金額，單位億元。
-            "volume": market_turnover_yi,
-            "total_volume": market_turnover_yi,
-            "amount": _safe_int(raw.get("amount")),
-            "total_amount": _safe_int(raw.get("total_amount")),
-
-            "quote_time": _normalize_ts(raw.get("ts")),
-            "quote_source": "永豐即時",
-
-            "chart_url": "",
-        }
-
-        # 先快取即時數字，避免圖表失敗影響即時回覆。
-        _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
-
-        snapshot = _snapshot_from_dict(data)
-
-        t_chart0 = time.perf_counter()
-
-        if with_chart:
-            data["chart_url"] = get_market_index_chart_url(snapshot)
-            snapshot.chart_url = data["chart_url"]
-            _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
-
-        t_chart1 = time.perf_counter()
-
-        _debug(
-            "snapshot",
-            "| close =",
-            data["close_price"],
-            "| change =",
-            data["change"],
-            "| change_pct =",
-            data["change_pct"],
-            "| turnover_yi =",
-            data["total_volume"],
-            "| raw_total_volume =",
-            raw.get("total_volume"),
-            "| raw_total_amount =",
-            raw.get("total_amount"),
-            "| time =",
-            data["quote_time"],
-            "| chart_url =",
-            bool(data["chart_url"]),
-            "| get_api_sec =",
-            round(t_api1 - t_api0, 3),
-            "| contract_sec =",
-            round(t_contract1 - t_contract0, 3),
-            "| shioaji_sec =",
-            round(t_snapshot1 - t_snapshot0, 3),
-            "| chart_sec =",
-            round(t_chart1 - t_chart0, 3),
-            "| total_sec =",
-            round(time.perf_counter() - route_t0, 3),
-        )
-
-        return snapshot
-
-    except Exception as exc:
-        _debug("snapshot failed", exc)
-
-        stale_snapshot = _get_stale_market_index_snapshot()
-
-        if stale_snapshot is not None:
-            _debug(
-                "snapshot fallback stale",
-                "| reason = exception",
-                "| error =",
-                exc,
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-            return stale_snapshot
-
-        return MarketIndexSnapshot(
-            available=False,
-            message=f"取得加權指數即時資料失敗：{exc}",
-        )
-
-def _get_stale_market_index_snapshot() -> MarketIndexSnapshot | None:
+def _annotate_high_low(
+    ax,
+    plot_df,
+    x_values,
+    fontsize: int = 12,
+) -> None:
     """
-    Shioaji 暫時失敗時，若記憶體內還有舊的大盤資料，就先回舊資料。
-    這可以避免冷啟動或短暫 API 問題時整張卡片出不來。
+    在目前圖表範圍內標出最高價與最低價。
+    plot_df 需要有 High / Low 欄位。
+    x_values 對應 plot_df 的 x 座標。
     """
-    cached = _MARKET_INDEX_CACHE.get("TAIEX")
-
-    if not cached:
-        return None
-
-    _, data = cached
-
-    if not data:
-        return None
-
-    snapshot = _snapshot_from_dict(data)
-
-    if not snapshot.available:
-        return None
-
-    if not snapshot.chart_url:
-        snapshot.chart_url = get_market_index_chart_url(snapshot)
-
-    return snapshot
-
-
-def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> str:
-    """
-    產生加權指數日 K 圖。
-
-    效能重點：
-    1. 圖片快取 15 分鐘。
-    2. 歷史 OHLC 與成交金額資料各自快取 6 小時。
-    3. Yahoo direct 優先，避免 yfinance 冷啟動等滿 timeout。
-    4. 使用 lock，避免多個 LINE 查詢同時重畫同一張圖。
-    """
-    t0 = time.perf_counter()
-
-    cache_key = "TAIEX:D:MA"
-    now = time.time()
-
-    cached = _MARKET_INDEX_CHART_CACHE.get(cache_key)
-    stale_url = ""
-
-    if cached:
-        ts, url = cached
-        age = now - ts
-        stale_url = url or ""
-
-        if url and age <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
-            print(
-                "DEBUG market_index chart timing",
-                "| chart_cache_hit = True",
-                "| age_sec =",
-                round(age, 1),
-                "| ttl_sec =",
-                MARKET_INDEX_CHART_CACHE_TTL_SECONDS,
-                "| total_sec =",
-                round(time.perf_counter() - t0, 3),
-                flush=True,
-            )
-            return url
-
-    lock_t0 = time.perf_counter()
-
-    with _MARKET_INDEX_CHART_LOCK:
-        lock_wait_sec = time.perf_counter() - lock_t0
-
-        # 等 lock 時，另一個 thread 可能已經畫完，再檢查一次。
-        cached = _MARKET_INDEX_CHART_CACHE.get(cache_key)
-
-        if cached:
-            ts, url = cached
-            age = time.time() - ts
-            stale_url = url or stale_url
-
-            if url and age <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
-                print(
-                    "DEBUG market_index chart timing",
-                    "| chart_cache_hit_after_lock = True",
-                    "| lock_wait_sec =",
-                    round(lock_wait_sec, 3),
-                    "| total_sec =",
-                    round(time.perf_counter() - t0, 3),
-                    flush=True,
-                )
-                return url
-
-        try:
-            t_fetch0 = time.perf_counter()
-            df, history_cache_hit = _get_cached_taiex_history()
-            t_fetch1 = time.perf_counter()
-
-            print(
-                "DEBUG market_index chart timing",
-                "| fetch_history_sec =",
-                round(t_fetch1 - t_fetch0, 3),
-                "| history_cache_hit =",
-                history_cache_hit,
-                "| rows =",
-                0 if df is None else len(df),
-                "| lock_wait_sec =",
-                round(lock_wait_sec, 3),
-                flush=True,
-            )
-
-            if df is None or df.empty:
-                print(
-                    "DEBUG market_index chart timing",
-                    "| failed = empty_history",
-                    "| use_stale_chart =",
-                    bool(stale_url),
-                    "| total_sec =",
-                    round(time.perf_counter() - t0, 3),
-                    flush=True,
-                )
-                return stale_url
-
-            t_turnover0 = time.perf_counter()
-            df, turnover_cache_hit = _get_cached_turnover_history(df)
-            t_turnover1 = time.perf_counter()
-
-            # 最後才補當日 Shioaji snapshot，確保現價與今日成交金額最新。
-            t_append0 = time.perf_counter()
-
-            if snapshot is not None and getattr(snapshot, "available", False):
-                df = _append_snapshot_to_history(df, snapshot)
-
-            t_append1 = time.perf_counter()
-
-            print(
-                "DEBUG market_index chart timing",
-                "| turnover_sec =",
-                round(t_turnover1 - t_turnover0, 3),
-                "| turnover_cache_hit =",
-                turnover_cache_hit,
-                "| append_snapshot_sec =",
-                round(t_append1 - t_append0, 3),
-                flush=True,
-            )
-
-            t_chart0 = time.perf_counter()
-            chart_url = _generate_market_index_kline_chart(df)
-            t_chart1 = time.perf_counter()
-
-            print(
-                "DEBUG market_index chart timing",
-                "| generate_chart_sec =",
-                round(t_chart1 - t_chart0, 3),
-                "| chart_url =",
-                bool(chart_url),
-                "| total_sec =",
-                round(t_chart1 - t0, 3),
-                flush=True,
-            )
-
-            if chart_url:
-                _MARKET_INDEX_CHART_CACHE[cache_key] = (time.time(), chart_url)
-                return chart_url
-
-            return stale_url
-
-        except Exception as exc:
-            print(
-                "DEBUG market_index chart timing",
-                "| failed_exception =",
-                repr(exc),
-                "| use_stale_chart =",
-                bool(stale_url),
-                "| total_sec =",
-                round(time.perf_counter() - t0, 3),
-                flush=True,
-            )
-
-            _debug("chart failed", exc)
-            return stale_url
-
-
-def _get_cached_taiex_history() -> tuple[pd.DataFrame, bool]:
-    cache_key = "TAIEX:D:OHLC"
-    now = time.time()
-    cached = _MARKET_INDEX_HISTORY_CACHE.get(cache_key)
-
-    if cached:
-        ts, df = cached
-
-        if (
-            df is not None
-            and not df.empty
-            and now - ts <= MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS
-        ):
-            return df.copy(), True
-
-    df = _fetch_taiex_history()
-
-    if df is not None and not df.empty:
-        _MARKET_INDEX_HISTORY_CACHE[cache_key] = (time.time(), df.copy())
-
-    return df, False
-
-
-def _get_cached_turnover_history(
-    history_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, bool]:
-    """
-    將 TWSE 成交金額補值與歷史 OHLC 分開快取。
-
-    即使圖表每 15 分鐘更新，也不需要每次重打成交金額 API。
-    """
-    cache_key = "TAIEX:D:TURNOVER"
-    now = time.time()
-    cached = _MARKET_INDEX_TURNOVER_CACHE.get(cache_key)
-
-    if cached:
-        ts, df = cached
-
-        if (
-            df is not None
-            and not df.empty
-            and now - ts <= MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS
-        ):
-            return df.copy(), True
-
-    result = history_df.copy()
-
     try:
-        enriched = apply_twse_turnover_to_market_df(result)
+        if plot_df is None or plot_df.empty:
+            return
 
-        if enriched is not None and not enriched.empty:
-            result = enriched
+        if "High" not in plot_df.columns or "Low" not in plot_df.columns:
+            return
+
+        high_series = pd.to_numeric(plot_df["High"], errors="coerce")
+        low_series = pd.to_numeric(plot_df["Low"], errors="coerce")
+
+        if high_series.dropna().empty or low_series.dropna().empty:
+            return
+
+        high_idx = high_series.idxmax()
+        low_idx = low_series.idxmin()
+
+        high_pos = list(plot_df.index).index(high_idx)
+        low_pos = list(plot_df.index).index(low_idx)
+
+        high_x = x_values[high_pos]
+        low_x = x_values[low_pos]
+
+        high_y = float(high_series.loc[high_idx])
+        low_y = float(low_series.loc[low_idx])
+
+        y_min = float(low_series.min())
+        y_max = float(high_series.max())
+        y_pad = max((y_max - y_min) * 0.035, y_max * 0.001)
+
+        ax.text(
+            high_x,
+            high_y + y_pad,
+            f"高 {_fmt_price(high_y)}",
+            ha="center",
+            va="bottom",
+            fontsize=fontsize,
+            fontweight="bold",
+            color="#D32F2F",
+            zorder=10,
+        )
+
+        ax.text(
+            low_x,
+            low_y - y_pad,
+            f"低 {_fmt_price(low_y)}",
+            ha="center",
+            va="top",
+            fontsize=fontsize,
+            fontweight="bold",
+            color="#00A84F",
+            zorder=10,
+        )
 
     except Exception as exc:
         print(
-            "DEBUG market_index apply turnover failed",
+            "DEBUG annotate high low failed",
             "| error =",
             repr(exc),
             flush=True,
         )
 
-    if result is not None and not result.empty:
-        _MARKET_INDEX_TURNOVER_CACHE[cache_key] = (
-            time.time(),
-            result.copy(),
-        )
-
-    return result, False
-
-
-# =========================
-# History sources
-# =========================
-def _fetch_taiex_history() -> pd.DataFrame:
-    """
-    抓加權指數日 K 歷史資料。
-
-    預設順序：
-    1. Yahoo chart API direct
-    2. yfinance
-    3. TWSE 月資料 fallback
-
-    可用 MARKET_INDEX_HISTORY_SOURCE_ORDER 調整。
-    """
-    fetcher_map = {
-        "yahoo_direct": _fetch_taiex_history_yahoo_direct,
-        "yfinance": _fetch_taiex_history_yfinance,
-        "twse": _fetch_taiex_history_twse,
-    }
-
-    source_order = [
-        name
-        for name in MARKET_INDEX_HISTORY_SOURCE_ORDER
-        if name in fetcher_map
-    ]
-
-    if not source_order:
-        source_order = ["yahoo_direct", "yfinance", "twse"]
-
-    for source_name in source_order:
-        fetcher = fetcher_map[source_name]
-        t0 = time.perf_counter()
-
-        try:
-            df = fetcher()
-            elapsed = time.perf_counter() - t0
-
-            if df is not None and not df.empty:
-                df = _normalize_history_df(df)
-
-                _debug(
-                    "history source",
-                    source_name,
-                    "| rows =",
-                    len(df),
-                    "| sec =",
-                    round(elapsed, 3),
-                )
-                return df
-
-            _debug(
-                "history source empty",
-                source_name,
-                "| sec =",
-                round(elapsed, 3),
-            )
-
-        except Exception as exc:
-            _debug(
-                "history source failed",
-                source_name,
-                "| error =",
-                repr(exc),
-                "| sec =",
-                round(time.perf_counter() - t0, 3),
-            )
-
-    return pd.DataFrame()
-
-
-def _fetch_taiex_history_yfinance() -> pd.DataFrame:
-    if yf is None:
-        return pd.DataFrame()
-
+def _kbars_to_df(kbars: Any) -> pd.DataFrame:
     try:
-        raw = yf.download(
-            "^TWII",
-            period="10mo",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-            timeout=MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS,
-        )
-    except TypeError as exc:
-        # 不重試一個「沒有 timeout」的 yfinance 呼叫，
-        # 避免 Yahoo direct 失敗後又無限等待。
-        _debug("yfinance timeout parameter unsupported", repr(exc))
-        return pd.DataFrame()
-
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-
-    df = raw.copy()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    return df
-
-
-def _fetch_taiex_history_yahoo_direct() -> pd.DataFrame:
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII"
-
-    params = {
-        "range": "10mo",
-        "interval": "1d",
-        "includePrePost": "false",
-        "events": "history",
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-    }
-
-    resp = _HTTP_SESSION.get(
-        url,
-        params=params,
-        headers=headers,
-        timeout=MARKET_INDEX_YAHOO_TIMEOUT_SECONDS,
-    )
-    resp.raise_for_status()
-
-    payload = resp.json()
-
-    chart = payload.get("chart") or {}
-    result = chart.get("result") or []
-
-    if not result:
-        return pd.DataFrame()
-
-    item = result[0]
-    timestamps = item.get("timestamp") or []
-    indicators = item.get("indicators") or {}
-    quote = (indicators.get("quote") or [{}])[0]
-
-    if not timestamps or not quote:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
-        {
-            "Open": quote.get("open") or [],
-            "High": quote.get("high") or [],
-            "Low": quote.get("low") or [],
-            "Close": quote.get("close") or [],
-            "Volume": quote.get("volume") or [],
-        },
-        index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None),
-    )
-
-    df.index = df.index.normalize()
-
-    return df
-
-
-def _fetch_taiex_history_twse() -> pd.DataFrame:
-    """
-    TWSE fallback：
-    - MI_5MINS_HIST：加權指數每月 OHLC。
-    - FMTQIK：大盤每月成交量。
-    合併後產生日K資料。
-
-    若 TWSE 回傳欄位名稱調整，解析失敗會回空表，不影響主流程。
-    """
-    today = pd.Timestamp.now(tz="Asia/Taipei").date()
-    months = _latest_month_starts(today, months=12)
-
-    frames: list[pd.DataFrame] = []
-
-    for month_start in months:
-        ohlc = _fetch_twse_monthly_ohlc(month_start)
-        volume = _fetch_twse_monthly_volume(month_start)
-
-        if ohlc.empty:
-            continue
-
-        if not volume.empty:
-            merged = ohlc.merge(
-                volume,
-                left_index=True,
-                right_index=True,
-                how="left",
-            )
+        if isinstance(kbars, dict):
+            raw = kbars
+        elif hasattr(kbars, "__dict__"):
+            raw = dict(kbars.__dict__)
         else:
-            merged = ohlc.copy()
-            merged["Volume"] = 0
+            raw = dict(kbars)
 
-        frames.append(merged)
-
-    if not frames:
+        df = pd.DataFrame(raw)
+    except Exception:
         return pd.DataFrame()
 
-    df = pd.concat(frames, axis=0)
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.sort_index()
-
-    return df.tail(220)
-
-def _latest_month_starts(today, months: int = 12) -> list[pd.Timestamp]:
-    current = pd.Timestamp(today).replace(day=1)
-    result = []
-
-    for i in range(months):
-        result.append(current - pd.DateOffset(months=i))
-
-    # 舊到新
-    return list(reversed(result))
-
-
-def _fetch_twse_monthly_ohlc(month_start: pd.Timestamp) -> pd.DataFrame:
-    date_text = month_start.strftime("%Y%m01")
-
-    urls = [
-        "https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST",
-        "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST",
-    ]
-
-    for url in urls:
-        try:
-            payload = _twse_get_json(
-                url,
-                params={
-                    "response": "json",
-                    "date": date_text,
-                },
-            )
-
-            data = payload.get("data") or payload.get("tables", [{}])[0].get("data") or []
-            fields = payload.get("fields") or payload.get("tables", [{}])[0].get("fields") or []
-
-            df = _parse_twse_ohlc_table(data, fields)
-
-            if not df.empty:
-                return df
-
-        except Exception as exc:
-            _debug("twse ohlc failed", date_text, exc)
-
-    return pd.DataFrame()
-
-
-def _fetch_twse_monthly_volume(month_start: pd.Timestamp) -> pd.DataFrame:
-    date_text = month_start.strftime("%Y%m01")
-
-    urls = [
-        "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK",
-        "https://www.twse.com.tw/exchangeReport/FMTQIK",
-    ]
-
-    for url in urls:
-        try:
-            payload = _twse_get_json(
-                url,
-                params={
-                    "response": "json",
-                    "date": date_text,
-                },
-            )
-
-            data = payload.get("data") or payload.get("tables", [{}])[0].get("data") or []
-            fields = payload.get("fields") or payload.get("tables", [{}])[0].get("fields") or []
-
-            df = _parse_twse_volume_table(data, fields)
-
-            if not df.empty:
-                return df
-
-        except Exception as exc:
-            _debug("twse volume failed", date_text, exc)
-
-    return pd.DataFrame()
-
-
-def _twse_get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json,text/plain,*/*",
-        "Referer": "https://www.twse.com.tw/",
-    }
-
-    resp = requests.get(
-        url,
-        params=params,
-        headers=headers,
-        timeout=8,
-    )
-    resp.raise_for_status()
-
-    return resp.json()
-
-
-def _parse_twse_ohlc_table(data: list, fields: list | None = None) -> pd.DataFrame:
-    rows = []
-
-    for row in data or []:
-        if not isinstance(row, (list, tuple)) or len(row) < 5:
-            continue
-
-        date = _parse_twse_date(row[0])
-        open_price = _safe_float(row[1])
-        high_price = _safe_float(row[2])
-        low_price = _safe_float(row[3])
-        close_price = _safe_float(row[4])
-
-        if not date or close_price <= 0:
-            continue
-
-        rows.append(
-            {
-                "Date": date,
-                "Open": open_price,
-                "High": high_price,
-                "Low": low_price,
-                "Close": close_price,
-            }
-        )
-
-    if not rows:
+    if df.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"])
-    df = df.set_index("Date")
-    df.index = df.index.normalize()
-
-    return df
-
-
-def _parse_twse_volume_table(data: list, fields: list | None = None) -> pd.DataFrame:
-    rows = []
-
-    for row in data or []:
-        if not isinstance(row, (list, tuple)) or len(row) < 2:
-            continue
-
-        date = _parse_twse_date(row[0])
-
-        if not date:
-            continue
-
-        # FMTQIK 第一個數值通常是成交股數。
-        volume = _safe_int(row[1])
-
-        rows.append(
-            {
-                "Date": date,
-                "Volume": volume,
-            }
-        )
-
-    if not rows:
+    if "ts" not in df.columns:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"])
-    df = df.set_index("Date")
-    df.index = df.index.normalize()
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts"]).copy()
 
-    return df
-
-
-def _parse_twse_date(value: Any) -> str:
-    """
-    支援：
-    - 2026/07/01
-    - 115/07/01
-    """
-    text = str(value or "").strip()
-
-    if not text:
-        return ""
-
-    text = text.replace("-", "/")
-
-    parts = text.split("/")
-
-    if len(parts) != 3:
-        return ""
+    if df.empty:
+        return pd.DataFrame()
 
     try:
-        year = int(parts[0])
-        month = int(parts[1])
-        day = int(parts[2])
-
-        if year < 1911:
-            year += 1911
-
-        return f"{year:04d}-{month:02d}-{day:02d}"
-
+        if getattr(df["ts"].dt, "tz", None) is not None:
+            df["ts"] = df["ts"].dt.tz_convert("Asia/Taipei").dt.tz_localize(None)
     except Exception:
-        return ""
+        pass
 
-
-def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    work = df.copy()
-
-    if isinstance(work.columns, pd.MultiIndex):
-        work.columns = work.columns.get_level_values(0)
-
-    # 欄名保險處理
-    rename = {
+    rename_map = {
         "open": "Open",
         "high": "High",
         "low": "Low",
@@ -1199,321 +335,414 @@ def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
         "volume": "Volume",
     }
 
-    work = work.rename(columns={col: rename.get(str(col).lower(), col) for col in work.columns})
+    df = df.rename(columns=rename_map)
 
-    required = ["Open", "High", "Low", "Close", "Volume"]
+    needed = ["Open", "High", "Low", "Close", "Volume"]
 
-    for col in required:
-        if col not in work.columns:
-            work[col] = 0
+    for col in needed:
+        if col not in df.columns:
+            if col == "Volume":
+                df[col] = 0
+            else:
+                return pd.DataFrame()
 
-    work = work[required].copy()
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    work.index = pd.to_datetime(work.index, errors="coerce")
+    df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
 
-    if getattr(work.index, "tz", None) is not None:
-        work.index = work.index.tz_convert("Asia/Taipei").tz_localize(None)
+    if df.empty:
+        return pd.DataFrame()
 
-    work.index = work.index.normalize()
+    df = df.set_index("ts").sort_index()
+    df = df[~df.index.duplicated(keep="last")].copy()
 
-    for col in required:
-        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
-
-    # 若 fallback 無 Volume，保留 0；價格一定要有效。
-    work = work[work["Close"] > 0]
-
-    # 若 Open/High/Low 缺失，用 Close 補齊，避免畫圖失敗。
-    for col in ["Open", "High", "Low"]:
-        work.loc[work[col] <= 0, col] = work.loc[work[col] <= 0, "Close"]
-
-    work["High"] = work[["High", "Open", "Close"]].max(axis=1)
-    work["Low"] = work[["Low", "Open", "Close"]].min(axis=1)
-
-    work = work.sort_index()
-    work = work[~work.index.duplicated(keep="last")]
-
-    return work.tail(220)
+    return df[needed]
 
 
-def _append_snapshot_to_history(df: pd.DataFrame, snapshot: MarketIndexSnapshot) -> pd.DataFrame:
-    result = df.copy()
+def _fetch_1m_kbars(contract, tf: str) -> pd.DataFrame:
+    api = get_api()
 
-    close_price = _safe_float(getattr(snapshot, "close_price", 0.0))
+    if api is None:
+        return pd.DataFrame()
 
-    if close_price <= 0:
-        return result
+    days = LOOKBACK_DAYS_MAP.get(tf, 7)
+    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = today.strftime("%Y-%m-%d")
 
-    quote_time = str(getattr(snapshot, "quote_time", "") or "").strip()
-    ts = pd.to_datetime(quote_time, errors="coerce")
-
-    if pd.isna(ts):
-        ts = pd.Timestamp.now(tz="Asia/Taipei")
-
-    if getattr(ts, "tzinfo", None) is not None:
-        ts = ts.tz_convert("Asia/Taipei").tz_localize(None)
-
-    trade_date = pd.Timestamp(ts).normalize()
-
-    open_price = _safe_float(getattr(snapshot, "open_price", 0.0)) or close_price
-    high_price = _safe_float(getattr(snapshot, "high_price", 0.0)) or close_price
-    low_price = _safe_float(getattr(snapshot, "low_price", 0.0)) or close_price
-    volume = _safe_int(getattr(snapshot, "total_volume", 0)) or _safe_int(getattr(snapshot, "volume", 0))
-
-    high_price = max(high_price, open_price, close_price)
-    low_price = min(low_price, open_price, close_price)
-
-    if trade_date in result.index:
-        if open_price > 0:
-            result.loc[trade_date, "Open"] = open_price
-
-        result.loc[trade_date, "High"] = max(_safe_float(result.loc[trade_date, "High"]), high_price)
-        result.loc[trade_date, "Low"] = min(
-            _safe_float(result.loc[trade_date, "Low"]) or low_price,
-            low_price,
-        )
-        result.loc[trade_date, "Close"] = close_price
-
-        if volume > 0:
-            result.loc[trade_date, "Volume"] = volume
-
-    else:
-        result.loc[trade_date, ["Open", "High", "Low", "Close", "Volume"]] = [
-            open_price,
-            high_price,
-            low_price,
-            close_price,
-            volume,
-        ]
-
-    result = result.sort_index()
-
-    return result.tail(220)
-
-
-# =========================
-# Chart
-# =========================
-def _fmt_index_ma_value(value) -> str:
     try:
-        num = float(value)
+        kbars = api.kbars(
+            contract=contract,
+            start=start,
+            end=end,
+        )
 
-        if num == 0:
+        df = _kbars_to_df(kbars)
+
+        _debug(
+            "fetch kbars",
+            "| contract =",
+            _contract_code(contract),
+            "| tf =",
+            tf,
+            "| start =",
+            start,
+            "| end =",
+            end,
+            "| rows =",
+            0 if df is None else len(df),
+        )
+
+        return df
+
+    except Exception as exc:
+        _debug(
+            "fetch kbars failed",
+            "| contract =",
+            _contract_code(contract),
+            "| tf =",
+            tf,
+            "| error =",
+            repr(exc),
+        )
+        return pd.DataFrame()
+
+
+def _resample_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    tf = _normalize_tf(tf)
+
+    if tf == "1m":
+        return df.copy()
+
+    rule = RESAMPLE_RULE_MAP.get(tf)
+
+    if not rule:
+        return df.copy()
+
+    work = df.copy()
+
+    result = work.resample(
+        rule,
+        label="right",
+        closed="right",
+    ).agg(
+        {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+    )
+
+    result = result.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+
+    return result
+
+
+def _add_bollinger(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    close = pd.to_numeric(work["Close"], errors="coerce")
+
+    mid = close.rolling(20, min_periods=20).mean()
+    std = close.rolling(20, min_periods=20).std(ddof=0)
+
+    work["BB_MID"] = mid
+    work["BB_UPPER"] = mid + 2 * std
+    work["BB_LOWER"] = mid - 2 * std
+
+    return work
+
+
+def _fmt_price(value: Any) -> str:
+    """價格最多保留 2 位小數，並移除尾端多餘的 0。"""
+    try:
+        number = float(value)
+
+        if pd.isna(number):
             return "--"
 
-        return f"{num:,.2f}"
-
+        return f"{number:,.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "--"
 
-def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
+
+def _draw_market_future_bollinger_chart(
+    df: pd.DataFrame,
+    tf: str,
+    contract_code: str,
+    rows: int = 60,
+) -> tuple[str, dict[str, Any]]:
     if df is None or df.empty:
-        return ""
+        return "", {}
 
-    _setup_chinese_font()
+    tf = _normalize_tf(tf)
+    label = _tf_label(tf)
 
-    work_df = df.copy()
-
-    # 用完整資料先算均線
-    for period in [5, 20, 60, 120]:
-        work_df[f"MA{period}"] = (
-            work_df["Close"]
-            .astype(float)
-            .rolling(period, min_periods=1)
-            .mean()
-        )
-
-    # 顯示最近約 3 個月
-    plot_df = work_df.tail(60).copy()
+    work = _add_bollinger(df)
+    plot_df = work.tail(max(30, int(rows))).copy()
 
     if plot_df.empty:
-        return ""
+        return "", {}
 
-    latest = work_df.iloc[-1]
-    latest_close = float(latest["Close"])
-    latest_date = work_df.index[-1].strftime("%Y-%m-%d")
+    latest = plot_df.iloc[-1]
 
-    ma5 = _fmt_index_ma_value(latest.get("MA5"))
-    ma20 = _fmt_index_ma_value(latest.get("MA20"))
-    ma60 = _fmt_index_ma_value(latest.get("MA60"))
-    ma120 = _fmt_index_ma_value(latest.get("MA120"))
+    latest_close = _safe_float(latest.get("Close"))
+    bb_upper = _safe_float(latest.get("BB_UPPER"))
+    bb_mid = _safe_float(latest.get("BB_MID"))
+    bb_lower = _safe_float(latest.get("BB_LOWER"))
 
-    fig = plt.figure(figsize=(8.4, 6.8), dpi=130, facecolor="white")
+    font_kwargs = _font_kwargs()
 
-    # 上方資訊區 + K線 + 成交量
-    gs = gridspec.GridSpec(
-        3,
-        1,
-        height_ratios=[1.0, 3.2, 1.1],
-        hspace=0.05,
-    )
+    # 單圖：刪除成交量副圖，降低高度，讓 K 線更清楚。
+    fig = plt.figure(figsize=(8.6, 5.6), dpi=118, facecolor="white")
 
-    ax_info = fig.add_subplot(gs[0])
-    ax_k = fig.add_subplot(gs[1])
-    ax_v = fig.add_subplot(gs[2], sharex=ax_k)
-
-    # ========= 上方資訊區 =========
-    ax_info.set_facecolor("white")
-    ax_info.axis("off")
-
-    # 第一排 MA
-    ax_info.text(
-        0.00,
-        0.46,
-        f"5MA {ma5}",
-        fontsize=15,
-        fontweight="bold",
-        color="#111111",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.28,
-        0.46,
-        f"20MA {ma20}",
-        fontsize=15,
-        fontweight="bold",
-        color="#1F77B4",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-
-    # 第二排 MA
-    ax_info.text(
-        0.00,
-        0.12,
-        f"60MA {ma60}",
-        fontsize=15,
-        fontweight="bold",
-        color="#FF7F0E",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.28,
-        0.12,
-        f"120MA {ma120}",
-        fontsize=15,
-        fontweight="bold",
-        color="#9467BD",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-
-    # ========= K線區 =========
+    # 上方預留空間放「現價 / BB」
+    ax_k = fig.add_axes([0.08, 0.14, 0.88, 0.72])
     ax_k.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
 
     x_values = list(range(len(plot_df)))
     candle_width = 0.58
 
-    open_values = pd.to_numeric(plot_df["Open"], errors="coerce").astype(float).values
-    high_values = pd.to_numeric(plot_df["High"], errors="coerce").astype(float).values
-    low_values = pd.to_numeric(plot_df["Low"], errors="coerce").astype(float).values
-    close_values = pd.to_numeric(plot_df["Close"], errors="coerce").astype(float).values
-    volume_values = (
-        pd.to_numeric(plot_df["Volume"], errors="coerce")
-        .fillna(0)
-        .astype(float)
-        .values
-    )
+    for i, (_, row) in enumerate(plot_df.iterrows()):
+        o = _safe_float(row.get("Open"))
+        h = _safe_float(row.get("High"))
+        l = _safe_float(row.get("Low"))
+        c = _safe_float(row.get("Close"))
 
-    candle_colors = [
-        "#FF2D2D" if close_price >= open_price else "#00B050"
-        for open_price, close_price in zip(open_values, close_values)
-    ]
+        color = "#FF2D2D" if c >= o else "#00B050"
 
-    body_bottom = [
-        min(open_price, close_price)
-        for open_price, close_price in zip(open_values, close_values)
-    ]
-    body_height = [
-        max(abs(close_price - open_price), 0.01)
-        for open_price, close_price in zip(open_values, close_values)
-    ]
+        ax_k.vlines(i, l, h, linewidth=0.9, color=color, zorder=2)
 
-    # 一次建立整組 artists，避免 60 根 K 棒逐根呼叫造成額外開銷。
-    ax_k.vlines(
+        lower = min(o, c)
+        height = abs(c - o)
+
+        if height <= 0:
+            height = 0.01
+
+        ax_k.bar(
+            i,
+            height,
+            bottom=lower,
+            width=candle_width,
+            color=color,
+            edgecolor=color,
+            align="center",
+            zorder=3,
+        )
+
+    # 布林通道
+    ax_k.plot(
         x_values,
-        low_values,
-        high_values,
-        linewidth=1.0,
-        colors=candle_colors,
+        plot_df["BB_UPPER"].values,
+        linewidth=1.25,
+        color="#D32F2F",
+        zorder=4,
     )
 
-    ax_k.bar(
+    ax_k.plot(
         x_values,
-        body_height,
-        bottom=body_bottom,
-        width=candle_width,
-        color=candle_colors,
-        align="center",
+        plot_df["BB_MID"].values,
+        linewidth=1.15,
+        color="#333333",
+        zorder=4,
     )
 
-    ax_v.bar(
+    ax_k.plot(
         x_values,
-        volume_values,
-        width=candle_width,
-        color=candle_colors,
-        align="center",
+        plot_df["BB_LOWER"].values,
+        linewidth=1.25,
+        color="#00A84F",
+        zorder=4,
     )
 
-    # 均線
-    ma_styles = {
-        "MA5": ("#111111", 1.2),
-        "MA20": ("#1F77B4", 1.2),
-        "MA60": ("#FF7F0E", 1.2),
-        "MA120": ("#9467BD", 1.2),
-    }
+    _annotate_high_low(
+        ax_k,
+        plot_df,
+        x_values,
+        fontsize=12,
+    )
 
-    for col, (line_color, linewidth) in ma_styles.items():
-        if col in plot_df.columns:
-            ax_k.plot(
-                x_values,
-                plot_df[col].values,
-                linewidth=linewidth,
-                color=line_color,
-            )
+    # 移到原本標題的位置，不跟 K 線重疊。
+    bb_text = (
+        f"現價 {_fmt_price(latest_close)}   "
+        f"BB上 {_fmt_price(bb_upper)}   "
+        f"BB中 {_fmt_price(bb_mid)}   "
+        f"BB下 {_fmt_price(bb_lower)}"
+    )
 
-    ax_k.grid(True, linestyle=":", alpha=0.35)
-    ax_v.grid(True, linestyle=":", alpha=0.30)
+    fig.text(
+        0.08,
+        0.94,
+        bb_text,
+        ha="left",
+        va="top",
+        fontsize=14,
+        fontweight="bold",
+        color="#111111",
+        **font_kwargs,
+    )
 
-    labels = [idx.strftime("%m/%d") for idx in plot_df.index]
+    # 刪除圖內標題，避免和 LINE 圖卡標題重複。
+    # ax_k.set_title(...) 不再使用。
+
+    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
+
+    labels = []
+
+    index_dates = [idx.date() for idx in plot_df.index]
+    multi_day = bool(index_dates and min(index_dates) != max(index_dates))
+
+    for idx in plot_df.index:
+        if multi_day:
+            labels.append(idx.strftime("%m/%d\n%H:%M"))
+        else:
+            labels.append(idx.strftime("%H:%M"))
+
     step = max(1, len(labels) // 6)
     ticks = list(range(0, len(labels), step))
 
-    ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels(
+    if len(labels) - 1 not in ticks:
+        ticks.append(len(labels) - 1)
+
+    ax_k.set_xticks(ticks)
+    ax_k.set_xticklabels(
         [labels[i] for i in ticks],
         rotation=0,
         fontsize=11,
+        **font_kwargs,
     )
 
-    plt.setp(ax_k.get_xticklabels(), visible=False)
+    _hide_top_right_spines(ax_k)
 
-    ax_v.set_ylabel("成交量", fontsize=10)
-
-    ax_k.tick_params(axis="y", labelsize=9)
-    ax_v.tick_params(axis="y", labelsize=9)
-
-    ax_k.spines["top"].set_visible(False)
-    ax_k.spines["right"].set_visible(False)
-    ax_v.spines["top"].set_visible(False)
-    ax_v.spines["right"].set_visible(False)
-
-    # 固定留白比 tight_layout 更穩定，也少一次 layout 計算。
-    fig.subplots_adjust(
-        left=0.09,
-        right=0.97,
-        top=0.97,
-        bottom=0.08,
-        hspace=0.05,
-    )
+    image_key = f"TXF_bollinger_{tf}_{rows}_{int(time.time() // TTL_MAP.get(tf, 60))}"
 
     try:
-        return publish_figure(fig, "taiex_market_index_kline")
+        image_url = publish_figure(fig, image_key) or ""
     finally:
         plt.close(fig)
+
+    meta = {
+        "latest_close": latest_close,
+        "bb_upper": bb_upper,
+        "bb_mid": bb_mid,
+        "bb_lower": bb_lower,
+        "latest_time": str(plot_df.index[-1])[:19],
+        "rows": len(plot_df),
+    }
+
+    return image_url, meta
+
+def get_market_future_kline_snapshot(
+    time_frame: str = "1m",
+    rows: int = 60,
+) -> MarketFutureKlineSnapshot:
+    tf = _normalize_tf(time_frame)
+    label = _tf_label(tf)
+
+    cache_key = f"TXF:{tf}:{rows}"
+    now = time.time()
+    ttl = TTL_MAP.get(tf, 60)
+
+    cached = MARKET_FUTURE_KLINE_CACHE.get(cache_key)
+
+    if cached:
+        ts, payload = cached
+
+        if now - ts <= ttl:
+            return MarketFutureKlineSnapshot(**payload)
+
+    api = get_api()
+
+    if api is None:
+        return MarketFutureKlineSnapshot(
+            available=False,
+            message="Shioaji 尚未登入，無法取得台指期 K 線。",
+            time_frame=tf,
+            label=label,
+        )
+
+    contract = _get_txf_contract(api)
+
+    if contract is None:
+        return MarketFutureKlineSnapshot(
+            available=False,
+            message="找不到台指期 TXF 近月 contract。",
+            time_frame=tf,
+            label=label,
+        )
+
+    contract_code = _contract_code(contract)
+
+    df_1m = _fetch_1m_kbars(contract, tf)
+
+    if df_1m is None or df_1m.empty:
+        return MarketFutureKlineSnapshot(
+            available=False,
+            message="Shioaji 沒有回傳台指期 K 線資料。",
+            time_frame=tf,
+            label=label,
+            contract_code=contract_code,
+        )
+
+    df_tf = _resample_df(df_1m, tf)
+
+    if df_tf is None or df_tf.empty:
+        return MarketFutureKlineSnapshot(
+            available=False,
+            message=f"台指期 {label}K 資料整理失敗。",
+            time_frame=tf,
+            label=label,
+            contract_code=contract_code,
+        )
+
+    image_url, meta = _draw_market_future_bollinger_chart(
+        df_tf,
+        tf=tf,
+        contract_code=contract_code,
+        rows=rows,
+    )
+
+    if not image_url:
+        return MarketFutureKlineSnapshot(
+            available=False,
+            message=f"台指期 {label}K 圖片產生失敗。",
+            time_frame=tf,
+            label=label,
+            contract_code=contract_code,
+        )
+
+    payload = {
+        "available": True,
+        "message": "ok",
+        "image_url": image_url,
+        "time_frame": tf,
+        "label": label,
+        "contract_code": contract_code,
+        "latest_time": str(meta.get("latest_time") or ""),
+        "latest_close": _safe_float(meta.get("latest_close")),
+        "bb_upper": _safe_float(meta.get("bb_upper")),
+        "bb_mid": _safe_float(meta.get("bb_mid")),
+        "bb_lower": _safe_float(meta.get("bb_lower")),
+        "rows": int(meta.get("rows") or 0),
+    }
+
+    MARKET_FUTURE_KLINE_CACHE[cache_key] = (now, dict(payload))
+
+    _debug(
+        "snapshot",
+        "| tf =",
+        tf,
+        "| contract =",
+        contract_code,
+        "| rows =",
+        payload["rows"],
+        "| image =",
+        bool(image_url),
+    )
+
+    return MarketFutureKlineSnapshot(**payload)
