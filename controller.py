@@ -1481,7 +1481,17 @@ def _postback_button(
     data: str,
     active: bool = False,
     flex: int = 1,
+    display_text: str | None = None,
 ) -> dict[str, Any]:
+    action = {
+        "type": "postback",
+        "label": label,
+        "data": data,
+    }
+
+    if display_text:
+        action["displayText"] = display_text
+
     return {
         "type": "box",
         "layout": "vertical",
@@ -1491,11 +1501,7 @@ def _postback_button(
         "backgroundColor": ACTIVE_COLOR if active else INACTIVE_COLOR,
         "justifyContent": "center",
         "alignItems": "center",
-        "action": {
-            "type": "postback",
-            "label": label,
-            "data": data,
-        },
+        "action": action,
         "contents": [
             {
                 "type": "text",
@@ -1507,69 +1513,6 @@ def _postback_button(
                 "weight": "bold" if active else "regular",
             }
         ],
-    }
-
-
-def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
-    mode = _normalize_action(active_mode)
-    tf = normalize_time_frame(current_tf)
-
-    items = [
-        ("1分", "1m"),
-        ("5分", "5m"),
-        ("日", "D"),
-        ("週", "W"),
-        ("月", "M"),
-    ]
-
-    buttons = []
-
-    for label, value in items:
-        is_active = tf == value
-
-        # 重要：
-        # 1分 / 5分 預設走即時圖
-        # 日 / 週 / 月 預設走 K 線圖
-        if value in {"1m", "5m"}:
-            target_action = "instant"
-        else:
-            target_action = "k_line"
-
-        buttons.append(
-            {
-                "type": "box",
-                "layout": "vertical",
-                "height": "46px",
-                "cornerRadius": "12px",
-                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
-                "justifyContent": "center",
-                "alignItems": "center",
-                "action": {
-                    "type": "postback",
-                    "label": label,
-                    "data": f"{stock_id},{target_action},{target_action},{value}",
-                    "displayText": f"{stock_id} {label}",
-                },
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": label,
-                        "size": "md",
-                        "weight": "bold" if is_active else "regular",
-                        "align": "center",
-                        "gravity": "center",
-                        "color": "#FFFFFF" if is_active else "#111111",
-                    }
-                ],
-            }
-        )
-
-    return {
-        "type": "box",
-        "layout": "horizontal",
-        "spacing": "sm",
-        "margin": "md",
-        "contents": buttons,
     }
 
 def _market_index_buttons(active_action: str = "market_index") -> list[dict[str, Any]]:
@@ -1585,11 +1528,13 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
                 label="即時",
                 data="TAIEX,market_index,market_index,D",
                 active=active_action == "market_index",
+                display_text="大盤 即時",
             ),
             _postback_button(
                 label="法人",
                 data="TAIEX,market_chip,market_index,D",
                 active=active_action == "market_chip",
+                display_text="大盤 法人",
             ),
         ],
     }
@@ -1604,11 +1549,13 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
                 label="融資券",
                 data="TAIEX,market_margin,market_index,D",
                 active=active_action == "market_margin",
+                display_text="大盤 融資券",
             ),
             _postback_button(
                 label="期貨",
                 data="TAIEX,market_future_day,market_index,D",
                 active=active_action in {"market_future_day", "market_future_all"},
+                display_text="大盤 期貨",
             ),
         ],
     }
@@ -1930,11 +1877,13 @@ def _market_future_session_buttons(active_action: str = "market_future_day") -> 
                 label="日盤",
                 data="TAIEX,market_future_day,market_index,D",
                 active=active_action == "market_future_day",
+                display_text="台指期 日盤",
             ),
             _postback_button(
                 label="全盤",
                 data="TAIEX,market_future_all,market_index,D",
                 active=active_action == "market_future_all",
+                display_text="台指期 全盤",
             ),
         ],
     }
@@ -4775,11 +4724,13 @@ def _futures_session_buttons(
                 label="日盤",
                 data=f"{stock_id},futures_day,futures,{current_tf}",
                 active=active_session == "day",
+                display_text=f"{stock_id} 期貨日盤",
             ),
             _postback_button(
                 label="全盤",
                 data=f"{stock_id},futures_all,futures,{current_tf}",
                 active=active_session == "all",
+                display_text=f"{stock_id} 期貨全盤",
             ),
         ],
     }
