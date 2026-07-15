@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import time
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -46,8 +47,43 @@ except Exception:
 MARKET_INDEX_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CACHE_TTL_SECONDS", "5"))
 MARKET_INDEX_CHART_CACHE_TTL_SECONDS = int(os.getenv("MARKET_INDEX_CHART_CACHE_TTL_SECONDS", "900"))
 
+# 歷史 OHLC 與「已補成交金額」資料不需要跟 5 秒即時 snapshot 一起重抓。
+# 預設快取 6 小時；盤中最新一根仍由 Shioaji snapshot 覆蓋。
+MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS = int(
+    os.getenv("MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS", "21600")
+)
+MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS = int(
+    os.getenv("MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS", "21600")
+)
+
+MARKET_INDEX_YAHOO_TIMEOUT_SECONDS = float(
+    os.getenv("MARKET_INDEX_YAHOO_TIMEOUT_SECONDS", "4")
+)
+MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS = float(
+    os.getenv("MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS", "4")
+)
+
+# direct Yahoo 通常比 yfinance 少一層包裝，冷啟動時優先使用。
+MARKET_INDEX_HISTORY_SOURCE_ORDER = [
+    item.strip().lower()
+    for item in os.getenv(
+        "MARKET_INDEX_HISTORY_SOURCE_ORDER",
+        "yahoo_direct,yfinance,twse",
+    ).split(",")
+    if item.strip()
+]
+
 _MARKET_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _MARKET_INDEX_CHART_CACHE: dict[str, tuple[float, str]] = {}
+_MARKET_INDEX_HISTORY_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_MARKET_INDEX_TURNOVER_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+
+# 避免 Gunicorn threads 同時產生同一張大盤圖。
+_MARKET_INDEX_CHART_LOCK = threading.Lock()
+
+_FONT_SETUP_DONE = False
+_FONT_SETUP_LOCK = threading.Lock()
+_HTTP_SESSION = requests.Session()
 
 
 @dataclass
@@ -177,24 +213,62 @@ def _normalize_ts(value: Any) -> str:
 
 
 def _setup_chinese_font() -> None:
-    try:
-        candidates = [
-            Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansTC-Regular.ttf",
-            Path("/opt/render/project/src/assets/fonts/NotoSansTC-Regular.ttf"),
-            Path("/mnt/data/NotoSansTC-Regular.ttf"),
-        ]
+    """
+    中文字型只初始化一次。
 
-        for font_path in candidates:
-            if font_path.exists():
-                font_manager.fontManager.addfont(str(font_path))
-                font_name = FontProperties(fname=str(font_path)).get_name()
+    若專案同時有 Regular / Bold，兩個都註冊，避免：
+    findfont: Failed to find font weight bold
+    """
+    global _FONT_SETUP_DONE
+
+    if _FONT_SETUP_DONE:
+        return
+
+    with _FONT_SETUP_LOCK:
+        if _FONT_SETUP_DONE:
+            return
+
+        try:
+            font_dir_candidates = [
+                Path(__file__).resolve().parents[1] / "assets" / "fonts",
+                Path("/opt/render/project/src/assets/fonts"),
+                Path("/mnt/data"),
+            ]
+
+            regular_path = None
+
+            for font_dir in font_dir_candidates:
+                candidates = [
+                    font_dir / "NotoSansTC-Regular.ttf",
+                    font_dir / "NotoSansCJKtc-Regular.otf",
+                ]
+
+                for font_path in candidates:
+                    if font_path.exists():
+                        font_manager.fontManager.addfont(str(font_path))
+
+                        if regular_path is None:
+                            regular_path = font_path
+
+                bold_candidates = [
+                    font_dir / "NotoSansTC-Bold.ttf",
+                    font_dir / "NotoSansCJKtc-Bold.otf",
+                ]
+
+                for font_path in bold_candidates:
+                    if font_path.exists():
+                        font_manager.fontManager.addfont(str(font_path))
+
+            if regular_path is not None:
+                font_name = FontProperties(fname=str(regular_path)).get_name()
                 plt.rcParams["font.family"] = font_name
-                break
 
-        plt.rcParams["axes.unicode_minus"] = False
+            plt.rcParams["axes.unicode_minus"] = False
 
-    except Exception as exc:
-        _debug("font setup failed", exc)
+        except Exception as exc:
+            _debug("font setup failed", exc)
+
+        _FONT_SETUP_DONE = True
 
 
 def _get_taiex_contract(api):
@@ -491,13 +565,13 @@ def _get_stale_market_index_snapshot() -> MarketIndexSnapshot | None:
 
 def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> str:
     """
-    產生加權指數日K圖：
-    1. 優先吃 15 分鐘 chart 快取。
-    2. 資料源優先順序：
-       - yfinance ^TWII
-       - Yahoo chart API direct
-       - TWSE MI_5MINS_HIST + FMTQIK
-    3. 如果新資料失敗，回舊圖 stale url。
+    產生加權指數日 K 圖。
+
+    效能重點：
+    1. 圖片快取 15 分鐘。
+    2. 歷史 OHLC 與成交金額資料各自快取 6 小時。
+    3. Yahoo direct 優先，避免 yfinance 冷啟動等滿 timeout。
+    4. 使用 lock，避免多個 LINE 查詢同時重畫同一張圖。
     """
     t0 = time.perf_counter()
 
@@ -524,48 +598,112 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
                 round(time.perf_counter() - t0, 3),
                 flush=True,
             )
-
             return url
 
-        print(
-            "DEBUG market_index chart timing",
-            "| chart_cache_hit = False",
-            "| cache_expired =",
-            bool(url),
-            "| age_sec =",
-            round(age, 1),
-            "| ttl_sec =",
-            MARKET_INDEX_CHART_CACHE_TTL_SECONDS,
-            flush=True,
-        )
-    else:
-        print(
-            "DEBUG market_index chart timing",
-            "| chart_cache_hit = False",
-            "| no_cache = True",
-            flush=True,
-        )
+    lock_t0 = time.perf_counter()
 
-    try:
-        t_fetch0 = time.perf_counter()
+    with _MARKET_INDEX_CHART_LOCK:
+        lock_wait_sec = time.perf_counter() - lock_t0
 
-        df = _fetch_taiex_history()
+        # 等 lock 時，另一個 thread 可能已經畫完，再檢查一次。
+        cached = _MARKET_INDEX_CHART_CACHE.get(cache_key)
 
-        t_fetch1 = time.perf_counter()
+        if cached:
+            ts, url = cached
+            age = time.time() - ts
+            stale_url = url or stale_url
 
-        print(
-            "DEBUG market_index chart timing",
-            "| fetch_history_sec =",
-            round(t_fetch1 - t_fetch0, 3),
-            "| rows =",
-            0 if df is None else len(df),
-            flush=True,
-        )
+            if url and age <= MARKET_INDEX_CHART_CACHE_TTL_SECONDS:
+                print(
+                    "DEBUG market_index chart timing",
+                    "| chart_cache_hit_after_lock = True",
+                    "| lock_wait_sec =",
+                    round(lock_wait_sec, 3),
+                    "| total_sec =",
+                    round(time.perf_counter() - t0, 3),
+                    flush=True,
+                )
+                return url
 
-        if df is None or df.empty:
+        try:
+            t_fetch0 = time.perf_counter()
+            df, history_cache_hit = _get_cached_taiex_history()
+            t_fetch1 = time.perf_counter()
+
             print(
                 "DEBUG market_index chart timing",
-                "| failed = empty_history",
+                "| fetch_history_sec =",
+                round(t_fetch1 - t_fetch0, 3),
+                "| history_cache_hit =",
+                history_cache_hit,
+                "| rows =",
+                0 if df is None else len(df),
+                "| lock_wait_sec =",
+                round(lock_wait_sec, 3),
+                flush=True,
+            )
+
+            if df is None or df.empty:
+                print(
+                    "DEBUG market_index chart timing",
+                    "| failed = empty_history",
+                    "| use_stale_chart =",
+                    bool(stale_url),
+                    "| total_sec =",
+                    round(time.perf_counter() - t0, 3),
+                    flush=True,
+                )
+                return stale_url
+
+            t_turnover0 = time.perf_counter()
+            df, turnover_cache_hit = _get_cached_turnover_history(df)
+            t_turnover1 = time.perf_counter()
+
+            # 最後才補當日 Shioaji snapshot，確保現價與今日成交金額最新。
+            t_append0 = time.perf_counter()
+
+            if snapshot is not None and getattr(snapshot, "available", False):
+                df = _append_snapshot_to_history(df, snapshot)
+
+            t_append1 = time.perf_counter()
+
+            print(
+                "DEBUG market_index chart timing",
+                "| turnover_sec =",
+                round(t_turnover1 - t_turnover0, 3),
+                "| turnover_cache_hit =",
+                turnover_cache_hit,
+                "| append_snapshot_sec =",
+                round(t_append1 - t_append0, 3),
+                flush=True,
+            )
+
+            t_chart0 = time.perf_counter()
+            chart_url = _generate_market_index_kline_chart(df)
+            t_chart1 = time.perf_counter()
+
+            print(
+                "DEBUG market_index chart timing",
+                "| generate_chart_sec =",
+                round(t_chart1 - t_chart0, 3),
+                "| chart_url =",
+                bool(chart_url),
+                "| total_sec =",
+                round(t_chart1 - t0, 3),
+                flush=True,
+            )
+
+            if chart_url:
+                _MARKET_INDEX_CHART_CACHE[cache_key] = (time.time(), chart_url)
+                return chart_url
+
+            return stale_url
+
+        except Exception as exc:
+            print(
+                "DEBUG market_index chart timing",
+                "| failed_exception =",
+                repr(exc),
                 "| use_stale_chart =",
                 bool(stale_url),
                 "| total_sec =",
@@ -573,71 +711,78 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
                 flush=True,
             )
 
+            _debug("chart failed", exc)
             return stale_url
 
-        t_append0 = time.perf_counter()
 
-        if snapshot is not None and getattr(snapshot, "available", False):
-            df = _append_snapshot_to_history(df, snapshot)
+def _get_cached_taiex_history() -> tuple[pd.DataFrame, bool]:
+    cache_key = "TAIEX:D:OHLC"
+    now = time.time()
+    cached = _MARKET_INDEX_HISTORY_CACHE.get(cache_key)
 
-        # 大盤 K 線副圖不要用 yfinance / Shioaji 的 Volume。
-        # 改用 TWSE 成交金額，單位：億元。
-        try:
-            df = apply_twse_turnover_to_market_df(df)
-        except Exception as exc:
-            print(
-                "DEBUG market_index apply turnover failed",
-                "| error =",
-                repr(exc),
-                flush=True,
-            )
+    if cached:
+        ts, df = cached
 
-        t_append1 = time.perf_counter()
+        if (
+            df is not None
+            and not df.empty
+            and now - ts <= MARKET_INDEX_HISTORY_CACHE_TTL_SECONDS
+        ):
+            return df.copy(), True
 
-        print(
-            "DEBUG market_index chart timing",
-            "| append_snapshot_sec =",
-            round(t_append1 - t_append0, 3),
-            flush=True,
-        )
+    df = _fetch_taiex_history()
 
-        t_chart0 = time.perf_counter()
+    if df is not None and not df.empty:
+        _MARKET_INDEX_HISTORY_CACHE[cache_key] = (time.time(), df.copy())
 
-        chart_url = _generate_market_index_kline_chart(df)
+    return df, False
 
-        t_chart1 = time.perf_counter()
 
-        print(
-            "DEBUG market_index chart timing",
-            "| generate_chart_sec =",
-            round(t_chart1 - t_chart0, 3),
-            "| chart_url =",
-            bool(chart_url),
-            "| total_sec =",
-            round(t_chart1 - t0, 3),
-            flush=True,
-        )
+def _get_cached_turnover_history(
+    history_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, bool]:
+    """
+    將 TWSE 成交金額補值與歷史 OHLC 分開快取。
 
-        if chart_url:
-            _MARKET_INDEX_CHART_CACHE[cache_key] = (now, chart_url)
-            return chart_url
+    即使圖表每 15 分鐘更新，也不需要每次重打成交金額 API。
+    """
+    cache_key = "TAIEX:D:TURNOVER"
+    now = time.time()
+    cached = _MARKET_INDEX_TURNOVER_CACHE.get(cache_key)
 
-        return stale_url
+    if cached:
+        ts, df = cached
+
+        if (
+            df is not None
+            and not df.empty
+            and now - ts <= MARKET_INDEX_TURNOVER_CACHE_TTL_SECONDS
+        ):
+            return df.copy(), True
+
+    result = history_df.copy()
+
+    try:
+        enriched = apply_twse_turnover_to_market_df(result)
+
+        if enriched is not None and not enriched.empty:
+            result = enriched
 
     except Exception as exc:
         print(
-            "DEBUG market_index chart timing",
-            "| failed_exception =",
-            exc,
-            "| use_stale_chart =",
-            bool(stale_url),
-            "| total_sec =",
-            round(time.perf_counter() - t0, 3),
+            "DEBUG market_index apply turnover failed",
+            "| error =",
+            repr(exc),
             flush=True,
         )
 
-        _debug("chart failed", exc)
-        return stale_url
+    if result is not None and not result.empty:
+        _MARKET_INDEX_TURNOVER_CACHE[cache_key] = (
+            time.time(),
+            result.copy(),
+        )
+
+    return result, False
 
 
 # =========================
@@ -645,28 +790,41 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
 # =========================
 def _fetch_taiex_history() -> pd.DataFrame:
     """
-    抓加權指數日K歷史資料。
-    依序嘗試：
-    1. yfinance ^TWII
-    2. Yahoo chart API direct
-    3. TWSE MI_5MINS_HIST + FMTQIK
+    抓加權指數日 K 歷史資料。
+
+    預設順序：
+    1. Yahoo chart API direct
+    2. yfinance
+    3. TWSE 月資料 fallback
+
+    可用 MARKET_INDEX_HISTORY_SOURCE_ORDER 調整。
     """
-    sources = [
-        ("yfinance", _fetch_taiex_history_yfinance),
-        ("yahoo_direct", _fetch_taiex_history_yahoo_direct),
-        ("twse", _fetch_taiex_history_twse),
+    fetcher_map = {
+        "yahoo_direct": _fetch_taiex_history_yahoo_direct,
+        "yfinance": _fetch_taiex_history_yfinance,
+        "twse": _fetch_taiex_history_twse,
+    }
+
+    source_order = [
+        name
+        for name in MARKET_INDEX_HISTORY_SOURCE_ORDER
+        if name in fetcher_map
     ]
 
-    for source_name, fetcher in sources:
+    if not source_order:
+        source_order = ["yahoo_direct", "yfinance", "twse"]
+
+    for source_name in source_order:
+        fetcher = fetcher_map[source_name]
         t0 = time.perf_counter()
 
         try:
             df = fetcher()
-
             elapsed = time.perf_counter() - t0
 
             if df is not None and not df.empty:
                 df = _normalize_history_df(df)
+
                 _debug(
                     "history source",
                     source_name,
@@ -689,7 +847,7 @@ def _fetch_taiex_history() -> pd.DataFrame:
                 "history source failed",
                 source_name,
                 "| error =",
-                exc,
+                repr(exc),
                 "| sec =",
                 round(time.perf_counter() - t0, 3),
             )
@@ -709,17 +867,13 @@ def _fetch_taiex_history_yfinance() -> pd.DataFrame:
             auto_adjust=False,
             progress=False,
             threads=False,
-            timeout=10,
+            timeout=MARKET_INDEX_YFINANCE_TIMEOUT_SECONDS,
         )
-    except TypeError:
-        raw = yf.download(
-            "^TWII",
-            period="10mo",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-        )
+    except TypeError as exc:
+        # 不重試一個「沒有 timeout」的 yfinance 呼叫，
+        # 避免 Yahoo direct 失敗後又無限等待。
+        _debug("yfinance timeout parameter unsupported", repr(exc))
+        return pd.DataFrame()
 
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -747,11 +901,11 @@ def _fetch_taiex_history_yahoo_direct() -> pd.DataFrame:
         "Accept": "application/json",
     }
 
-    resp = requests.get(
+    resp = _HTTP_SESSION.get(
         url,
         params=params,
         headers=headers,
-        timeout=10,
+        timeout=MARKET_INDEX_YAHOO_TIMEOUT_SECONDS,
     )
     resp.raise_for_status()
 
@@ -1256,46 +1410,56 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     x_values = list(range(len(plot_df)))
     candle_width = 0.58
 
-    for i in range(len(plot_df)):
-        row = plot_df.iloc[i]
+    open_values = pd.to_numeric(plot_df["Open"], errors="coerce").astype(float).values
+    high_values = pd.to_numeric(plot_df["High"], errors="coerce").astype(float).values
+    low_values = pd.to_numeric(plot_df["Low"], errors="coerce").astype(float).values
+    close_values = pd.to_numeric(plot_df["Close"], errors="coerce").astype(float).values
+    volume_values = (
+        pd.to_numeric(plot_df["Volume"], errors="coerce")
+        .fillna(0)
+        .astype(float)
+        .values
+    )
 
-        open_price = float(row["Open"])
-        high_price = float(row["High"])
-        low_price = float(row["Low"])
-        close_price = float(row["Close"])
-        volume = int(row["Volume"])
+    candle_colors = [
+        "#FF2D2D" if close_price >= open_price else "#00B050"
+        for open_price, close_price in zip(open_values, close_values)
+    ]
 
-        color = "#FF2D2D" if close_price >= open_price else "#00B050"
+    body_bottom = [
+        min(open_price, close_price)
+        for open_price, close_price in zip(open_values, close_values)
+    ]
+    body_height = [
+        max(abs(close_price - open_price), 0.01)
+        for open_price, close_price in zip(open_values, close_values)
+    ]
 
-        ax_k.vlines(
-            i,
-            low_price,
-            high_price,
-            linewidth=1.0,
-            color=color,
-        )
+    # 一次建立整組 artists，避免 60 根 K 棒逐根呼叫造成額外開銷。
+    ax_k.vlines(
+        x_values,
+        low_values,
+        high_values,
+        linewidth=1.0,
+        colors=candle_colors,
+    )
 
-        lower = min(open_price, close_price)
-        height = abs(close_price - open_price)
-        if height <= 0:
-            height = 0.01
+    ax_k.bar(
+        x_values,
+        body_height,
+        bottom=body_bottom,
+        width=candle_width,
+        color=candle_colors,
+        align="center",
+    )
 
-        ax_k.bar(
-            i,
-            height,
-            bottom=lower,
-            width=candle_width,
-            color=color,
-            align="center",
-        )
-
-        ax_v.bar(
-            i,
-            volume,
-            width=candle_width,
-            color=color,
-            align="center",
-        )
+    ax_v.bar(
+        x_values,
+        volume_values,
+        width=candle_width,
+        color=candle_colors,
+        align="center",
+    )
 
     # 均線
     ma_styles = {
@@ -1340,7 +1504,14 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ax_v.spines["top"].set_visible(False)
     ax_v.spines["right"].set_visible(False)
 
-    fig.tight_layout()
+    # 固定留白比 tight_layout 更穩定，也少一次 layout 計算。
+    fig.subplots_adjust(
+        left=0.09,
+        right=0.97,
+        top=0.97,
+        bottom=0.08,
+        hspace=0.05,
+    )
 
     try:
         return publish_figure(fig, "taiex_market_index_kline")
