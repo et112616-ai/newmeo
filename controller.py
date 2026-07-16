@@ -4,7 +4,7 @@ from __future__ import annotations
 # VERIFIED DWM CARD PRICE FIX — open this file and check line 4
 # W / M charts use daily history for card price, change and date.
 # ============================================================
-DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v5-VERIFIED-DAILY-CARD-PRICE"
+DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
 
 from services.sinopac_quote_service import (
     append_stock_snapshot_to_intraday_df_fast,
@@ -1417,6 +1417,145 @@ def _apply_realtime_snapshot_price_meta(price_meta, price_df, tf: str):
     )
 
     return realtime_meta
+
+
+def _apply_yahoo_intraday_price_meta(price_meta, meta, chart_tf: str):
+    """
+    Shioaji 尚未熱機時，使用 Yahoo chart API 盤中資料覆蓋 D/W/M 圖卡資訊。
+
+    注意：
+    - 漲跌採市場標準：最新價 - 前一日收盤價。
+    - 不是用最新價 - 今日開盤價。
+    - K 線圖片本身仍維持原本的 D / W / M 資料。
+    """
+    normalized_tf = normalize_time_frame(chart_tf)
+
+    if normalized_tf not in {"D", "W", "M"}:
+        return price_meta
+
+    try:
+        import os
+        import pandas as pd
+        from types import SimpleNamespace
+
+        stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+        yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
+
+        yahoo_df = get_stock_intraday_yahoo_direct(
+            stock_id=stock_id,
+            yf_symbol=yf_symbol,
+            time_frame="1m",
+            timeout=int(os.getenv("YAHOO_CARD_TIMEOUT_SECONDS", "4")),
+        )
+
+        if yahoo_df is None or yahoo_df.empty:
+            print(
+                "DEBUG DWM yahoo card price skipped",
+                "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                "| stock_id =", stock_id,
+                "| chart_tf =", normalized_tf,
+                "| reason = empty_yahoo_intraday",
+                flush=True,
+            )
+            return price_meta
+
+        close_series = pd.to_numeric(yahoo_df.get("Close"), errors="coerce").dropna()
+
+        if close_series.empty:
+            return price_meta
+
+        attrs = dict(getattr(yahoo_df, "attrs", {}) or {})
+
+        try:
+            regular_price = float(attrs.get("regular_market_price") or 0.0)
+        except Exception:
+            regular_price = 0.0
+
+        latest_price = regular_price if regular_price > 0 else float(close_series.iloc[-1])
+
+        try:
+            previous_close = float(attrs.get("previous_close") or 0.0)
+        except Exception:
+            previous_close = 0.0
+
+        if latest_price <= 0 or previous_close <= 0:
+            print(
+                "DEBUG DWM yahoo card price skipped",
+                "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                "| stock_id =", stock_id,
+                "| chart_tf =", normalized_tf,
+                "| latest =", latest_price,
+                "| previous_close =", previous_close,
+                "| reason = invalid_price_or_previous_close",
+                flush=True,
+            )
+            return price_meta
+
+        yahoo_ts = pd.to_datetime(yahoo_df.index[-1], errors="coerce")
+
+        if pd.isna(yahoo_ts):
+            return price_meta
+
+        # Yahoo 若比日 K 還舊，不覆蓋，避免非交易日反而倒退。
+        current_stamp = str(getattr(price_meta, "time_stamp", "") or "").strip()
+
+        if current_stamp:
+            current_ts = pd.to_datetime(current_stamp, errors="coerce")
+
+            if pd.notna(current_ts) and yahoo_ts.normalize() < current_ts.normalize():
+                print(
+                    "DEBUG DWM yahoo card price skipped",
+                    "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                    "| stock_id =", stock_id,
+                    "| chart_tf =", normalized_tf,
+                    "| yahoo_time =", str(yahoo_ts),
+                    "| current_time =", current_stamp,
+                    "| reason = yahoo_older_than_daily",
+                    flush=True,
+                )
+                return price_meta
+
+        price_change = latest_price - previous_close
+        change_pct = price_change / previous_close * 100
+        time_text = yahoo_ts.strftime("%Y-%m-%d %H:%M:%S")
+
+        yahoo_meta = SimpleNamespace(
+            price_info=_fmt_stock_card_price(latest_price),
+            change_info=(
+                f"{_fmt_stock_card_signed(price_change)} "
+                f"({_fmt_stock_card_signed_pct(change_pct)})"
+            ),
+            time_stamp=time_text,
+            price_change=price_change,
+            latest_price=latest_price,
+        )
+
+        print(
+            "DEBUG DWM YAHOO CARD PRICE ACTIVE",
+            "| version =", DWM_CARD_PRICE_FIX_VERSION,
+            "| stock_id =", stock_id,
+            "| chart_tf =", normalized_tf,
+            "| latest =", latest_price,
+            "| previous_close =", previous_close,
+            "| change =", price_change,
+            "| pct =", change_pct,
+            "| yahoo_time =", time_text,
+            "| source = yahoo_direct",
+            flush=True,
+        )
+
+        return yahoo_meta
+
+    except Exception as exc:
+        print(
+            "DEBUG DWM yahoo card price failed",
+            "| version =", DWM_CARD_PRICE_FIX_VERSION,
+            "| stock_id =", str(getattr(meta, "stock_id", "") or ""),
+            "| chart_tf =", normalized_tf,
+            "| error =", repr(exc),
+            flush=True,
+        )
+        return price_meta
 
 
 def _append_realtime_snapshot_row(df, snapshot: dict):
@@ -6382,6 +6521,19 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     price_df,
                     price_tf,
                 )
+
+                # Shioaji 尚未熱機時，使用 Yahoo 盤中資料更新圖卡價格、
+                # 對前收漲跌與時間；不改動 D / W / M K 線圖片。
+                if price_source != "shioaji_snapshot":
+                    yahoo_price_meta = _apply_yahoo_intraday_price_meta(
+                        price_meta,
+                        meta,
+                        tf,
+                    )
+
+                    if yahoo_price_meta is not price_meta:
+                        price_meta = yahoo_price_meta
+                        price_source = "yahoo_direct"
 
             t_price1 = time.perf_counter()
 
