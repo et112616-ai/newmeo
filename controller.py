@@ -6,6 +6,7 @@ from __future__ import annotations
 # ============================================================
 DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
+MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -1543,7 +1544,7 @@ def _apply_realtime_snapshot_price_meta(price_meta, price_df, tf: str):
             parsed = pd.to_datetime(timestamp, errors="coerce")
 
             if pd.notna(parsed):
-                date_text = parsed.strftime("%Y-%m-%d")
+                date_text = parsed.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             date_text = timestamp[:10]
 
@@ -3358,6 +3359,139 @@ def _build_market_index_placeholder_flex(
         },
     }
 
+
+def _parse_card_update_time(value: str):
+    """將圖卡更新時間解析為台北時間的 naive datetime。"""
+    text = str(value or "").strip()
+
+    if not text or text in {"--", "None", "nan"}:
+        return None, False
+
+    has_clock = ":" in text
+    normalized = text.replace("/", "-")
+
+    candidates = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%m-%d %H:%M:%S",
+        "%m-%d %H:%M",
+    ]
+
+    for fmt in candidates:
+        try:
+            parsed = datetime.strptime(normalized, fmt)
+
+            # 沒有年份的格式，補上台北當年。
+            if fmt.startswith("%m"):
+                parsed = parsed.replace(
+                    year=datetime.now(ZoneInfo("Asia/Taipei")).year
+                )
+
+            return parsed, has_clock
+        except Exception:
+            continue
+
+    try:
+        import pandas as pd
+
+        parsed = pd.to_datetime(normalized, errors="coerce")
+        if pd.isna(parsed):
+            return None, has_clock
+
+        if getattr(parsed, "tzinfo", None) is not None:
+            parsed = parsed.tz_convert("Asia/Taipei").tz_localize(None)
+
+        return parsed.to_pydatetime(), has_clock
+    except Exception:
+        return None, has_clock
+
+
+def _short_card_update_time(value: str) -> str:
+    text = str(value or "--").strip()
+    parsed, has_clock = _parse_card_update_time(text)
+
+    if parsed is None:
+        return text
+
+    now_tpe = datetime.now(ZoneInfo("Asia/Taipei")).replace(tzinfo=None)
+
+    if has_clock:
+        if parsed.date() == now_tpe.date():
+            return parsed.strftime("%H:%M")
+        return parsed.strftime("%m/%d %H:%M")
+
+    return parsed.strftime("%m/%d")
+
+
+def _stock_card_freshness(
+    update_time: str,
+    active_mode: str,
+    current_tf: str,
+    price_source: str = "",
+) -> tuple[str, str]:
+    """
+    回傳 (狀態文字, 顏色)。
+
+    規則：
+    - 盤中資料 0~2 分鐘：即時
+    - 3~10 分鐘：稍有延遲
+    - 超過 10 分鐘：延遲行情
+    - 收盤後同日且最後資料接近收盤：收盤資料
+    - 只有日期、沒有時間：收盤資料
+    """
+    parsed, has_clock = _parse_card_update_time(update_time)
+    now_tpe = datetime.now(ZoneInfo("Asia/Taipei")).replace(tzinfo=None)
+    tf = normalize_time_frame(current_tf)
+    mode = _normalize_action(active_mode)
+    source = str(price_source or "").strip().lower()
+
+    colors = {
+        "即時": "#16A34A",
+        "稍有延遲": "#D97706",
+        "延遲行情": "#DC2626",
+        "收盤資料": "#6B7280",
+        "前一交易日": "#6B7280",
+        "時間未知": "#9CA3AF",
+    }
+
+    if parsed is None:
+        return "時間未知", colors["時間未知"]
+
+    intraday_context = mode == "instant" or tf in INTRADAY_TIME_FRAMES
+
+    # 日／週／月歷史資料通常只有日期，不應假裝是即時資料。
+    if not has_clock:
+        if parsed.date() < now_tpe.date():
+            return "收盤資料", colors["收盤資料"]
+        return "收盤資料", colors["收盤資料"]
+
+    # 不是今日資料，明確標示為前一交易日。
+    if parsed.date() < now_tpe.date():
+        return "前一交易日", colors["前一交易日"]
+
+    # 未來時間通常是時區誤差，當作 0 分鐘處理。
+    age_minutes = max(0.0, (now_tpe - parsed).total_seconds() / 60.0)
+    now_clock = now_tpe.time()
+    update_clock = parsed.time()
+
+    # 台股收盤後，若同日最後資料已接近收盤，顯示收盤資料而非延遲。
+    if now_clock > time(13, 35) and update_clock >= time(13, 20):
+        return "收盤資料", colors["收盤資料"]
+
+    # 非盤中模式但有盤中時間，仍可依新鮮度標示。
+    if age_minutes <= 2.0:
+        return "即時", colors["即時"]
+
+    if age_minutes <= 10.0:
+        return "稍有延遲", colors["稍有延遲"]
+
+    # Yahoo 的盤中資料常有延遲；來源資訊只用於 log，不硬改時間判斷。
+    if intraday_context or source in {"yahoo_direct", "unified_1m_base"}:
+        return "延遲行情", colors["延遲行情"]
+
+    return "延遲行情", colors["延遲行情"]
+
 def _build_chart_flex(
     stock_id: str,
     stock_name: str,
@@ -3369,6 +3503,7 @@ def _build_chart_flex(
     active_mode: str,
     current_tf: str,
     image_aspect_ratio: str = "4:3",
+    price_source: str = "",
 ) -> dict[str, Any]:
     color = _price_color(price_change)
     active_mode_norm = _normalize_action(active_mode)
@@ -3386,14 +3521,26 @@ def _build_chart_flex(
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
 
-    # 讓更新時間不要太長。
-    # 例如 2026-07-06 14:30:00 -> 14:30:00
     update_text = str(update_time or "--").strip()
+    update_short = _short_card_update_time(update_text)
+    freshness_text, freshness_color = _stock_card_freshness(
+        update_time=update_text,
+        active_mode=active_mode_norm,
+        current_tf=tf_norm,
+        price_source=price_source,
+    )
 
-    if len(update_text) >= 19 and update_text[4:5] in {"-", "/"}:
-        update_short = update_text[11:19]
-    else:
-        update_short = update_text
+    print(
+        "DEBUG stock card freshness",
+        "| version =", MARKET_DATA_FRESHNESS_VERSION,
+        "| stock_id =", stock_id,
+        "| mode =", active_mode_norm,
+        "| tf =", tf_norm,
+        "| source =", price_source,
+        "| update_time =", update_text,
+        "| status =", freshness_text,
+        flush=True,
+    )
 
     price_text = str(price_info or "--").strip()
     change_text = str(change_info or "--").strip()
@@ -3465,9 +3612,10 @@ def _build_chart_flex(
             "contents": [
                 {
                     "type": "text",
-                    "text": f"更新 {update_short}",
+                    "text": f"更新 {update_short}｜{freshness_text}",
                     "size": "xs",
-                    "color": "#888888",
+                    "weight": "bold",
+                    "color": freshness_color,
                     "flex": 5,
                     "wrap": True,
                 },
@@ -6508,6 +6656,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 active_mode="post_market",
                 current_tf="D",
                 image_aspect_ratio="1:1",
+                price_source="daily_history",
             )
 
             return _reply_with_title(f"{stock_name} 盤後分析", flex)
@@ -6791,6 +6940,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     price_change=price_meta.price_change,
                     active_mode="instant",
                     current_tf=tf,
+                    price_source=price_source,
                 )
 
                 t_flex1 = time.perf_counter()
@@ -6863,6 +7013,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     price_change=price_meta.price_change,
                     active_mode="k_line",
                     current_tf=tf,
+                    price_source=price_source,
                 )
 
                 t_flex1 = time.perf_counter()
