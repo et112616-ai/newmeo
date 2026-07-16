@@ -20,6 +20,7 @@ from utils.formatter import normalize_time_frame
 plt.rcParams["axes.unicode_minus"] = False
 
 INTRADAY_AXIS_FIX_VERSION = "2026-07-16-v2-OHLC-OPENING-POINT"
+INTRADAY_VOLUME_FIX_VERSION = "2026-07-16-v1-COMPACT-5M-VOLUME"
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
@@ -418,6 +419,101 @@ def _annotate_high_low(
             flush=True,
         )
 
+
+def _infer_intraday_interval_minutes(df: pd.DataFrame) -> float:
+    """推估盤中資料的時間間隔，供成交量顯示密度判斷。"""
+    try:
+        if df is None or len(df) < 2 or not isinstance(df.index, pd.DatetimeIndex):
+            return 0.0
+
+        index = pd.DatetimeIndex(df.index).sort_values().unique()
+
+        if len(index) < 2:
+            return 0.0
+
+        diffs = pd.Series(index[1:] - index[:-1]).dt.total_seconds() / 60.0
+        diffs = diffs[(diffs > 0) & (diffs <= 120)]
+
+        if diffs.empty:
+            return 0.0
+
+        return float(diffs.median())
+
+    except Exception:
+        return 0.0
+
+
+def _prepare_intraday_volume_display(df: pd.DataFrame) -> tuple[pd.DataFrame, float, str]:
+    """
+    準備即時圖的成交量顯示資料。
+
+    - 原始為 1 分資料時，價格折線仍保留全部 1 分資料，成交量則彙總成 5 分鐘，
+      避免約 270 根柱子擠成一片。
+    - 原始已是 5 分或更大週期時，直接使用原資料。
+    - 回傳：顯示用 DataFrame、顯示間隔分鐘數、顯示模式。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(), 0.0, "empty"
+
+    attrs_backup = dict(getattr(df, "attrs", {}) or {})
+    work = df.copy()
+
+    if not isinstance(work.index, pd.DatetimeIndex):
+        try:
+            work.index = pd.to_datetime(work.index, errors="coerce")
+            work = work[~work.index.isna()].copy()
+        except Exception:
+            return pd.DataFrame(), 0.0, "invalid_index"
+
+    if work.empty:
+        return work, 0.0, "empty"
+
+    try:
+        work = work.sort_index()
+        work = work[~work.index.duplicated(keep="last")].copy()
+    except Exception:
+        pass
+
+    for col in ["Open", "Close", "Volume"]:
+        if col not in work.columns:
+            if col == "Volume":
+                work[col] = 0.0
+            else:
+                return pd.DataFrame(), 0.0, "missing_ohlc"
+
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    work["Volume"] = work["Volume"].fillna(0.0)
+    input_interval = _infer_intraday_interval_minutes(work)
+
+    # 1 分資料一律把成交量彙總成 5 分鐘；價格折線本身仍使用原 df，不受影響。
+    if 0 < input_interval <= 1.5:
+        volume_df = work.resample(
+            "5min",
+            label="left",
+            closed="left",
+        ).agg(
+            {
+                "Open": "first",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+        volume_df = volume_df.dropna(subset=["Open", "Close"]).copy()
+        display_interval = 5.0
+        mode = "1m_to_5m"
+    else:
+        volume_df = work[["Open", "Close", "Volume"]].copy()
+        display_interval = input_interval if input_interval > 0 else 5.0
+        mode = "native"
+
+    try:
+        volume_df.attrs.update(attrs_backup)
+    except Exception:
+        pass
+
+    return volume_df, display_interval, mode
+
 def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> str:
     if df is None or df.empty:
         return _empty_chart(f"{stock_id}", "No intraday data")
@@ -480,8 +576,8 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.95, 4.6, 1.45],
-        hspace=0.05,
+        height_ratios=[0.95, 5.05, 0.88],
+        hspace=0.07,
     )
 
     ax_info = fig.add_subplot(gs[0])
@@ -596,33 +692,66 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _apply_axis_style(ax, x_labelsize=12, y_labelsize=12)
 
     # ===== 成交量圖 =====
+    # 價格線保留完整分鐘資料；若原始是 1 分資料，只把成交量彙總成 5 分鐘顯示。
+    volume_df, display_interval_minutes, volume_mode = _prepare_intraday_volume_display(df)
+
+    if volume_df is None or volume_df.empty:
+        volume_df = df[["Open", "Close", "Volume"]].copy()
+        display_interval_minutes = max(_infer_intraday_interval_minutes(volume_df), 1.0)
+        volume_mode = "fallback"
+
     vol_colors = []
 
-    for _, row in df.iterrows():
+    for _, row in volume_df.iterrows():
         try:
             o = float(row["Open"])
             c = float(row["Close"])
-            vol_colors.append("#E74C3C" if c >= o else "#27AE60")
+            # 使用較柔和的漲跌色，並搭配 alpha，避免成交量搶過價格線。
+            vol_colors.append("#D95F59" if c >= o else "#49A978")
         except Exception:
-            vol_colors.append("#E74C3C")
+            vol_colors.append("#D95F59")
 
-    volume_lot_series = df["Volume"].fillna(0).astype(float) / 1000.0
+    volume_lot_series = (
+        pd.to_numeric(volume_df["Volume"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+        / 1000.0
+    )
 
-    bar_width = 0.0025 if len(df) > 100 else 0.0045
+    # Matplotlib 日期座標的寬度單位是「天」。柱寬約採顯示週期的 72%。
+    bar_width = max(display_interval_minutes * 0.72 / 1440.0, 1.0 / 1440.0)
+    bar_width = min(bar_width, 12.0 / 1440.0)
 
     ax_v.bar(
-        df.index,
+        volume_df.index,
         volume_lot_series,
         width=bar_width,
         color=vol_colors,
+        alpha=0.66,
         edgecolor="none",
+        align="center",
+        zorder=2,
     )
 
     ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
     _apply_axis_style(ax_v, x_labelsize=12, y_labelsize=12)
+    ax_v.yaxis.set_major_locator(mticker.MaxNLocator(nbins=4, min_n_ticks=3))
+    ax_v.margins(y=0.18)
 
     ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    print(
+        "DEBUG intraday volume display",
+        "| version =", INTRADAY_VOLUME_FIX_VERSION,
+        "| stock_id =", stock_id,
+        "| mode =", volume_mode,
+        "| source_rows =", len(df),
+        "| display_rows =", len(volume_df),
+        "| display_interval_min =", round(display_interval_minutes, 3),
+        "| bar_width_days =", round(bar_width, 7),
+        flush=True,
+    )
 
     plt.setp(ax.get_xticklabels(), visible=False)
 
