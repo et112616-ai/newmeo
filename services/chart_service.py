@@ -19,6 +19,8 @@ from utils.formatter import normalize_time_frame
 
 plt.rcParams["axes.unicode_minus"] = False
 
+INTRADAY_AXIS_FIX_VERSION = "2026-07-16-v2-OHLC-OPENING-POINT"
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 
@@ -158,53 +160,112 @@ def _get_reference_price(df: pd.DataFrame) -> float:
 
 def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     """
-    讓平盤價置於 Y 軸中間，並在右側顯示漲跌幅百分比。
+    設定台股即時圖價格軸與右側漲跌幅軸。
+
+    重要：
+    - Y 軸範圍使用今日 Open / High / Low / Close 與昨收共同決定。
+    - 不再強制把昨收置於正中央。
+    - 因此今日最低價或最高價即使只出現在分鐘 K 的 Low / High，
+      也一定會被納入可視範圍。
     """
     ref_price = _get_reference_price(df)
 
-    close = df["Close"].astype(float).dropna()
+    try:
+        ref_price = float(ref_price)
+    except Exception:
+        ref_price = 0.0
 
-    if close.empty:
+    price_candidates: list[float] = []
+    debug_values: dict[str, float] = {}
+
+    for col in ["Open", "High", "Low", "Close"]:
+        if col not in df.columns:
+            continue
+
+        values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+        if values.empty:
+            continue
+
+        col_min = float(values.min())
+        col_max = float(values.max())
+        price_candidates.extend([col_min, col_max])
+
+        if col == "Open":
+            debug_values["open"] = float(values.iloc[0])
+        elif col == "High":
+            debug_values["high"] = col_max
+        elif col == "Low":
+            debug_values["low"] = col_min
+        elif col == "Close":
+            debug_values["close_min"] = col_min
+            debug_values["close_max"] = col_max
+
+    if ref_price > 0:
+        price_candidates.append(ref_price)
+
+    price_candidates = [
+        value for value in price_candidates
+        if pd.notna(value) and float(value) > 0
+    ]
+
+    if not price_candidates:
         return ref_price
 
-    max_delta = max(
-        abs(float(close.max()) - ref_price),
-        abs(float(close.min()) - ref_price),
-    )
+    price_min = min(price_candidates)
+    price_max = max(price_candidates)
+    price_span = price_max - price_min
 
-    if max_delta <= 0:
-        max_delta = max(ref_price * 0.005, 0.5)
+    if price_span <= 0:
+        price_span = max(ref_price * 0.01, price_max * 0.01, 1.0)
 
-    max_delta *= 1.2
-
-    ymin = ref_price - max_delta
-    ymax = ref_price + max_delta
+    # 保留約 15% 上下空間，讓高低點標示與線條不貼邊。
+    padding = max(price_span * 0.15, ref_price * 0.0025, 0.5)
+    ymin = price_min - padding
+    ymax = price_max + padding
 
     ax.set_ylim(ymin, ymax)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=6, min_n_ticks=5))
 
     ax.axhline(
         ref_price,
         linestyle="--",
-        linewidth=1.0,
-        alpha=0.8,
-        label="Prev Close",
+        linewidth=1.1,
+        color="#7F8C8D",
+        alpha=0.85,
+        zorder=1,
     )
 
-    def price_to_pct(price):
-        return (price - ref_price) / ref_price * 100
+    if ref_price > 0:
+        def price_to_pct(price):
+            return (price - ref_price) / ref_price * 100
 
-    def pct_to_price(pct):
-        return ref_price * (1 + pct / 100)
+        def pct_to_price(pct):
+            return ref_price * (1 + pct / 100)
 
-    secax = ax.secondary_yaxis(
-        "right",
-        functions=(price_to_pct, pct_to_price),
+        secax = ax.secondary_yaxis(
+            "right",
+            functions=(price_to_pct, pct_to_price),
+        )
+
+        secax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
+        )
+        secax.tick_params(axis="y", labelsize=DEFAULT_AXIS_TICK_FONTSIZE)
+
+    print(
+        "DEBUG intraday axis bounds",
+        "| version =", INTRADAY_AXIS_FIX_VERSION,
+        "| ref =", ref_price,
+        "| open =", debug_values.get("open"),
+        "| high =", debug_values.get("high"),
+        "| low =", debug_values.get("low"),
+        "| close_min =", debug_values.get("close_min"),
+        "| close_max =", debug_values.get("close_max"),
+        "| ymin =", round(ymin, 4),
+        "| ymax =", round(ymax, 4),
+        flush=True,
     )
-
-    secax.yaxis.set_major_formatter(
-        mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
-    )
-    secax.tick_params(axis="y", labelsize=DEFAULT_AXIS_TICK_FONTSIZE)
 
     return ref_price
 
@@ -467,19 +528,39 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     # ===== 主圖：即時折線 =====
     line_color = "#E74C3C" if latest >= ref_price else "#27AE60"
 
+    # 分鐘折線原本只畫 Close，第一點可能不是今日開盤價。
+    # 在最前面補一個 09:00 的真正開盤價，讓走勢從 Open 出發。
+    line_index = pd.DatetimeIndex(df.index)
+    line_values = close.astype(float).tolist()
+
+    try:
+        first_ts = pd.Timestamp(line_index[0])
+        session_open_ts = first_ts.normalize() + pd.Timedelta(hours=9)
+
+        if first_ts < session_open_ts:
+            session_open_ts = first_ts
+
+        line_index = pd.DatetimeIndex([session_open_ts]).append(line_index)
+        line_values = [float(open_price)] + line_values
+    except Exception:
+        line_values = close.astype(float).tolist()
+
+    line_series = pd.Series(line_values, index=line_index, dtype="float64")
+    line_array = line_series.to_numpy(dtype="float64")
+
     ax.plot(
-        df.index,
-        close,
+        line_series.index,
+        line_array,
         linewidth=2.6,
         color=line_color,
         zorder=3,
     )
 
     ax.fill_between(
-        df.index,
-        close,
+        line_series.index,
+        line_array,
         ref_price,
-        where=close >= ref_price,
+        where=line_array >= ref_price,
         alpha=0.12,
         color="#E74C3C",
         interpolate=True,
@@ -487,27 +568,28 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     )
 
     ax.fill_between(
-        df.index,
-        close,
+        line_series.index,
+        line_array,
         ref_price,
-        where=close < ref_price,
+        where=line_array < ref_price,
         alpha=0.10,
         color="#27AE60",
         interpolate=True,
         zorder=2,
     )
 
-    # 參考線 / 昨收線
-    ax.axhline(
-        ref_price,
-        linestyle="--",
-        linewidth=1.3,
-        color="#7F8C8D",
-        alpha=0.85,
-        zorder=1,
+    print(
+        "DEBUG intraday opening point",
+        "| version =", INTRADAY_AXIS_FIX_VERSION,
+        "| stock_id =", stock_id,
+        "| opening_time =", str(line_series.index[0]),
+        "| opening_price =", float(line_array[0]),
+        "| first_close_time =", str(df.index[0]),
+        "| first_close =", float(close.iloc[0]),
+        flush=True,
     )
 
-    # 自動置中價格軸 + 右側漲跌幅
+    # Y 軸採今日 OHLC + 昨收範圍，右側顯示相對昨收漲跌幅。
     _set_tw_stock_intraday_axis(ax, df)
     _set_centered_price_axis(ax, df)
 
