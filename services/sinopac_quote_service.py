@@ -21,7 +21,16 @@ LOGIN_TTL_SECONDS = 60 * 60 * 12
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
 
-INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v1-UNIFIED-1M-BASE"
+INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
+INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
+INTRADAY_RESAMPLE_RULES = {
+    "1m": "",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "60m": "60min",
+}
+YAHOO_INTRADAY_1M_RANGE = os.getenv("YAHOO_INTRADAY_1M_RANGE", "5d").strip() or "5d"
 _YAHOO_INTRADAY_1M_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 _YAHOO_INTRADAY_1M_CACHE_LOCK = threading.Lock()
 YAHOO_INTRADAY_1M_CACHE_TTL_SECONDS = float(
@@ -563,7 +572,7 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
 
     time_frame:
     - "1m": 回傳 1分K
-    - "5m": 由 1分K resample 成 5分K
+    - "5m" / "15m" / "30m" / "60m": 由同一份 1分K resample
     """
     import time
     from datetime import timedelta
@@ -580,7 +589,7 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
         )
         return None
 
-    if tf not in {"1m", "5m"}:
+    if tf not in INTRADAY_TIME_FRAMES:
         print(
             "DEBUG shioaji kbars | unsupported tf =",
             tf,
@@ -722,9 +731,10 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
         df["High"] = df[["High", "Open", "Close"]].max(axis=1)
         df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
 
-        if tf == "5m":
+        rule = INTRADAY_RESAMPLE_RULES.get(tf, "")
+        if rule:
             df = (
-                df.resample("5min")
+                df.resample(rule, label="left", closed="left")
                 .agg(
                     {
                         "Open": "first",
@@ -736,7 +746,6 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
                 )
                 .dropna(subset=["Open", "High", "Low", "Close"])
             )
-
             df = df[df["Close"] > 0]
 
         print(
@@ -783,33 +792,38 @@ def _copy_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _format_yahoo_intraday_time_frame(raw_df: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """從同一份 1 分底稿輸出 1m / 5m，並保留原始最新報價時間。"""
+    """從同一份多日 1 分底稿輸出 1/5/15/30/60 分，並保留原始最新報價時間。"""
+    tf = str(tf or "1m").strip()
     work = _copy_intraday_df(raw_df)
     attrs = dict(getattr(work, "attrs", {}) or {})
 
-    if work.empty or tf == "1m":
-        work.attrs.update(attrs)
-        work.attrs["intraday_base_tf"] = "1m"
-        work.attrs["display_tf"] = tf
+    if work.empty or tf not in INTRADAY_TIME_FRAMES:
         return work
 
-    result = (
-        work.resample("5min", label="left", closed="left")
-        .agg(
-            {
-                "Open": "first",
-                "High": "max",
-                "Low": "min",
-                "Close": "last",
-                "Volume": "sum",
-            }
+    rule = INTRADAY_RESAMPLE_RULES.get(tf, "")
+
+    if not rule:
+        result = work.copy()
+    else:
+        result = (
+            work.resample(rule, label="left", closed="left")
+            .agg(
+                {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum",
+                }
+            )
+            .dropna(subset=["Open", "High", "Low", "Close"])
         )
-        .dropna(subset=["Open", "High", "Low", "Close"])
-    )
-    result = result[result["Close"] > 0]
+        result = result[result["Close"] > 0]
+
     result.attrs.update(attrs)
     result.attrs["intraday_base_tf"] = "1m"
     result.attrs["display_tf"] = tf
+    result.attrs["intraday_unified_version"] = INTRADAY_UNIFIED_FIX_VERSION
 
     if len(work):
         result.attrs["latest_quote_time"] = str(work.index[-1])
@@ -819,7 +833,6 @@ def _format_yahoo_intraday_time_frame(raw_df: pd.DataFrame, tf: str) -> pd.DataF
             pass
 
     return result
-
 
 def get_stock_intraday_yahoo_direct(
     stock_id: str,
@@ -831,10 +844,10 @@ def get_stock_intraday_yahoo_direct(
     使用 Yahoo chart API direct 抓個股盤中資料。
 
     修正版重點：
-    - Yahoo 永遠只抓一份 1 分原始資料。
-    - 5 分資料由同一份 1 分底稿聚合。
-    - 1 分底稿短暫快取，使用者連續切換 1m / 5m 時會看到同一批資料。
-    - 5 分圖仍保留原始 1 分最新時間於 attrs["latest_quote_time"]。
+    - Yahoo 永遠只抓一份多日 1 分原始資料。
+    - 1/5/15/30/60 分全部由同一份 1 分底稿輸出。
+    - 1 分底稿短暫快取，連續切換不同分 K 時會使用同一批資料。
+    - 聚合後仍保留原始 1 分最新時間於 attrs["latest_quote_time"]。
     """
     import time
     from urllib.parse import quote
@@ -848,7 +861,7 @@ def get_stock_intraday_yahoo_direct(
     yf_symbol = str(yf_symbol or "").strip()
     tf = str(time_frame or "1m").strip()
 
-    if tf not in {"1m", "5m"}:
+    if tf not in INTRADAY_TIME_FRAMES:
         print("DEBUG yahoo_direct intraday | unsupported tf =", tf, flush=True)
         return None
 
@@ -901,7 +914,7 @@ def get_stock_intraday_yahoo_direct(
         try:
             url = "https://query1.finance.yahoo.com/v8/finance/chart/" + quote(symbol, safe="")
             params = {
-                "range": "1d",
+                "range": YAHOO_INTRADAY_1M_RANGE,
                 "interval": "1m",
                 "includePrePost": "false",
                 "events": "history",
