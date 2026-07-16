@@ -38,6 +38,8 @@ except Exception:
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
+FUTURES_ALL_SESSION_FIX_VERSION = "2026-07-16-v1-OUTRIGHT-ONLY-ALL-SESSION"
+
 
 @dataclass
 class FuturesSnapshot:
@@ -299,14 +301,32 @@ def _request_finmind_futures_daily(futures_id: str) -> list[dict]:
         return []
 
 
+def _contract_digits(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _is_calendar_spread_contract(value: Any) -> bool:
+    """
+    FinMind 的價差契約常見格式：202608/202609。
+    這類資料是兩個月份的價差，不是 202608 近月期貨本身。
+    """
+    digits = _contract_digits(value)
+    return len(digits) > 6
+
+
 def _normalize_contract_date(value: Any) -> str:
     """
-    支援：
-    202607
-    2026/07
-    2026-07
+    只接受單一月份的期貨契約：
+    - 202607
+    - 2026/07
+    - 2026-07
 
-    空白、全月份、所有契約都排除。
+    明確排除：
+    - 202607/202608 等跨月價差契約
+    - 全月份 / 所有契約
+
+    舊版使用 digits[:6]，會把 202608/202609 錯認成 202608，
+    使 4.51 之類的價差價格混入近月 K 線。
     """
     s = str(value or "").strip()
 
@@ -318,12 +338,20 @@ def _normalize_contract_date(value: Any) -> str:
     if "all" in lower or "全" in s or "所有" in s:
         return ""
 
-    digits = "".join(ch for ch in s if ch.isdigit())
+    digits = _contract_digits(s)
 
-    if len(digits) >= 6:
-        return digits[:6]
+    # 單一月契約只能剛好有 YYYYMM 六位數。
+    # 12 位數通常是 YYYYMM/YYYYMM 的價差契約，必須排除。
+    if len(digits) != 6:
+        return ""
 
-    return ""
+    year = int(digits[:4])
+    month = int(digits[4:6])
+
+    if year < 2000 or year > 2100 or month < 1 or month > 12:
+        return ""
+
+    return digits
 
 
 def _format_contract_date(value: Any) -> str:
@@ -370,8 +398,11 @@ def _is_afterhours_session(value: Any) -> bool:
 def _is_regular_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
+    # TaiwanFuturesDaily 的 trading_session=position 並不是純 OI 空列；
+    # 官方資料中它同時包含日盤 OHLC、成交量、結算價與未平倉。
+    # 因此在本服務中應視為日盤列。
     if _is_position_session(text):
-        return False
+        return True
 
     return (
         "regular" in text
@@ -885,6 +916,20 @@ def _combine_all_session_rows(rows: list[dict]) -> dict | None:
                 combined[key] = r.get(key)
                 break
 
+    print(
+        "DEBUG futures all-session combined",
+        "| version =", FUTURES_ALL_SESSION_FIX_VERSION,
+        "| date =", combined.get("_trade_date_norm"),
+        "| contract =", combined.get("_contract_norm"),
+        "| source_sessions =", [_get_session_value(r) for r in valid],
+        "| open =", combined.get("open"),
+        "| high =", combined.get("max"),
+        "| low =", combined.get("min"),
+        "| close =", combined.get("close"),
+        "| volume =", combined.get("volume"),
+        flush=True,
+    )
+
     return combined
 
 def _get_session_value(row: dict) -> str:
@@ -928,8 +973,11 @@ def _is_afterhours_session(value) -> bool:
 def _is_regular_session(value: Any) -> bool:
     text = str(value or "").strip().lower()
 
+    # TaiwanFuturesDaily 的 trading_session=position 並不是純 OI 空列；
+    # 官方資料中它同時包含日盤 OHLC、成交量、結算價與未平倉。
+    # 因此在本服務中應視為日盤列。
     if _is_position_session(text):
-        return False
+        return True
 
     return (
         "regular" in text
@@ -1004,9 +1052,16 @@ def _prepare_futures_kline_rows(
         return []
 
     same_contract_rows: list[dict] = []
+    rejected_spread_rows = 0
 
     for r in rows or []:
-        r_contract = _normalize_contract_date(r.get("contract_date"))
+        raw_contract_date = r.get("contract_date")
+
+        if _is_calendar_spread_contract(raw_contract_date):
+            rejected_spread_rows += 1
+            continue
+
+        r_contract = _normalize_contract_date(raw_contract_date)
 
         if r_contract != contract:
             continue
@@ -1022,6 +1077,15 @@ def _prepare_futures_kline_rows(
             continue
 
         same_contract_rows.append(item)
+
+    if rejected_spread_rows:
+        print(
+            "DEBUG futures spread rows rejected",
+            "| version =", FUTURES_ALL_SESSION_FIX_VERSION,
+            "| contract =", contract,
+            "| rejected =", rejected_spread_rows,
+            flush=True,
+        )
 
     if not same_contract_rows:
         print(
@@ -1114,6 +1178,73 @@ def _prepare_futures_kline_rows(
 
     return list(by_date.values())[-30:]
 
+def _filter_futures_chart_price_outliers(rows: list[dict]) -> list[dict]:
+    """
+    最後一道防線：排除與同契約近期價格尺度完全不一致的列。
+
+    正常股票期貨在同一近月契約、近 30 日內不應突然從約 150 變成 4.51。
+    此過濾使用非常寬鬆的 0.20x～5.00x 中位數範圍，
+    只攔截明顯是價差契約或欄位污染的資料。
+    """
+    rows = list(rows or [])
+
+    if len(rows) < 3:
+        return rows
+
+    closes = [
+        _row_close_price(r)
+        for r in rows
+        if _row_close_price(r) > 0
+    ]
+
+    if not closes:
+        return rows
+
+    median_close = float(pd.Series(closes, dtype="float64").median())
+
+    if median_close <= 0:
+        return rows
+
+    lower_bound = median_close * 0.20
+    upper_bound = median_close * 5.00
+    kept: list[dict] = []
+    rejected: list[dict] = []
+
+    for row in rows:
+        prices = [
+            _get_open_price(row),
+            _get_high_price(row),
+            _get_low_price(row),
+            _row_close_price(row),
+        ]
+
+        if all(lower_bound <= p <= upper_bound for p in prices if p > 0):
+            kept.append(row)
+        else:
+            rejected.append(row)
+
+    if rejected:
+        print(
+            "DEBUG futures chart outlier rejected",
+            "| version =", FUTURES_ALL_SESSION_FIX_VERSION,
+            "| median_close =", median_close,
+            "| lower =", lower_bound,
+            "| upper =", upper_bound,
+            "| rejected =", [
+                {
+                    "date": r.get("date"),
+                    "contract_date": r.get("contract_date"),
+                    "session": _get_session_value(r),
+                    "close": _row_close_price(r),
+                }
+                for r in rejected[:8]
+            ],
+            flush=True,
+        )
+
+    return kept or rows
+
+
 def _generate_futures_kline_chart(
     rows: list[dict],
     futures_id: str,
@@ -1134,6 +1265,7 @@ def _generate_futures_kline_chart(
     if not rows:
         return ""
 
+    rows = _filter_futures_chart_price_outliers(rows)
     chart_rows = []
 
     for r in rows:
