@@ -5,7 +5,15 @@ from __future__ import annotations
 # W / M charts use daily history for card price, change and date.
 # ============================================================
 DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
-INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v1-UNIFIED-1M-THEN-5M"
+INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
+INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
+INTRADAY_RESAMPLE_RULES = {
+    "1m": "",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "60m": "60min",
+}
 
 from services.sinopac_quote_service import (
     append_stock_snapshot_to_intraday_df_fast,
@@ -924,9 +932,71 @@ def _is_yfinance_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+def _copy_df_with_attrs(df):
+    if df is None:
+        return df
+
+    result = df.copy()
+    try:
+        result.attrs.update(dict(getattr(df, "attrs", {}) or {}))
+    except Exception:
+        pass
+    return result
+
+
+def _slice_latest_intraday_session(df):
+    """從多日 1 分底稿切出最新交易日，供即時圖與圖卡價格使用。"""
+    if df is None or len(df) == 0:
+        return df
+
+    try:
+        import pandas as pd
+
+        work = _copy_df_with_attrs(df).sort_index()
+        if not isinstance(work.index, pd.DatetimeIndex):
+            work.index = pd.to_datetime(work.index, errors="coerce")
+            work = work[~work.index.isna()].copy()
+
+        if len(work) == 0:
+            return work
+
+        latest_date = work.index[-1].date()
+        result = work[work.index.date == latest_date].copy()
+        result.attrs.update(dict(getattr(work, "attrs", {}) or {}))
+        result.attrs["latest_session_date"] = str(latest_date)
+        result.attrs["intraday_base_tf"] = "1m"
+        result.attrs["display_tf"] = "1m"
+
+        if len(result):
+            result.attrs["latest_quote_time"] = str(result.index[-1])
+            result.attrs["latest_quote_price"] = float(result["Close"].iloc[-1])
+
+        print(
+            "DEBUG INTRADAY LATEST SESSION SLICE",
+            "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| raw_rows =", len(work),
+            "| session_rows =", len(result),
+            "| session_date =", latest_date,
+            "| raw_last =", work.index[-1],
+            flush=True,
+        )
+        return result
+
+    except Exception as exc:
+        print(
+            "DEBUG INTRADAY LATEST SESSION SLICE FAILED",
+            "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| error =", repr(exc),
+            flush=True,
+        )
+        return df
+
+
 def _resample_intraday_from_1m(df, target_tf: str):
-    """把已補上最新 snapshot 的同一份 1 分底稿聚合成 5 分圖。"""
-    if df is None or len(df) == 0 or str(target_tf) != "5m":
+    """把同一份 1 分底稿聚合成 1/5/15/30/60 分圖，並保留原始最新報價時間。"""
+    tf = str(target_tf or "1m").strip()
+
+    if df is None or len(df) == 0 or tf not in INTRADAY_TIME_FRAMES:
         return df
 
     try:
@@ -934,31 +1004,49 @@ def _resample_intraday_from_1m(df, target_tf: str):
 
         attrs = dict(getattr(df, "attrs", {}) or {})
         work = df.copy().sort_index()
-        result = (
-            work.resample("5min", label="left", closed="left")
-            .agg(
-                {
-                    "Open": "first",
-                    "High": "max",
-                    "Low": "min",
-                    "Close": "last",
-                    "Volume": "sum",
-                }
+
+        if not isinstance(work.index, pd.DatetimeIndex):
+            work.index = pd.to_datetime(work.index, errors="coerce")
+            work = work[~work.index.isna()].copy()
+
+        if len(work) == 0:
+            return work
+
+        rule = INTRADAY_RESAMPLE_RULES.get(tf, "")
+
+        if not rule:
+            result = work.copy()
+        else:
+            result = (
+                work.resample(rule, label="left", closed="left")
+                .agg(
+                    {
+                        "Open": "first",
+                        "High": "max",
+                        "Low": "min",
+                        "Close": "last",
+                        "Volume": "sum",
+                    }
+                )
+                .dropna(subset=["Open", "High", "Low", "Close"])
             )
-            .dropna(subset=["Open", "High", "Low", "Close"])
-        )
-        result = result[result["Close"] > 0]
+            result = result[result["Close"] > 0]
+
         result.attrs.update(attrs)
         result.attrs["intraday_base_tf"] = "1m"
-        result.attrs["display_tf"] = "5m"
+        result.attrs["display_tf"] = tf
+        result.attrs["intraday_unified_version"] = INTRADAY_UNIFIED_FIX_VERSION
         result.attrs["latest_quote_time"] = str(work.index[-1])
         result.attrs["latest_quote_price"] = float(work["Close"].iloc[-1])
 
         print(
-            "DEBUG INTRADAY 5M RESAMPLE ACTIVE",
+            "DEBUG INTRADAY RESAMPLE ACTIVE",
             "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| target_tf =", tf,
+            "| rule =", rule or "1min_raw",
             "| raw_rows =", len(work),
             "| chart_rows =", len(result),
+            "| raw_first =", work.index[0],
             "| raw_last =", work.index[-1],
             "| chart_last =", result.index[-1] if len(result) else "",
             flush=True,
@@ -967,21 +1055,21 @@ def _resample_intraday_from_1m(df, target_tf: str):
 
     except Exception as exc:
         print(
-            "DEBUG INTRADAY 5M RESAMPLE FAILED",
+            "DEBUG INTRADAY RESAMPLE FAILED",
             "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| target_tf =", tf,
             "| error =", repr(exc),
             flush=True,
         )
         return df
 
-
 def _get_history_df_tf(meta, requested_tf):
     """
     取得個股行情資料。
 
-    1m / 5m 優先順序：
-    1. Yahoo chart API direct
-    2. Shioaji kbars
+    1m / 5m / 15m / 30m / 60m 優先順序：
+    1. Yahoo chart API direct：永遠取得同一份多日 1 分底稿
+    2. Shioaji 1 分 kbars fallback
     3. 原本 get_history() / yfinance
 
     D / W / M：
@@ -996,7 +1084,7 @@ def _get_history_df_tf(meta, requested_tf):
     stock_id = str(getattr(meta, "stock_id", "") or "").strip()
     yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
 
-    if tf in {"1m", "5m"}:
+    if tf in INTRADAY_TIME_FRAMES:
         # -------------------------
         # 1. Yahoo chart API direct
         # -------------------------
@@ -1076,7 +1164,9 @@ def _get_history_df_tf(meta, requested_tf):
             try:
                 t_shioaji0 = time.perf_counter()
 
-                df = get_stock_intraday_kbars(stock_id, time_frame="1m", days=1)
+                base_days = max(1, int(os.getenv("SHIOAJI_INTRADAY_BASE_DAYS", "7") or 7))
+
+                df = get_stock_intraday_kbars(stock_id, time_frame="1m", days=base_days)
 
                 t_shioaji1 = time.perf_counter()
 
@@ -6452,7 +6542,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             t_append0 = time.perf_counter()
 
-            if tf in {"1m", "5m"}:
+            if tf in INTRADAY_TIME_FRAMES:
                 import os
 
                 allow_cold_login = (
@@ -6481,31 +6571,36 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 except Exception:
                     pass
 
-                # 修正 Yahoo 盤中延遲：再用 Shioaji snapshot 強制補最後一列。
+                # Yahoo 盤中可能延遲，再用 Shioaji snapshot 補到同一份 1 分底稿。
                 df = _apply_shioaji_stock_realtime(df, meta.stock_id)
 
-            # 即時圖統一資料流：
-            # 1m / 5m 都先使用同一份 1 分底稿，補完 snapshot 後才產生 5 分圖。
+            # 所有個股分 K 統一資料流：
+            # 多日 1 分底稿 -> 補 snapshot -> 依顯示週期重採樣。
+            # 即時圖只顯示最新交易日；15/30/60 分 K 可保留多日資料。
             intraday_price_df = None
-            if action == "instant" and tf in {"1m", "5m"}:
-                intraday_price_df = df
+            if tf in INTRADAY_TIME_FRAMES:
+                raw_1m_df = df
+                intraday_price_df = _slice_latest_intraday_session(raw_1m_df)
 
-                if tf == "5m":
-                    base_tf = str(
-                        (getattr(df, "attrs", {}) or {}).get("intraday_base_tf") or ""
-                    )
-                    if base_tf == "1m":
-                        df = _resample_intraday_from_1m(df, "5m")
+                if action == "instant":
+                    chart_base_df = intraday_price_df
+                else:
+                    chart_base_df = raw_1m_df
+
+                df = _resample_intraday_from_1m(chart_base_df, tf)
 
                 print(
                     "DEBUG INTRADAY UNIFIED PIPELINE ACTIVE",
                     "| version =", INTRADAY_UNIFIED_FIX_VERSION,
                     "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| action =", action,
                     "| chart_tf =", tf,
                     "| price_tf = 1m",
-                    "| raw_rows =", 0 if intraday_price_df is None else len(intraday_price_df),
+                    "| raw_rows =", 0 if raw_1m_df is None else len(raw_1m_df),
+                    "| session_rows =", 0 if intraday_price_df is None else len(intraday_price_df),
                     "| chart_rows =", 0 if df is None else len(df),
-                    "| raw_last =", "" if intraday_price_df is None or len(intraday_price_df) == 0 else intraday_price_df.index[-1],
+                    "| raw_last =", "" if raw_1m_df is None or len(raw_1m_df) == 0 else raw_1m_df.index[-1],
+                    "| price_last =", "" if intraday_price_df is None or len(intraday_price_df) == 0 else intraday_price_df.index[-1],
                     "| chart_last =", "" if df is None or len(df) == 0 else df.index[-1],
                     flush=True,
                 )
@@ -6517,7 +6612,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             # 週 K、月 K 不可用前一週／前一月計算圖卡漲跌，否則會出現：
             # 798 - 900 = -102、795 - 1140 = -345 這類週／月差額。
             # 因此 W / M 一律另外取得日 K 最新兩筆，改算「當日漲跌」。
-            if action == "instant" and tf in {"1m", "5m"} and intraday_price_df is not None:
+            if tf in INTRADAY_TIME_FRAMES and intraday_price_df is not None:
                 price_df = intraday_price_df
                 price_tf = "1m"
                 price_source = "unified_1m_base"
