@@ -220,7 +220,7 @@ def _fmt_high_low_price(value) -> str:
     except Exception:
         return "--"
 
-DEFAULT_AXIS_TICK_FONTSIZE = 11
+DEFAULT_AXIS_TICK_FONTSIZE = 12
 
 
 def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
@@ -300,32 +300,53 @@ def _annotate_high_low(
         high_y = float(high_series.loc[high_idx])
         low_y = float(low_series.loc[low_idx])
 
-        y_min = float(low_series.min())
-        y_max = float(high_series.max())
-        y_pad = max((y_max - y_min) * 0.035, y_max * 0.001)
+        data_y_min = float(low_series.min())
+        data_y_max = float(high_series.max())
+        data_span = max(data_y_max - data_y_min, abs(data_y_max) * 0.01, 1.0)
+
+        # 使用目前座標軸範圍限制文字位置，避免最高點文字跑進上方 MA 區。
+        axis_y_min, axis_y_max = ax.get_ylim()
+        axis_span = max(axis_y_max - axis_y_min, data_span)
+        y_pad = max(data_span * 0.025, axis_span * 0.015)
+
+        high_text_y = min(
+            high_y + y_pad,
+            axis_y_max - axis_span * 0.075,
+        )
+        low_text_y = max(
+            low_y - y_pad,
+            axis_y_min + axis_span * 0.075,
+        )
+
+        # 高低點落在左右邊緣時，文字向圖內對齊，避免被裁切。
+        total_points = max(len(plot_df), 1)
+        high_ha = "left" if high_pos <= 2 else ("right" if high_pos >= total_points - 3 else "center")
+        low_ha = "left" if low_pos <= 2 else ("right" if low_pos >= total_points - 3 else "center")
 
         ax.text(
             high_x,
-            high_y + y_pad,
+            high_text_y,
             f"高 {_fmt_high_low_price(high_y)}",
-            ha="center",
+            ha=high_ha,
             va="bottom",
             fontsize=fontsize,
             fontweight="bold",
             color="#D32F2F",
             zorder=10,
+            clip_on=True,
         )
 
         ax.text(
             low_x,
-            low_y - y_pad,
+            low_text_y,
             f"低 {_fmt_high_low_price(low_y)}",
-            ha="center",
+            ha=low_ha,
             va="top",
             fontsize=fontsize,
             fontweight="bold",
             color="#00A84F",
             zorder=10,
+            clip_on=True,
         )
 
     except Exception as exc:
@@ -394,7 +415,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
             return "--"
 
     # ===== 畫布：資訊列 + 主圖 + 成交量 =====
-    fig = plt.figure(figsize=(8.8, 7.8), dpi=140, facecolor="white")
+    fig = plt.figure(figsize=(9.2, 8.0), dpi=140, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
@@ -490,7 +511,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _set_tw_stock_intraday_axis(ax, df)
     _set_centered_price_axis(ax, df)
 
-    _apply_axis_style(ax, x_labelsize=11, y_labelsize=11)
+    _apply_axis_style(ax, x_labelsize=12, y_labelsize=12)
 
     # ===== 成交量圖 =====
     vol_colors = []
@@ -515,8 +536,8 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         edgecolor="none",
     )
 
-    ax_v.set_ylabel("成交量(張)", fontsize=11, **_get_font_kwargs_safe())
-    _apply_axis_style(ax_v, x_labelsize=11, y_labelsize=11)
+    ax_v.set_ylabel("成交量(張)", fontsize=12, **_get_font_kwargs_safe())
+    _apply_axis_style(ax_v, x_labelsize=12, y_labelsize=12)
 
     ax_v.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
     ax_v.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
@@ -526,7 +547,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _hide_top_right_spines(ax)
     _hide_top_right_spines(ax_v)
 
-    fig.subplots_adjust(left=0.09, right=0.97, top=0.97, bottom=0.08, hspace=0.05)
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.98, bottom=0.085, hspace=0.09)
 
     try:
         image_url = publish_figure(fig, f"{stock_id}_instant")
@@ -821,12 +842,12 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=(9.4, 7.6), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=(9.6, 8.0), dpi=132, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.78, 3.35, 1.05],
-        hspace=0.05,
+        height_ratios=[1.02, 3.32, 1.08],
+        hspace=0.09,
     )
 
     ax_info = fig.add_subplot(gs[0])
@@ -838,14 +859,14 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     font_kwargs = _get_font_kwargs_safe()
 
-    ax_info.text(0.00, 0.34, f"5MA {_fmt_ma(ma5)}", fontsize=15, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.28, 0.34, f"20MA {_fmt_ma(ma20)}", fontsize=15, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.56, 0.34, f"60MA {_fmt_ma(ma60)}", fontsize=15, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.00, 0.08, f"120MA {_fmt_ma(ma120)}", fontsize=15, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.52, f"5MA {_fmt_ma(ma5)}", fontsize=15, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.28, 0.52, f"20MA {_fmt_ma(ma20)}", fontsize=15, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.56, 0.52, f"60MA {_fmt_ma(ma60)}", fontsize=15, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.20, f"120MA {_fmt_ma(ma120)}", fontsize=15, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
 
     ax_info.text(
         0.35,
-        0.08,
+        0.20,
         f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
         fontsize=13,
         color="#444444",
@@ -894,6 +915,9 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         if col in plot_df.columns:
             ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
 
+    # 預留上下空間，避免最高／最低文字貼到資訊列或成交量區。
+    ax_k.margins(x=0.025, y=0.14)
+
     # 個股分 K 與日／週／月 K：標示目前顯示範圍內的最高、最低價。
     if tf in {"1m", "5m", "15m", "30m", "60m", "D", "W", "M"}:
         _annotate_high_low(
@@ -903,8 +927,8 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
             fontsize=12,
         )
 
-    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
-    _apply_axis_style(ax_v, x_labelsize=11, y_labelsize=11)
+    _apply_axis_style(ax_k, x_labelsize=12, y_labelsize=12)
+    _apply_axis_style(ax_v, x_labelsize=12, y_labelsize=12)
 
     if tf in {"1m", "5m", "15m", "30m", "60m"}:
         index_dates = [idx.date() for idx in plot_df.index]
@@ -928,19 +952,19 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         ticks.append(len(labels) - 1)
 
     ax_v.set_xticks(ticks)
-    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=11, **font_kwargs)
+    ax_v.set_xticklabels([labels[i] for i in ticks], rotation=0, fontsize=12, **font_kwargs)
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    ax_v.set_ylabel("成交量", fontsize=11, **font_kwargs)
+    ax_v.set_ylabel("成交量", fontsize=12, **font_kwargs)
 
-    ax_k.tick_params(axis="y", labelsize=11)
-    ax_v.tick_params(axis="y", labelsize=11)
+    ax_k.tick_params(axis="y", labelsize=12)
+    ax_v.tick_params(axis="y", labelsize=12)
 
     _hide_top_right_spines(ax_k)
     _hide_top_right_spines(ax_v)
 
-    fig.subplots_adjust(left=0.09, right=0.97, top=0.97, bottom=0.08, hspace=0.05)
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.98, bottom=0.085, hspace=0.09)
 
     try:
         return publish_figure(fig, f"{stock_id}_{tf}_kline")
@@ -1075,7 +1099,7 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             ax_bar.set_xticks(x)
             ax_bar.set_xticklabels(
                 dates,
-                fontsize=11,
+                fontsize=12,
                 rotation=0,
             )
         else:
@@ -1092,8 +1116,8 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
             )
             ax_bar.set_xticks([])
 
-        ax_bar.tick_params(axis="x", labelsize=11)
-        ax_bar.tick_params(axis="y", labelsize=11)
+        ax_bar.tick_params(axis="x", labelsize=12)
+        ax_bar.tick_params(axis="y", labelsize=12)
         ax_bar.grid(True, axis="y", linestyle=":", alpha=0.12)
         _add_quarter_grid(ax_bar, alpha=0.22)
 
