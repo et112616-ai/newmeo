@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# ============================================================
+# VERIFIED DWM CARD PRICE FIX — open this file and check line 4
+# W / M charts use daily history for card price, change and date.
+# ============================================================
+DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v5-VERIFIED-DAILY-CARD-PRICE"
+
 from services.sinopac_quote_service import (
     append_stock_snapshot_to_intraday_df_fast,
     get_stock_intraday_kbars,
@@ -6272,33 +6278,92 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 # 修正 Yahoo 盤中延遲：再用 Shioaji snapshot 強制補最後一列。
                 df = _apply_shioaji_stock_realtime(df, meta.stock_id)
 
-            # K 線的歷史資料來源改成 FinMind 未還原日 K 後，
-            # 盤中 / 當日可能只更新到前一個已結算交易日。
+            # 圖表週期與圖卡價格週期分離：
+            # - df / tf：只負責畫 D / W / M K 線。
+            # - price_df / price_tf：只負責圖卡上方現價、當日漲跌與更新日期。
             #
-            # 因此：
-            # - 圖表本身仍用 df，避免歷史 MA 被不穩定的盤中資料污染。
-            # - 上方價格卡另外用 Shioaji snapshot 補一份 price_df，讓 K 線卡價格與即時卡一致。
+            # 週 K、月 K 不可用前一週／前一月計算圖卡漲跌，否則會出現：
+            # 798 - 900 = -102、795 - 1140 = -345 這類週／月差額。
+            # 因此 W / M 一律另外取得日 K 最新兩筆，改算「當日漲跌」。
             price_df = df
+            price_tf = tf
+            price_source = "chart_history"
 
-            if action == "k_line" and tf in {"D", "W", "M"}:
+            if action == "k_line" and tf in {"W", "M"}:
                 try:
-                    price_df = _apply_shioaji_stock_realtime(df, meta.stock_id)
+                    daily_df, daily_tf = _get_history_df_tf_safe(meta, "D")
+
+                    if daily_df is not None and len(daily_df) >= 2:
+                        price_df = daily_df
+                        price_tf = "D"
+                        price_source = "daily_history"
+
+                        print(
+                            "DEBUG DWM CARD PRICE FIX ACTIVE",
+                            "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                            "| stock_id =", getattr(meta, "stock_id", ""),
+                            "| chart_tf =", tf,
+                            "| price_tf =", price_tf,
+                            "| price_rows =", len(price_df),
+                            "| daily_latest =", str(price_df.index[-1]),
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "DEBUG DWM daily history unavailable",
+                            "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                            "| stock_id =", getattr(meta, "stock_id", ""),
+                            "| chart_tf =", tf,
+                            "| daily_rows =", 0 if daily_df is None else len(daily_df),
+                            flush=True,
+                        )
+
                 except Exception as exc:
                     print(
-                        "DEBUG kline realtime price_meta fallback failed",
-                        "| stock_id =", meta.stock_id,
-                        "| tf =", tf,
+                        "DEBUG DWM daily history failed",
+                        "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                        "| stock_id =", getattr(meta, "stock_id", ""),
+                        "| chart_tf =", tf,
                         "| error =", repr(exc),
                         flush=True,
                     )
-                    price_df = df
+
+            # D / W / M 的圖卡價格都可再用 Shioaji 即時 snapshot 覆蓋；
+            # 若 Shioaji 尚未熱機，W / M 仍保留上面的日 K 當日漲跌，不退回週／月差額。
+            if action == "k_line" and tf in {"D", "W", "M"}:
+                try:
+                    realtime_price_df = _apply_shioaji_stock_realtime(
+                        price_df,
+                        meta.stock_id,
+                    )
+
+                    if realtime_price_df is not None and len(realtime_price_df) > 0:
+                        price_df = realtime_price_df
+
+                        attrs = dict(getattr(price_df, "attrs", {}) or {})
+                        if str(attrs.get("realtime_snapshot_source") or "").lower() == "shioaji":
+                            price_source = "shioaji_snapshot"
+
+                except Exception as exc:
+                    print(
+                        "DEBUG kline realtime price_meta fallback failed",
+                        "| version =", DWM_CARD_PRICE_FIX_VERSION,
+                        "| stock_id =", meta.stock_id,
+                        "| chart_tf =", tf,
+                        "| price_tf =", price_tf,
+                        "| error =", repr(exc),
+                        flush=True,
+                    )
 
             t_append1 = time.perf_counter()
 
             print(
                 "DEBUG stock timing append_snapshot",
+                "| version =", DWM_CARD_PRICE_FIX_VERSION,
                 "| stock_id =", getattr(meta, "stock_id", ""),
-                "| tf =", tf,
+                "| chart_tf =", tf,
+                "| price_tf =", price_tf,
+                "| price_source =", price_source,
                 "| rows =", 0 if df is None else len(df),
                 "| price_rows =", 0 if price_df is None else len(price_df),
                 "| sec =", round(t_append1 - t_append0, 3),
@@ -6307,23 +6372,29 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             t_price0 = time.perf_counter()
 
-            price_meta = build_price_meta(price_df, tf)
+            # 關鍵：這裡必須傳 price_tf，而不是圖表週期 tf。
+            # W / M 在沒有 Shioaji 時，price_tf 會是 D。
+            price_meta = build_price_meta(price_df, price_tf)
 
             if action == "k_line" and tf in {"D", "W", "M"}:
                 price_meta = _apply_realtime_snapshot_price_meta(
                     price_meta,
                     price_df,
-                    tf,
+                    price_tf,
                 )
 
             t_price1 = time.perf_counter()
 
             print(
                 "DEBUG stock timing price_meta",
+                "| version =", DWM_CARD_PRICE_FIX_VERSION,
                 "| stock_id =", getattr(meta, "stock_id", ""),
-                "| tf =", tf,
+                "| chart_tf =", tf,
+                "| price_tf =", price_tf,
+                "| price_source =", price_source,
                 "| price_info =", getattr(price_meta, "price_info", ""),
                 "| change_info =", getattr(price_meta, "change_info", ""),
+                "| update_time =", getattr(price_meta, "time_stamp", ""),
                 "| sec =", round(t_price1 - t_price0, 3),
                 flush=True,
             )
