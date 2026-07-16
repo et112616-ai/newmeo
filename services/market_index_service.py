@@ -41,6 +41,8 @@ except Exception:
         return ""
 
 
+MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v1-SHIOAJI17-IX0001"
+
 # =========================
 # Cache settings
 # =========================
@@ -309,25 +311,94 @@ def _hide_top_right_spines(ax) -> None:
 
 def _get_taiex_contract(api):
     """
-    Shioaji 加權指數 contract 常見路徑：
-    api.Contracts.Indexs.TSE["001"]
-    或 api.Contracts.Indexs.TSE.TSE001
+    取得加權指數 contract，兼容 Shioaji 新舊版本。
+
+    Shioaji 1.7+：
+        api.contracts.get("IX0001")
+
+    舊版：
+        api.Contracts.Indexs.TSE["001"]
+        api.Contracts.Indexs.TSE.TSE001
     """
-    try:
-        return api.Contracts.Indexs.TSE["001"]
-    except Exception:
-        pass
+    if api is None:
+        return None
 
-    try:
-        return api.Contracts.Indexs.TSE.TSE001
-    except Exception:
-        pass
+    attempts: list[str] = []
 
+    # Shioaji 1.7+：指數改用交易所標準代碼 IX0001。
     try:
-        return api.Contracts.Indexs["TSE"]["001"]
-    except Exception:
-        pass
+        contracts_api = getattr(api, "contracts", None)
+        get_contract = getattr(contracts_api, "get", None)
 
+        if callable(get_contract):
+            for code in ("IX0001", "TSE001", "001"):
+                attempts.append(f"api.contracts.get({code})")
+
+                try:
+                    contract = get_contract(code)
+                except TypeError:
+                    # 少數版本可能要求 security_type；先讓後續 legacy fallback 接手。
+                    contract = None
+                except Exception as exc:
+                    _debug(
+                        "contract lookup failed",
+                        "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+                        "| source = api.contracts.get",
+                        "| code =", code,
+                        "| error =", repr(exc),
+                    )
+                    contract = None
+
+                if contract is not None:
+                    _debug(
+                        "contract resolved",
+                        "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+                        "| source = api.contracts.get",
+                        "| requested_code =", code,
+                        "| actual_code =", getattr(contract, "code", ""),
+                    )
+                    return contract
+
+    except Exception as exc:
+        _debug(
+            "new contract api unavailable",
+            "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+            "| error =", repr(exc),
+        )
+
+    # 新版 legacy facade 也可能接受 IX0001。
+    legacy_candidates = [
+        ("api.Contracts.Indexs.TSE[IX0001]", lambda: api.Contracts.Indexs.TSE["IX0001"]),
+        ("api.Contracts.Indexs.TSE.IX0001", lambda: api.Contracts.Indexs.TSE.IX0001),
+        ("api.Contracts.Indexs[TSE][IX0001]", lambda: api.Contracts.Indexs["TSE"]["IX0001"]),
+        # 舊 Shioaji 版本代碼。
+        ("api.Contracts.Indexs.TSE[001]", lambda: api.Contracts.Indexs.TSE["001"]),
+        ("api.Contracts.Indexs.TSE.TSE001", lambda: api.Contracts.Indexs.TSE.TSE001),
+        ("api.Contracts.Indexs[TSE][001]", lambda: api.Contracts.Indexs["TSE"]["001"]),
+    ]
+
+    for source, getter in legacy_candidates:
+        attempts.append(source)
+
+        try:
+            contract = getter()
+        except Exception:
+            contract = None
+
+        if contract is not None:
+            _debug(
+                "contract resolved",
+                "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+                "| source =", source,
+                "| actual_code =", getattr(contract, "code", ""),
+            )
+            return contract
+
+    _debug(
+        "contract unresolved",
+        "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+        "| attempts =", attempts,
+    )
     return None
 
 
@@ -445,9 +516,16 @@ def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
             )
             return stale_snapshot
 
+        _debug(
+            "snapshot unavailable",
+            "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
+            "| reason = contract_none",
+            "| get_api_sec =", round(t_api1 - t_api0, 3),
+            "| contract_sec =", round(t_contract1 - t_contract0, 3),
+        )
         return MarketIndexSnapshot(
             available=False,
-            message="找不到加權指數 contract：TSE001。",
+            message="找不到加權指數 contract：IX0001／TSE001。",
         )
 
     try:
