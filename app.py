@@ -1,15 +1,4 @@
 from __future__ import annotations
-from services.futures_map_service import sync_stock_futures_map_from_taifex
-from services.market_index_service import get_market_index_snapshot
-from services.market_future_service import get_market_future_snapshot
-from services.sinopac_quote_service import (
-    QUOTE_SERVICE_VERSION,
-    get_api,
-    get_shioaji_status,
-    get_stock_snapshot,
-    start_shioaji_reconnect_monitor,
-    warmup_shioaji_once,
-)
 
 import base64
 import hashlib
@@ -21,6 +10,7 @@ import platform
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -30,15 +20,174 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request
 
+APP_BUILD_VERSION = "2026-07-16-v1.2-BOOTSAFE-LAZY-QUOTE"
+APP_STARTED_TS = time.time()
+
+print(
+    "APP BOOT VERSION",
+    APP_BUILD_VERSION,
+    "| file =",
+    __file__,
+    flush=True,
+)
+
+from services.futures_map_service import sync_stock_futures_map_from_taifex
+from services.market_index_service import get_market_index_snapshot
+from services.market_future_service import get_market_future_snapshot
+
+# 完全容錯匯入 quote service：
+# 1. 不直接 from ... import 版本常數。
+# 2. 舊版沒有健康函式時仍可啟動。
+# 3. quote service 自身暫時匯入失敗時，Flask 仍可先啟動並由 /health 顯示錯誤。
+_SINOPAC_QUOTE_IMPORT_ERROR = ""
+
+try:
+    _sinopac_quote_service = importlib.import_module(
+        "services.sinopac_quote_service"
+    )
+except Exception as exc:
+    _sinopac_quote_service = None
+    _SINOPAC_QUOTE_IMPORT_ERROR = repr(exc)
+    print(
+        "APP QUOTE SERVICE IMPORT FAILED",
+        "| version =",
+        APP_BUILD_VERSION,
+        "| error =",
+        _SINOPAC_QUOTE_IMPORT_ERROR,
+        flush=True,
+    )
+
+
+def _quote_attr(name: str, default: Any = None) -> Any:
+    if _sinopac_quote_service is None:
+        return default
+
+    try:
+        return getattr(_sinopac_quote_service, name, default)
+    except Exception:
+        return default
+
+
+QUOTE_SERVICE_VERSION = str(
+    _quote_attr(
+        "QUOTE_SERVICE_VERSION",
+        _quote_attr(
+            "INTRADAY_UNIFIED_FIX_VERSION",
+            "legacy-unversioned",
+        ),
+    )
+)
+
+
+def get_api():
+    fn = _quote_attr("get_api")
+
+    if not callable(fn):
+        return None
+
+    try:
+        return fn()
+    except Exception:
+        print("APP compatibility get_api failed", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return None
+
+
+def get_stock_snapshot(stock_id: str):
+    fn = _quote_attr("get_stock_snapshot")
+
+    if not callable(fn):
+        return None
+
+    try:
+        return fn(stock_id)
+    except Exception:
+        print("APP compatibility get_stock_snapshot failed", stock_id, flush=True)
+        print(traceback.format_exc(), flush=True)
+        return None
+
+
+def get_shioaji_status() -> dict[str, Any]:
+    fn = _quote_attr("get_shioaji_status")
+
+    if callable(fn):
+        try:
+            status = fn()
+            if isinstance(status, dict):
+                return status
+        except Exception as exc:
+            return {
+                "ready": False,
+                "quote_service_version": QUOTE_SERVICE_VERSION,
+                "last_login_error": repr(exc),
+                "compatibility_mode": True,
+            }
+
+    ready_fn = _quote_attr("is_shioaji_api_ready")
+    ready = False
+
+    if callable(ready_fn):
+        try:
+            ready = bool(ready_fn())
+        except Exception:
+            ready = False
+
+    return {
+        "ready": ready,
+        "quote_service_version": QUOTE_SERVICE_VERSION,
+        "last_login_success": "",
+        "last_login_error": _SINOPAC_QUOTE_IMPORT_ERROR,
+        "consecutive_failures": 0,
+        "reconnect_monitor_alive": False,
+        "compatibility_mode": True,
+        "quote_module_loaded": _sinopac_quote_service is not None,
+    }
+
+
+def warmup_shioaji_once(force_reconnect: bool = False) -> dict[str, Any]:
+    fn = _quote_attr("warmup_shioaji_once")
+
+    if callable(fn):
+        try:
+            status = fn(force_reconnect=force_reconnect)
+            if isinstance(status, dict):
+                return status
+        except TypeError:
+            try:
+                status = fn()
+                if isinstance(status, dict):
+                    return status
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    started = time.perf_counter()
+    api = get_api()
+    status = get_shioaji_status()
+    status["ready"] = bool(api is not None)
+    status["warmup_seconds"] = round(time.perf_counter() - started, 3)
+    status["compatibility_mode"] = True
+    return status
+
+
+def start_shioaji_reconnect_monitor() -> bool:
+    fn = _quote_attr("start_shioaji_reconnect_monitor")
+
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception:
+            print("DEBUG compatibility reconnect monitor failed", flush=True)
+            print(traceback.format_exc(), flush=True)
+
+    return False
+
+
 from config import PORT, TDCC_SYNC_STOCKS, TDCC_SYNC_TOKEN
 from controller import handle_request
 from services.chip_service import sync_tdcc_latest_large_holder_many
 from utils.parser import parse_make_payload
-
-import time
-
-APP_BUILD_VERSION = "2026-07-16-v1-VERSION-HEALTH-RECONNECT"
-APP_STARTED_TS = time.time()
 
 _LINE_EVENT_SEEN: dict[str, float] = {}
 _LINE_EVENT_SEEN_TTL_SECONDS = 180
