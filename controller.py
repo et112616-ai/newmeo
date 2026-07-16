@@ -1287,6 +1287,132 @@ def _snap_timestamp(snapshot: dict):
         return pd.Timestamp.now()
 
 
+def _fmt_stock_card_price(value) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return "--"
+
+
+def _fmt_stock_card_signed(value) -> str:
+    try:
+        return f"{float(value):+.2f}"
+    except Exception:
+        return "+0.00"
+
+
+def _fmt_stock_card_signed_pct(value) -> str:
+    try:
+        return f"{float(value):+.2f}%"
+    except Exception:
+        return "+0.00%"
+
+
+def _apply_realtime_snapshot_price_meta(price_meta, price_df, tf: str):
+    """
+    日／週／月 K 圖卡上方的現價與漲跌幅，一律優先採 Shioaji snapshot。
+
+    K 線圖本身仍維持 D / W / M 歷史週期；只有圖卡上方資訊改成：
+    - 現價：snapshot close
+    - 漲跌：snapshot change
+    - 漲跌幅：snapshot change_pct
+
+    snapshot 不存在時，完整保留原本 build_price_meta() 結果。
+    """
+    normalized_tf = normalize_time_frame(tf)
+
+    if normalized_tf not in {"D", "W", "M"}:
+        return price_meta
+
+    attrs = dict(getattr(price_df, "attrs", {}) or {})
+
+    if str(attrs.get("realtime_snapshot_source") or "").lower() != "shioaji":
+        return price_meta
+
+    try:
+        latest_price = float(attrs.get("realtime_snapshot_price") or 0.0)
+    except Exception:
+        latest_price = 0.0
+
+    if latest_price <= 0:
+        return price_meta
+
+    has_change = bool(attrs.get("realtime_snapshot_has_change"))
+    has_change_pct = bool(attrs.get("realtime_snapshot_has_change_pct"))
+
+    try:
+        price_change = float(attrs.get("realtime_snapshot_change") or 0.0)
+    except Exception:
+        price_change = 0.0
+
+    try:
+        change_pct = float(attrs.get("realtime_snapshot_change_pct") or 0.0)
+    except Exception:
+        change_pct = 0.0
+
+    # 少數 snapshot 只提供其中一個欄位時，互相反推。
+    if has_change and not has_change_pct:
+        prev_close = latest_price - price_change
+
+        if prev_close > 0:
+            change_pct = price_change / prev_close * 100
+            has_change_pct = True
+
+    elif has_change_pct and not has_change:
+        denominator = 1 + change_pct / 100
+
+        if denominator > 0:
+            prev_close = latest_price / denominator
+            price_change = latest_price - prev_close
+            has_change = True
+
+    # change=0 / pct=0 也可能是有效平盤資料，所以用 has_* 判斷。
+    if not has_change and not has_change_pct:
+        return price_meta
+
+    timestamp = str(attrs.get("realtime_snapshot_time") or "").strip()
+    date_text = ""
+
+    if timestamp:
+        try:
+            import pandas as pd
+
+            parsed = pd.to_datetime(timestamp, errors="coerce")
+
+            if pd.notna(parsed):
+                date_text = parsed.strftime("%Y-%m-%d")
+        except Exception:
+            date_text = timestamp[:10]
+
+    if not date_text:
+        date_text = str(getattr(price_meta, "time_stamp", "--") or "--")
+
+    from types import SimpleNamespace
+
+    realtime_meta = SimpleNamespace(
+        price_info=_fmt_stock_card_price(latest_price),
+        change_info=(
+            f"{_fmt_stock_card_signed(price_change)} "
+            f"({_fmt_stock_card_signed_pct(change_pct)})"
+        ),
+        time_stamp=date_text,
+        price_change=price_change,
+        latest_price=latest_price,
+    )
+
+    print(
+        "DEBUG stock realtime price_meta override",
+        "| tf =", normalized_tf,
+        "| latest =", latest_price,
+        "| change =", price_change,
+        "| pct =", change_pct,
+        "| time =", date_text,
+        flush=True,
+    )
+
+    return realtime_meta
+
+
 def _append_realtime_snapshot_row(df, snapshot: dict):
     """
     把 Shioaji snapshot 補成 df 最後一列。
@@ -1354,8 +1480,39 @@ def _append_realtime_snapshot_row(df, snapshot: dict):
     except Exception:
         pass
 
+    change_raw = _snap_get(
+        snapshot,
+        "change",
+        "change_price",
+        "price_change",
+        default=None,
+    )
+    change_pct_raw = _snap_get(
+        snapshot,
+        "change_pct",
+        "change_rate",
+        "price_change_pct",
+        default=None,
+    )
+
     result.attrs["realtime_snapshot_source"] = "shioaji"
     result.attrs["realtime_snapshot_price"] = close_price
+    result.attrs["realtime_snapshot_change"] = _snap_float(
+        snapshot,
+        "change",
+        "change_price",
+        "price_change",
+        default=0.0,
+    )
+    result.attrs["realtime_snapshot_change_pct"] = _snap_float(
+        snapshot,
+        "change_pct",
+        "change_rate",
+        "price_change_pct",
+        default=0.0,
+    )
+    result.attrs["realtime_snapshot_has_change"] = change_raw is not None
+    result.attrs["realtime_snapshot_has_change_pct"] = change_pct_raw is not None
     result.attrs["realtime_snapshot_time"] = str(ts)
 
     return result
@@ -5968,6 +6125,11 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             try:
                 price_meta = build_price_meta(df_for_post, "D")
+                price_meta = _apply_realtime_snapshot_price_meta(
+                    price_meta,
+                    df_for_post,
+                    "D",
+                )
 
                 price_info = getattr(price_meta, "price_info", "--")
                 change_info = getattr(price_meta, "change_info", "--")
@@ -6146,6 +6308,13 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_price0 = time.perf_counter()
 
             price_meta = build_price_meta(price_df, tf)
+
+            if action == "k_line" and tf in {"D", "W", "M"}:
+                price_meta = _apply_realtime_snapshot_price_meta(
+                    price_meta,
+                    price_df,
+                    tf,
+                )
 
             t_price1 = time.perf_counter()
 
