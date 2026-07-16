@@ -2,16 +2,30 @@ from __future__ import annotations
 from services.futures_map_service import sync_stock_futures_map_from_taifex
 from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
-from services.sinopac_quote_service import get_api, get_stock_snapshot
+from services.sinopac_quote_service import (
+    QUOTE_SERVICE_VERSION,
+    get_api,
+    get_shioaji_status,
+    get_stock_snapshot,
+    start_shioaji_reconnect_monitor,
+    warmup_shioaji_once,
+)
 
 import base64
 import hashlib
 import hmac
+import importlib
 import json
 import os
+import platform
+import sys
+import tempfile
 import threading
 import traceback
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict
+from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, jsonify, request
@@ -22,6 +36,9 @@ from services.chip_service import sync_tdcc_latest_large_holder_many
 from utils.parser import parse_make_payload
 
 import time
+
+APP_BUILD_VERSION = "2026-07-16-v1-VERSION-HEALTH-RECONNECT"
+APP_STARTED_TS = time.time()
 
 _LINE_EVENT_SEEN: dict[str, float] = {}
 _LINE_EVENT_SEEN_TTL_SECONDS = 180
@@ -73,6 +90,159 @@ def route_probe():
         "status": "ok",
         "message": "route_probe registered",
     }), 200
+
+
+
+def _server_time_text() -> str:
+    try:
+        return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _collect_module_versions(module_name: str) -> dict[str, str]:
+    """收集模組內所有 *_VERSION 常數，避免人工維護版本清單。"""
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        return {"import_error": repr(exc)}
+
+    versions: dict[str, str] = {}
+
+    for name in sorted(dir(module)):
+        if not name.endswith("_VERSION"):
+            continue
+
+        try:
+            value = getattr(module, name)
+        except Exception:
+            continue
+
+        if isinstance(value, (str, int, float, bool)):
+            versions[name] = str(value)
+
+    return versions or {"version": "unversioned"}
+
+
+def _check_chart_directory() -> dict[str, Any]:
+    chart_dir = Path(__file__).resolve().parent / "static" / "charts"
+
+    try:
+        chart_dir.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            prefix="health_",
+            suffix=".tmp",
+            dir=str(chart_dir),
+            delete=False,
+            encoding="utf-8",
+        ) as fp:
+            fp.write("ok")
+            probe_path = Path(fp.name)
+
+        probe_path.unlink(missing_ok=True)
+
+        return {
+            "ok": True,
+            "path": str(chart_dir),
+            "writable": True,
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(chart_dir),
+            "writable": False,
+            "error": repr(exc),
+        }
+
+
+def _version_payload() -> dict[str, Any]:
+    modules = {
+        "controller": _collect_module_versions("controller"),
+        "chart_service": _collect_module_versions("services.chart_service"),
+        "sinopac_quote_service": _collect_module_versions("services.sinopac_quote_service"),
+        "market_index_service": _collect_module_versions("services.market_index_service"),
+        "market_turnover_service": _collect_module_versions("services.market_turnover_service"),
+        "futures_service": _collect_module_versions("services.futures_service"),
+        "market_future_service": _collect_module_versions("services.market_future_service"),
+        "market_future_kline_service": _collect_module_versions("services.market_future_kline_service"),
+    }
+
+    return {
+        "service": "stock-line-bot",
+        "app_build_version": APP_BUILD_VERSION,
+        "quote_service_version": QUOTE_SERVICE_VERSION,
+        "render_git_commit": str(os.getenv("RENDER_GIT_COMMIT", "") or ""),
+        "render_service_id": str(os.getenv("RENDER_SERVICE_ID", "") or ""),
+        "python": platform.python_version(),
+        "pid": os.getpid(),
+        "server_time": _server_time_text(),
+        "uptime_seconds": round(time.time() - APP_STARTED_TS, 3),
+        "modules": modules,
+    }
+
+
+@app.route("/version", methods=["GET"])
+def version_info():
+    return jsonify(_version_payload()), 200
+
+
+@app.route("/health", methods=["GET"])
+def health_detail():
+    shioaji_status = get_shioaji_status()
+    chart_status = _check_chart_directory()
+    deep = str(request.args.get("deep", "0") or "0").strip() == "1"
+
+    market_index_status: dict[str, Any] = {
+        "checked": False,
+        "message": "Use /health?deep=1 to run a live market-index check.",
+    }
+
+    if deep:
+        started = time.perf_counter()
+        try:
+            snapshot = get_market_index_snapshot(with_chart=False)
+            market_index_status = {
+                "checked": True,
+                "available": bool(getattr(snapshot, "available", False)),
+                "close": getattr(snapshot, "close_price", None),
+                "quote_time": str(getattr(snapshot, "quote_time", "") or ""),
+                "seconds": round(time.perf_counter() - started, 3),
+            }
+        except Exception as exc:
+            market_index_status = {
+                "checked": True,
+                "available": False,
+                "error": repr(exc),
+                "seconds": round(time.perf_counter() - started, 3),
+            }
+
+    if not chart_status.get("ok"):
+        overall = "error"
+    elif not shioaji_status.get("ready"):
+        overall = "degraded"
+    elif deep and not market_index_status.get("available"):
+        overall = "degraded"
+    else:
+        overall = "ok"
+
+    payload = {
+        "status": overall,
+        "service": "stock-line-bot",
+        "app_build_version": APP_BUILD_VERSION,
+        "server_time": _server_time_text(),
+        "uptime_seconds": round(time.time() - APP_STARTED_TS, 3),
+        "line_webhook": "enabled",
+        "thread_count": threading.active_count(),
+        "shioaji": shioaji_status,
+        "chart_directory": chart_status,
+        "market_index": market_index_status,
+    }
+
+    # degraded 仍回 200，避免 Render 因外部行情暫時異常重啟服務。
+    return jsonify(payload), 200
 
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -301,18 +471,18 @@ _BACKGROUND_WARMUP_LOCK = threading.Lock()
 
 
 def _background_shioaji_warmup() -> None:
-    """Gunicorn worker 啟動後背景登入 Shioaji，避免第一位使用者支付冷登入成本。"""
+    """Gunicorn worker 啟動後背景登入 Shioaji，避免第一位使用者承擔冷登入。"""
     delay = float(os.getenv("SHIOAJI_WARMUP_DELAY_SECONDS", "1") or 1)
     time.sleep(max(0.0, delay))
 
-    started = time.perf_counter()
-
     try:
-        api = get_api()
+        status = warmup_shioaji_once(force_reconnect=False)
         print(
             "DEBUG background shioaji warmup",
-            "| ok =", api is not None,
-            "| sec =", round(time.perf_counter() - started, 3),
+            "| ok =", status.get("ready"),
+            "| sec =", status.get("warmup_seconds"),
+            "| last_success =", status.get("last_login_success"),
+            "| error =", status.get("last_login_error"),
             flush=True,
         )
     except Exception:
@@ -322,6 +492,12 @@ def _background_shioaji_warmup() -> None:
 
 def _start_background_warmup_once() -> None:
     global _BACKGROUND_WARMUP_STARTED
+
+    try:
+        start_shioaji_reconnect_monitor()
+    except Exception:
+        print("DEBUG shioaji reconnect monitor start failed", flush=True)
+        print(traceback.format_exc(), flush=True)
 
     enabled = str(os.getenv("ENABLE_BACKGROUND_SHIOAJI_WARMUP", "1")).strip() == "1"
 
@@ -381,11 +557,14 @@ def warmup_all():
     try:
         t = time.perf_counter()
 
-        api = get_api()
+        shioaji_status = warmup_shioaji_once(force_reconnect=False)
 
         result["items"]["shioaji_login"] = {
-            "ok": api is not None,
+            "ok": bool(shioaji_status.get("ready")),
             "seconds": round(time.perf_counter() - t, 3),
+            "last_login_success": shioaji_status.get("last_login_success"),
+            "last_login_error": shioaji_status.get("last_login_error"),
+            "reconnect_monitor_alive": shioaji_status.get("reconnect_monitor_alive"),
         }
 
     except Exception as exc:
@@ -520,7 +699,11 @@ def health():
         {
             "status": "ok",
             "service": "stock-line-bot",
+            "app_build_version": APP_BUILD_VERSION,
             "line_webhook": "enabled",
+            "version_url": "/version",
+            "health_url": "/health",
+            "server_time": _server_time_text(),
         }
     ), 200
 
