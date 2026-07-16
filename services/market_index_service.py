@@ -17,7 +17,10 @@ matplotlib.use("Agg")
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
-from services.market_turnover_service import apply_twse_turnover_to_market_df
+from services.market_turnover_service import (
+    apply_twse_turnover_to_market_df,
+    get_twse_turnover_map,
+)
 from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
 import pandas as pd
@@ -41,7 +44,8 @@ except Exception:
         return ""
 
 
-MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v1-SHIOAJI17-IX0001"
+MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v2-IX0001-YAHOO-SNAPSHOT-FALLBACK"
+MARKET_INDEX_SNAPSHOT_FIX_VERSION = "2026-07-16-v2-IND-ZERO-SNAPSHOT-FALLBACK"
 
 # =========================
 # Cache settings
@@ -212,6 +216,203 @@ def _normalize_ts(value: Any) -> str:
         pass
 
     return str(value)
+
+
+def _first_positive(mapping: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = _safe_float(mapping.get(key), 0.0)
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _epoch_seconds_to_taipei_text(value: Any) -> str:
+    try:
+        number = float(value)
+        if number <= 0:
+            return ""
+
+        # Yahoo 使用秒；少數來源可能傳毫秒、微秒或奈秒。
+        if number >= 1e18:
+            unit = "ns"
+        elif number >= 1e15:
+            unit = "us"
+        elif number >= 1e12:
+            unit = "ms"
+        else:
+            unit = "s"
+
+        ts = pd.to_datetime(number, unit=unit, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return ""
+        return ts.tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _fetch_taiex_yahoo_intraday_snapshot() -> dict[str, Any]:
+    """
+    Yahoo chart 1m fallback for TAIEX.
+
+    Shioaji 的 Snapshot 官方文件主要列出股票、期貨與選擇權；
+    某些版本對 IND contract 會回傳有時間但 OHLC 全為 0 的 placeholder。
+    此函式只在 Shioaji 指數 snapshot 無有效 close 時使用。
+    """
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII"
+    params = {
+        "range": "1d",
+        "interval": "1m",
+        "includePrePost": "false",
+        "events": "history",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
+
+    t0 = time.perf_counter()
+    resp = _HTTP_SESSION.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=MARKET_INDEX_YAHOO_TIMEOUT_SECONDS,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    result = ((payload.get("chart") or {}).get("result") or [])
+    if not result:
+        return {}
+
+    item = result[0]
+    meta = item.get("meta") or {}
+    timestamps = item.get("timestamp") or []
+    quote = (((item.get("indicators") or {}).get("quote") or [{}])[0])
+
+    close_list = quote.get("close") or []
+    open_list = quote.get("open") or []
+    high_list = quote.get("high") or []
+    low_list = quote.get("low") or []
+
+    valid_positions = [
+        i for i, value in enumerate(close_list)
+        if _safe_float(value, 0.0) > 0
+    ]
+    if not valid_positions:
+        return {}
+
+    last_pos = valid_positions[-1]
+    latest_close = _safe_float(close_list[last_pos], 0.0)
+
+    regular_price = _safe_float(meta.get("regularMarketPrice"), 0.0)
+    if regular_price > 0:
+        latest_close = regular_price
+
+    valid_open = [_safe_float(v, 0.0) for v in open_list if _safe_float(v, 0.0) > 0]
+    valid_high = [_safe_float(v, 0.0) for v in high_list if _safe_float(v, 0.0) > 0]
+    valid_low = [_safe_float(v, 0.0) for v in low_list if _safe_float(v, 0.0) > 0]
+
+    open_price = _safe_float(meta.get("regularMarketOpen"), 0.0) or (valid_open[0] if valid_open else latest_close)
+    high_price = _safe_float(meta.get("regularMarketDayHigh"), 0.0) or (max(valid_high) if valid_high else latest_close)
+    low_price = _safe_float(meta.get("regularMarketDayLow"), 0.0) or (min(valid_low) if valid_low else latest_close)
+
+    previous_close = (
+        _safe_float(meta.get("previousClose"), 0.0)
+        or _safe_float(meta.get("chartPreviousClose"), 0.0)
+    )
+    change = latest_close - previous_close if previous_close > 0 else 0.0
+    change_pct = change / previous_close * 100 if previous_close > 0 else 0.0
+
+    quote_time = _epoch_seconds_to_taipei_text(meta.get("regularMarketTime"))
+    if not quote_time and last_pos < len(timestamps):
+        quote_time = _epoch_seconds_to_taipei_text(timestamps[last_pos])
+
+    _debug(
+        "yahoo intraday snapshot",
+        "| version =", MARKET_INDEX_SNAPSHOT_FIX_VERSION,
+        "| close =", latest_close,
+        "| previous_close =", previous_close,
+        "| change =", change,
+        "| change_pct =", change_pct,
+        "| time =", quote_time,
+        "| sec =", round(time.perf_counter() - t0, 3),
+    )
+
+    return {
+        "open_price": open_price,
+        "high_price": max(high_price, open_price, latest_close),
+        "low_price": min(low_price, open_price, latest_close),
+        "close_price": latest_close,
+        "change": change,
+        "change_pct": change_pct,
+        "quote_time": quote_time,
+        "quote_source": "Yahoo 指數行情",
+    }
+
+
+def _fetch_taiex_daily_snapshot_fallback() -> dict[str, Any]:
+    """最後備援：由 Yahoo 日 K 最新兩筆組成圖卡數字。"""
+    try:
+        df = _fetch_taiex_history_yahoo_direct()
+    except Exception as exc:
+        _debug("daily snapshot fallback failed", repr(exc))
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    work = df.dropna(subset=["Close"]).copy()
+    if work.empty:
+        return {}
+
+    latest = work.iloc[-1]
+    close_price = _safe_float(latest.get("Close"), 0.0)
+    if close_price <= 0:
+        return {}
+
+    previous_close = 0.0
+    if len(work) >= 2:
+        previous_close = _safe_float(work.iloc[-2].get("Close"), 0.0)
+
+    change = close_price - previous_close if previous_close > 0 else 0.0
+    change_pct = change / previous_close * 100 if previous_close > 0 else 0.0
+    latest_index = pd.to_datetime(work.index[-1], errors="coerce")
+    quote_time = latest_index.strftime("%Y-%m-%d") if pd.notna(latest_index) else ""
+
+    return {
+        "open_price": _safe_float(latest.get("Open"), close_price),
+        "high_price": _safe_float(latest.get("High"), close_price),
+        "low_price": _safe_float(latest.get("Low"), close_price),
+        "close_price": close_price,
+        "change": change,
+        "change_pct": change_pct,
+        "quote_time": quote_time,
+        "quote_source": "Yahoo 日線備援",
+    }
+
+
+def _resolve_latest_turnover_yi(quote_time: str, raw_amount: float = 0.0) -> float:
+    if raw_amount > 0:
+        return raw_amount / 100_000_000 if raw_amount >= 100_000_000 else raw_amount
+
+    date_key = ""
+    try:
+        ts = pd.to_datetime(quote_time, errors="coerce")
+        if pd.notna(ts):
+            date_key = ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    try:
+        turnover_map = get_twse_turnover_map([date_key] if date_key else None)
+        if turnover_map:
+            if date_key and _safe_float(turnover_map.get(date_key), 0.0) > 0:
+                return _safe_float(turnover_map.get(date_key), 0.0)
+            return _safe_float(sorted(turnover_map.items())[-1][1], 0.0)
+    except Exception as exc:
+        _debug("turnover snapshot fallback failed", repr(exc))
+
+    return 0.0
 
 
 def _setup_chinese_font() -> None:
@@ -418,8 +619,8 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketIndexSnapshot:
         change=_safe_float(data.get("change")),
         change_pct=_safe_float(data.get("change_pct")),
 
-        volume=_safe_int(data.get("volume")),
-        total_volume=_safe_int(data.get("total_volume")),
+        volume=_safe_float(data.get("volume")),
+        total_volume=_safe_float(data.get("total_volume")),
         amount=_safe_int(data.get("amount")),
         total_amount=_safe_int(data.get("total_amount")),
 
@@ -434,222 +635,183 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketIndexSnapshot:
 # Public APIs
 # =========================
 def get_market_index_snapshot(with_chart: bool = True) -> MarketIndexSnapshot:
-    """
-    取得加權指數即時 snapshot。
-    with_chart=True 時會附 chart_url；圖表有 15 分鐘快取。
-    """
+    """取得加權指數圖卡資料；Shioaji IND snapshot 為 0 時自動改用 Yahoo。"""
     route_t0 = time.perf_counter()
-
     cache_key = "TAIEX"
     now = time.time()
 
     cached = _MARKET_INDEX_CACHE.get(cache_key)
-
     if cached:
         ts, data = cached
         age = now - ts
-
         if age <= MARKET_INDEX_CACHE_TTL_SECONDS:
             snapshot = _snapshot_from_dict(data)
-
             if with_chart and not snapshot.chart_url:
                 snapshot.chart_url = get_market_index_chart_url(snapshot)
                 data["chart_url"] = snapshot.chart_url
                 _MARKET_INDEX_CACHE[cache_key] = (ts, data)
-
             _debug(
                 "snapshot cache hit",
-                "| age_sec =",
-                round(age, 2),
-                "| chart_url =",
-                bool(snapshot.chart_url),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
+                "| version =", MARKET_INDEX_SNAPSHOT_FIX_VERSION,
+                "| age_sec =", round(age, 2),
+                "| close =", snapshot.close_price,
+                "| chart_url =", bool(snapshot.chart_url),
+                "| total_sec =", round(time.perf_counter() - route_t0, 3),
             )
-
             return snapshot
 
     t_api0 = time.perf_counter()
-
     api = get_api()
-
     t_api1 = time.perf_counter()
 
-    if api is None:
-        stale_snapshot = _get_stale_market_index_snapshot()
-
-        if stale_snapshot is not None:
-            _debug(
-                "snapshot fallback stale",
-                "| reason = api_none",
-                "| get_api_sec =",
-                round(t_api1 - t_api0, 3),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-            return stale_snapshot
-
-        return MarketIndexSnapshot(
-            available=False,
-            message="Shioaji 尚未登入，無法取得加權指數即時資料。",
-        )
-
+    contract = None
     t_contract0 = time.perf_counter()
-
-    contract = _get_taiex_contract(api)
-
+    if api is not None:
+        contract = _get_taiex_contract(api)
     t_contract1 = time.perf_counter()
 
-    if contract is None:
-        stale_snapshot = _get_stale_market_index_snapshot()
+    raw: dict[str, Any] = {}
+    shioaji_data: dict[str, Any] = {}
+    t_snapshot0 = time.perf_counter()
 
-        if stale_snapshot is not None:
+    if api is not None and contract is not None:
+        try:
+            snapshots = api.snapshots([contract])
+            if snapshots:
+                raw = _to_dict(snapshots[0])
+                shioaji_close = _first_positive(
+                    raw,
+                    "close", "last_price", "price", "index", "close_price",
+                )
+                shioaji_open = _first_positive(raw, "open", "open_price", "day_open")
+                shioaji_high = _first_positive(raw, "high", "high_price", "day_high")
+                shioaji_low = _first_positive(raw, "low", "low_price", "day_low")
+                shioaji_change = _safe_float(
+                    raw.get("change_price")
+                    if raw.get("change_price") is not None
+                    else raw.get("change"),
+                    0.0,
+                )
+                shioaji_change_pct = _safe_float(
+                    raw.get("change_rate")
+                    if raw.get("change_rate") is not None
+                    else raw.get("change_pct"),
+                    0.0,
+                )
+                shioaji_time = _normalize_ts(raw.get("ts") or raw.get("timestamp") or raw.get("time"))
+
+                if shioaji_close > 0:
+                    shioaji_data = {
+                        "open_price": shioaji_open or shioaji_close,
+                        "high_price": shioaji_high or shioaji_close,
+                        "low_price": shioaji_low or shioaji_close,
+                        "close_price": shioaji_close,
+                        "change": shioaji_change,
+                        "change_pct": shioaji_change_pct,
+                        "quote_time": shioaji_time,
+                        "quote_source": "永豐即時",
+                    }
+                else:
+                    _debug(
+                        "shioaji IND snapshot zero",
+                        "| version =", MARKET_INDEX_SNAPSHOT_FIX_VERSION,
+                        "| contract_code =", getattr(contract, "code", ""),
+                        "| raw_keys =", sorted(str(k) for k in raw.keys()),
+                        "| raw_ts =", raw.get("ts"),
+                        "| fallback = yahoo_intraday",
+                    )
+        except Exception as exc:
             _debug(
-                "snapshot fallback stale",
-                "| reason = contract_none",
-                "| get_api_sec =",
-                round(t_api1 - t_api0, 3),
-                "| contract_sec =",
-                round(t_contract1 - t_contract0, 3),
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
+                "shioaji index snapshot failed",
+                "| version =", MARKET_INDEX_SNAPSHOT_FIX_VERSION,
+                "| error =", repr(exc),
+                "| fallback = yahoo_intraday",
             )
-            return stale_snapshot
 
-        _debug(
-            "snapshot unavailable",
-            "| version =", MARKET_INDEX_CONTRACT_FIX_VERSION,
-            "| reason = contract_none",
-            "| get_api_sec =", round(t_api1 - t_api0, 3),
-            "| contract_sec =", round(t_contract1 - t_contract0, 3),
-        )
+    t_snapshot1 = time.perf_counter()
+
+    selected = shioaji_data
+    if not selected:
+        try:
+            selected = _fetch_taiex_yahoo_intraday_snapshot()
+        except Exception as exc:
+            _debug("yahoo intraday snapshot failed", repr(exc))
+            selected = {}
+
+    if not selected:
+        selected = _fetch_taiex_daily_snapshot_fallback()
+
+    close_price = _safe_float(selected.get("close_price"), 0.0)
+    if close_price <= 0:
+        stale_snapshot = _get_stale_market_index_snapshot()
+        if stale_snapshot is not None and stale_snapshot.close_price > 0:
+            return stale_snapshot
         return MarketIndexSnapshot(
             available=False,
-            message="找不到加權指數 contract：IX0001／TSE001。",
+            message="目前無法取得有效的加權指數點位。",
         )
 
-    try:
-        t_snapshot0 = time.perf_counter()
+    raw_amount = _first_positive(raw, "total_amount", "amount")
+    quote_time = str(selected.get("quote_time") or "")
+    market_turnover_yi = _resolve_latest_turnover_yi(quote_time, raw_amount)
 
-        snapshots = api.snapshots([contract])
+    data = {
+        "available": True,
+        "message": "ok",
+        "index_id": "TAIEX",
+        "index_name": "加權指數",
+        "open_price": _safe_float(selected.get("open_price"), close_price),
+        "high_price": _safe_float(selected.get("high_price"), close_price),
+        "low_price": _safe_float(selected.get("low_price"), close_price),
+        "close_price": close_price,
+        "change": _safe_float(selected.get("change"), 0.0),
+        "change_pct": _safe_float(selected.get("change_pct"), 0.0),
+        "volume": market_turnover_yi,
+        "total_volume": market_turnover_yi,
+        "amount": _safe_int(raw.get("amount")),
+        "total_amount": _safe_int(raw.get("total_amount")),
+        "quote_time": quote_time,
+        "quote_source": str(selected.get("quote_source") or "Yahoo 指數行情"),
+        "chart_url": "",
+    }
 
-        t_snapshot1 = time.perf_counter()
+    # 避免 OHLC 因資料源缺欄位而顯示 0。
+    data["open_price"] = data["open_price"] or close_price
+    data["high_price"] = max(data["high_price"] or close_price, data["open_price"], close_price)
+    data["low_price"] = min(
+        value for value in [data["low_price"] or close_price, data["open_price"], close_price]
+        if value > 0
+    )
 
-        if not snapshots:
-            return MarketIndexSnapshot(
-                available=False,
-                message="Shioaji 沒有回傳加權指數 snapshot。",
-            )
+    _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
+    snapshot = _snapshot_from_dict(data)
 
-        raw = _to_dict(snapshots[0])
-        total_amount_raw = _safe_float(
-            raw.get("total_amount")
-            or raw.get("amount")
-            or 0
-        )
-
-        market_turnover_yi = 0.0
-
-        if total_amount_raw > 0:
-            # Shioaji amount / total_amount 通常是「元」
-            # 大盤畫面要顯示「億元」
-            if total_amount_raw >= 100_000_000:
-                market_turnover_yi = total_amount_raw / 100_000_000
-            else:
-                market_turnover_yi = total_amount_raw
-        data = {
-            "available": True,
-            "message": "ok",
-            "index_id": "TAIEX",
-            "index_name": "加權指數",
-
-            "open_price": _safe_float(raw.get("open")),
-            "high_price": _safe_float(raw.get("high")),
-            "low_price": _safe_float(raw.get("low")),
-            "close_price": _safe_float(raw.get("close")),
-
-            "change": _safe_float(raw.get("change_price")),
-            "change_pct": _safe_float(raw.get("change_rate")),
-
-            # 大盤這裡不要用 total_volume。
-            # 台股看盤軟體的大盤「量」通常看成交金額，單位億元。
-            "volume": market_turnover_yi,
-            "total_volume": market_turnover_yi,
-            "amount": _safe_int(raw.get("amount")),
-            "total_amount": _safe_int(raw.get("total_amount")),
-
-            "quote_time": _normalize_ts(raw.get("ts")),
-            "quote_source": "永豐即時",
-
-            "chart_url": "",
-        }
-
-        # 先快取即時數字，避免圖表失敗影響即時回覆。
+    t_chart0 = time.perf_counter()
+    if with_chart:
+        data["chart_url"] = get_market_index_chart_url(snapshot)
+        snapshot.chart_url = data["chart_url"]
         _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
+    t_chart1 = time.perf_counter()
 
-        snapshot = _snapshot_from_dict(data)
+    _debug(
+        "snapshot",
+        "| version =", MARKET_INDEX_SNAPSHOT_FIX_VERSION,
+        "| source =", data["quote_source"],
+        "| close =", data["close_price"],
+        "| change =", data["change"],
+        "| change_pct =", data["change_pct"],
+        "| turnover_yi =", data["total_volume"],
+        "| time =", data["quote_time"],
+        "| chart_url =", bool(data["chart_url"]),
+        "| get_api_sec =", round(t_api1 - t_api0, 3),
+        "| contract_sec =", round(t_contract1 - t_contract0, 3),
+        "| shioaji_sec =", round(t_snapshot1 - t_snapshot0, 3),
+        "| chart_sec =", round(t_chart1 - t_chart0, 3),
+        "| total_sec =", round(time.perf_counter() - route_t0, 3),
+    )
 
-        t_chart0 = time.perf_counter()
+    return snapshot
 
-        if with_chart:
-            data["chart_url"] = get_market_index_chart_url(snapshot)
-            snapshot.chart_url = data["chart_url"]
-            _MARKET_INDEX_CACHE[cache_key] = (now, dict(data))
-
-        t_chart1 = time.perf_counter()
-
-        _debug(
-            "snapshot",
-            "| close =",
-            data["close_price"],
-            "| change =",
-            data["change"],
-            "| change_pct =",
-            data["change_pct"],
-            "| turnover_yi =",
-            data["total_volume"],
-            "| raw_total_volume =",
-            raw.get("total_volume"),
-            "| raw_total_amount =",
-            raw.get("total_amount"),
-            "| time =",
-            data["quote_time"],
-            "| chart_url =",
-            bool(data["chart_url"]),
-            "| get_api_sec =",
-            round(t_api1 - t_api0, 3),
-            "| contract_sec =",
-            round(t_contract1 - t_contract0, 3),
-            "| shioaji_sec =",
-            round(t_snapshot1 - t_snapshot0, 3),
-            "| chart_sec =",
-            round(t_chart1 - t_chart0, 3),
-            "| total_sec =",
-            round(time.perf_counter() - route_t0, 3),
-        )
-
-        return snapshot
-
-    except Exception as exc:
-        _debug("snapshot failed", exc)
-
-        stale_snapshot = _get_stale_market_index_snapshot()
-
-        if stale_snapshot is not None:
-            _debug(
-                "snapshot fallback stale",
-                "| reason = exception",
-                "| error =",
-                exc,
-                "| total_sec =",
-                round(time.perf_counter() - route_t0, 3),
-            )
-            return stale_snapshot
-
-        return MarketIndexSnapshot(
-            available=False,
-            message=f"取得加權指數即時資料失敗：{exc}",
-        )
 
 def _get_stale_market_index_snapshot() -> MarketIndexSnapshot | None:
     """
