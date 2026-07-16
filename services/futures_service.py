@@ -39,6 +39,7 @@ except Exception:
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
 FUTURES_ALL_SESSION_FIX_VERSION = "2026-07-16-v1-OUTRIGHT-ONLY-ALL-SESSION"
+FUTURES_CURRENT_PRICE_LABEL_FIX_VERSION = "2026-07-16-v1-CENTERED-PRICE-TAG"
 
 
 @dataclass
@@ -1457,21 +1458,43 @@ def _generate_futures_kline_chart(
             current_price,
             linestyle="--",
             linewidth=1.1,
-            alpha=0.75,
+            alpha=0.78,
             color="#666666",
-            zorder=1,
+            zorder=5,
         )
 
-        ax_k.text(
-            0.99,
-            current_price,
-            f" 現價 {current_price:g}",
-            transform=ax_k.get_yaxis_transform(),
+        # x 使用座標軸比例、y 使用價格資料座標。
+        # va 必須用 center，標籤中心才會精準對齊現價水平線；
+        # 原本 va="bottom" 會讓文字整塊跑到水平線上方，視覺上像對到更高價格。
+        ax_k.annotate(
+            f"現價 {current_price:g}",
+            xy=(0.995, current_price),
+            xycoords=ax_k.get_yaxis_transform(),
+            xytext=(-4, 0),
+            textcoords="offset points",
             ha="right",
-            va="bottom",
-            fontsize=8,
+            va="center",
+            fontsize=9,
             fontweight="bold",
             color="#444444",
+            bbox={
+                "boxstyle": "round,pad=0.18",
+                "facecolor": "white",
+                "edgecolor": "#B0B0B0",
+                "linewidth": 0.6,
+                "alpha": 0.92,
+            },
+            zorder=8,
+            clip_on=True,
+        )
+
+        print(
+            "DEBUG futures current price label",
+            "| version =", FUTURES_CURRENT_PRICE_LABEL_FIX_VERSION,
+            "| current_price =", current_price,
+            "| ylim =", tuple(round(float(v), 4) for v in ax_k.get_ylim()),
+            "| valign = center",
+            flush=True,
         )
 
     labels = [str(d)[5:].replace("-", "/") for d in df["date"].tolist()]
