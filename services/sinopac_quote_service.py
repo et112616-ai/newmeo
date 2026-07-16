@@ -16,12 +16,14 @@ SHIOAJI_SIMULATION = os.getenv("SHIOAJI_SIMULATION", "false").strip().lower() ==
 
 _API = None
 _LOGIN_TS = 0.0
+_LOGIN_LOCK = threading.Lock()
 LOGIN_TTL_SECONDS = 60 * 60 * 12
 
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
 
-INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
+INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2.1-UNIFIED-ALL-TF-LOGIN-HOTFIX"
+SHIOAJI_LOGIN_FIX_VERSION = "2026-07-16-v1-COMPATIBLE-LOGIN"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -130,10 +132,57 @@ def _normalize_ts(value: Any) -> str:
     return str(value)
 
 
+def _login_shioaji_compatible(api) -> None:
+    """
+    相容不同 Shioaji 版本的 login() 簽名。
+
+    部分版本支援 contracts_timeout，部分版本不支援；遇到
+    unexpected keyword argument 時，立即移除該參數重試。
+    """
+    base_kwargs = {
+        "api_key": SHIOAJI_API_KEY,
+        "secret_key": SHIOAJI_SECRET_KEY,
+    }
+
+    try:
+        api.login(
+            **base_kwargs,
+            contracts_timeout=10000,
+        )
+        _debug(
+            "login signature",
+            "| version =", SHIOAJI_LOGIN_FIX_VERSION,
+            "| mode = contracts_timeout_supported",
+        )
+        return
+
+    except TypeError as exc:
+        message = str(exc)
+
+        if "contracts_timeout" not in message:
+            raise
+
+        _debug(
+            "login retry",
+            "| version =", SHIOAJI_LOGIN_FIX_VERSION,
+            "| reason = contracts_timeout_unsupported",
+        )
+
+    # 舊版 Shioaji：不帶 contracts_timeout。
+    api.login(**base_kwargs)
+    _debug(
+        "login signature",
+        "| version =", SHIOAJI_LOGIN_FIX_VERSION,
+        "| mode = basic_api_key_secret",
+    )
+
+
 def get_api():
     """
     Lazy login。
     不在 import 時登入，避免 Render boot 時卡住。
+
+    使用 lock 避免多個請求同時建立 Shioaji session。
     """
     global _API, _LOGIN_TS
 
@@ -146,28 +195,39 @@ def get_api():
     if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
         return _API
 
-    try:
-        import shioaji as sj
+    with _LOGIN_LOCK:
+        now = time.time()
 
-        api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
+        # 取得 lock 後再次檢查，避免其他 thread 已完成登入。
+        if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
+            return _API
 
-        api.login(
-            api_key=SHIOAJI_API_KEY,
-            secret_key=SHIOAJI_SECRET_KEY,
-            contracts_timeout=10000,
-        )
+        try:
+            import shioaji as sj
 
-        _API = api
-        _LOGIN_TS = now
+            api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
+            _login_shioaji_compatible(api)
 
-        _debug("login ok", "simulation =", SHIOAJI_SIMULATION)
+            _API = api
+            _LOGIN_TS = time.time()
 
-        return _API
+            _debug(
+                "login ok",
+                "| version =", SHIOAJI_LOGIN_FIX_VERSION,
+                "| simulation =", SHIOAJI_SIMULATION,
+            )
 
-    except Exception as exc:
-        _debug("login failed", exc)
-        _API = None
-        return None
+            return _API
+
+        except Exception as exc:
+            _debug(
+                "login failed",
+                "| version =", SHIOAJI_LOGIN_FIX_VERSION,
+                "| error =", repr(exc),
+            )
+            _API = None
+            _LOGIN_TS = 0.0
+            return None
 
 
 def _get_stock_contract(api, stock_id: str):
