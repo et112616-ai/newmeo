@@ -5,6 +5,7 @@ from __future__ import annotations
 # W / M charts use daily history for card price, change and date.
 # ============================================================
 DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
+INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v1-UNIFIED-1M-THEN-5M"
 
 from services.sinopac_quote_service import (
     append_stock_snapshot_to_intraday_df_fast,
@@ -923,6 +924,57 @@ def _is_yfinance_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+def _resample_intraday_from_1m(df, target_tf: str):
+    """把已補上最新 snapshot 的同一份 1 分底稿聚合成 5 分圖。"""
+    if df is None or len(df) == 0 or str(target_tf) != "5m":
+        return df
+
+    try:
+        import pandas as pd
+
+        attrs = dict(getattr(df, "attrs", {}) or {})
+        work = df.copy().sort_index()
+        result = (
+            work.resample("5min", label="left", closed="left")
+            .agg(
+                {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum",
+                }
+            )
+            .dropna(subset=["Open", "High", "Low", "Close"])
+        )
+        result = result[result["Close"] > 0]
+        result.attrs.update(attrs)
+        result.attrs["intraday_base_tf"] = "1m"
+        result.attrs["display_tf"] = "5m"
+        result.attrs["latest_quote_time"] = str(work.index[-1])
+        result.attrs["latest_quote_price"] = float(work["Close"].iloc[-1])
+
+        print(
+            "DEBUG INTRADAY 5M RESAMPLE ACTIVE",
+            "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| raw_rows =", len(work),
+            "| chart_rows =", len(result),
+            "| raw_last =", work.index[-1],
+            "| chart_last =", result.index[-1] if len(result) else "",
+            flush=True,
+        )
+        return result
+
+    except Exception as exc:
+        print(
+            "DEBUG INTRADAY 5M RESAMPLE FAILED",
+            "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+            "| error =", repr(exc),
+            flush=True,
+        )
+        return df
+
+
 def _get_history_df_tf(meta, requested_tf):
     """
     取得個股行情資料。
@@ -954,9 +1006,17 @@ def _get_history_df_tf(meta, requested_tf):
             df = get_stock_intraday_yahoo_direct(
                 stock_id=stock_id,
                 yf_symbol=yf_symbol,
-                time_frame=tf,
+                time_frame="1m",
                 timeout=int(os.getenv("YAHOO_DIRECT_TIMEOUT_SECONDS", "5")),
             )
+
+            if df is not None and not df.empty:
+                try:
+                    df.attrs["intraday_base_tf"] = "1m"
+                    df.attrs["requested_tf"] = tf
+                    df.attrs["intraday_unified_version"] = INTRADAY_UNIFIED_FIX_VERSION
+                except Exception:
+                    pass
 
             t_yahoo1 = time.perf_counter()
 
@@ -1016,11 +1076,18 @@ def _get_history_df_tf(meta, requested_tf):
             try:
                 t_shioaji0 = time.perf_counter()
 
-                df = get_stock_intraday_kbars(stock_id, time_frame=tf, days=1)
+                df = get_stock_intraday_kbars(stock_id, time_frame="1m", days=1)
 
                 t_shioaji1 = time.perf_counter()
 
                 if df is not None and not df.empty:
+                    try:
+                        df.attrs["intraday_base_tf"] = "1m"
+                        df.attrs["requested_tf"] = tf
+                        df.attrs["intraday_unified_version"] = INTRADAY_UNIFIED_FIX_VERSION
+                    except Exception:
+                        pass
+
                     print(
                         "_get_history_df_tf | source=shioaji_kbars",
                         "| stock_id =",
@@ -6417,6 +6484,32 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 # 修正 Yahoo 盤中延遲：再用 Shioaji snapshot 強制補最後一列。
                 df = _apply_shioaji_stock_realtime(df, meta.stock_id)
 
+            # 即時圖統一資料流：
+            # 1m / 5m 都先使用同一份 1 分底稿，補完 snapshot 後才產生 5 分圖。
+            intraday_price_df = None
+            if action == "instant" and tf in {"1m", "5m"}:
+                intraday_price_df = df
+
+                if tf == "5m":
+                    base_tf = str(
+                        (getattr(df, "attrs", {}) or {}).get("intraday_base_tf") or ""
+                    )
+                    if base_tf == "1m":
+                        df = _resample_intraday_from_1m(df, "5m")
+
+                print(
+                    "DEBUG INTRADAY UNIFIED PIPELINE ACTIVE",
+                    "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+                    "| stock_id =", getattr(meta, "stock_id", ""),
+                    "| chart_tf =", tf,
+                    "| price_tf = 1m",
+                    "| raw_rows =", 0 if intraday_price_df is None else len(intraday_price_df),
+                    "| chart_rows =", 0 if df is None else len(df),
+                    "| raw_last =", "" if intraday_price_df is None or len(intraday_price_df) == 0 else intraday_price_df.index[-1],
+                    "| chart_last =", "" if df is None or len(df) == 0 else df.index[-1],
+                    flush=True,
+                )
+
             # 圖表週期與圖卡價格週期分離：
             # - df / tf：只負責畫 D / W / M K 線。
             # - price_df / price_tf：只負責圖卡上方現價、當日漲跌與更新日期。
@@ -6424,9 +6517,14 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             # 週 K、月 K 不可用前一週／前一月計算圖卡漲跌，否則會出現：
             # 798 - 900 = -102、795 - 1140 = -345 這類週／月差額。
             # 因此 W / M 一律另外取得日 K 最新兩筆，改算「當日漲跌」。
-            price_df = df
-            price_tf = tf
-            price_source = "chart_history"
+            if action == "instant" and tf in {"1m", "5m"} and intraday_price_df is not None:
+                price_df = intraday_price_df
+                price_tf = "1m"
+                price_source = "unified_1m_base"
+            else:
+                price_df = df
+                price_tf = tf
+                price_source = "chart_history"
 
             if action == "k_line" and tf in {"W", "M"}:
                 try:
