@@ -40,6 +40,7 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
 FUTURES_ALL_SESSION_FIX_VERSION = "2026-07-16-v1-OUTRIGHT-ONLY-ALL-SESSION"
 FUTURES_CURRENT_PRICE_LABEL_FIX_VERSION = "2026-07-16-v1-CENTERED-PRICE-TAG"
+FUTURES_LIVE_KLINE_FIX_VERSION = "2026-07-16-v1-MERGE-SHIOAJI-OHLC"
 
 
 @dataclass
@@ -1246,6 +1247,182 @@ def _filter_futures_chart_price_outliers(rows: list[dict]) -> list[dict]:
     return kept or rows
 
 
+
+def _merge_live_futures_snapshot_into_kline_rows(
+    rows: list[dict],
+    snapshot: dict | None,
+    session_mode: str = "all",
+) -> list[dict]:
+    """
+    將 Shioaji 即時期貨 OHLC 合併到 K 線資料。
+
+    背景：
+    - FinMind TaiwanFuturesDaily 是日資料，盤中／夜盤尚未結束時，
+      最新日線不會包含 Shioaji 當下已經走過的高低點。
+    - 舊版只畫 current_price 水平線，沒有把 snapshot high / low 寫入 K 棒，
+      因此即使盤中最低到 142.5，最右邊 K 棒仍可能只到 149.5。
+
+    規則：
+    - 只在全盤模式使用，避免改變原本日盤圖定義。
+    - snapshot 日期與最新 FinMind 日期相同：更新最後一根。
+    - snapshot 日期晚於最新 FinMind 日期：新增一根即時暫存 K。
+    - Open 保留歷史全盤起始價；High / Low 取歷史與即時極值；
+      Close 使用即時價。
+    """
+    work = [dict(r) for r in (rows or [])]
+
+    if str(session_mode or "").strip().lower() != "all":
+        return work
+
+    if not snapshot or not isinstance(snapshot, dict):
+        return work
+
+    live_close = _safe_float(snapshot.get("close"))
+    live_open = _safe_float(snapshot.get("open"))
+    live_high = _safe_float(snapshot.get("high"))
+    live_low = _safe_float(snapshot.get("low"))
+    live_volume = _safe_int(
+        snapshot.get("total_volume") or snapshot.get("volume")
+    )
+    live_date = _normalize_trade_date(snapshot.get("ts"))
+
+    if live_close <= 0 or not live_date:
+        print(
+            "DEBUG futures live kline merge skipped",
+            "| version =", FUTURES_LIVE_KLINE_FIX_VERSION,
+            "| reason = invalid_snapshot",
+            "| ts =", snapshot.get("ts"),
+            "| open =", live_open,
+            "| high =", live_high,
+            "| low =", live_low,
+            "| close =", live_close,
+            flush=True,
+        )
+        return work
+
+    # 某些 snapshot 在剛訂閱時 open/high/low 可能暫時為 0，
+    # 用 close 補齊，確保即時列仍是合法 OHLC。
+    if live_open <= 0:
+        live_open = live_close
+    if live_high <= 0:
+        live_high = max(live_open, live_close)
+    if live_low <= 0:
+        live_low = min(live_open, live_close)
+
+    live_high = max(live_high, live_open, live_close)
+    live_low = min(live_low, live_open, live_close)
+
+    latest_date = ""
+    latest_index = -1
+
+    for i, row in enumerate(work):
+        row_date = (
+            row.get("_trade_date_norm")
+            or _normalize_trade_date(row.get("date"))
+        )
+        if row_date and row_date >= latest_date:
+            latest_date = row_date
+            latest_index = i
+
+    action = "append"
+
+    if latest_index >= 0 and live_date == latest_date:
+        base = dict(work[latest_index])
+
+        old_open = _get_open_price(base)
+        old_high = _get_high_price(base)
+        old_low = _get_low_price(base)
+        old_volume = _safe_int(base.get("volume"))
+
+        merged_open = old_open if old_open > 0 else live_open
+        merged_high = max(
+            value for value in [old_high, live_high, merged_open, live_close]
+            if value > 0
+        )
+        merged_low = min(
+            value for value in [old_low, live_low, merged_open, live_close]
+            if value > 0
+        )
+
+        base["open"] = merged_open
+        base["max"] = merged_high
+        base["min"] = merged_low
+        base["close"] = live_close
+        base["volume"] = max(old_volume, live_volume)
+        base["date"] = live_date
+        base["_trade_date_norm"] = live_date
+        base["trading_session"] = "all_live"
+        base["_live_snapshot_merged"] = True
+
+        work[latest_index] = base
+        action = "update_latest"
+        result_row = base
+
+    elif latest_index < 0 or live_date > latest_date:
+        contract_date = ""
+        contract_norm = ""
+
+        if latest_index >= 0:
+            contract_date = work[latest_index].get("contract_date") or ""
+            contract_norm = (
+                work[latest_index].get("_contract_norm")
+                or _normalize_contract_date(contract_date)
+            )
+
+        result_row = {
+            "date": live_date,
+            "contract_date": contract_date,
+            "open": live_open,
+            "max": live_high,
+            "min": live_low,
+            "close": live_close,
+            "volume": live_volume,
+            "trading_session": "all_live",
+            "_trade_date_norm": live_date,
+            "_contract_norm": contract_norm,
+            "_live_snapshot_merged": True,
+        }
+        work.append(result_row)
+        action = "append_new"
+
+    else:
+        print(
+            "DEBUG futures live kline merge skipped",
+            "| version =", FUTURES_LIVE_KLINE_FIX_VERSION,
+            "| reason = snapshot_older_than_chart",
+            "| live_date =", live_date,
+            "| latest_date =", latest_date,
+            flush=True,
+        )
+        return work
+
+    work = sorted(
+        work,
+        key=lambda r: (
+            r.get("_trade_date_norm")
+            or _normalize_trade_date(r.get("date"))
+        ),
+    )
+
+    print(
+        "DEBUG futures live kline merged",
+        "| version =", FUTURES_LIVE_KLINE_FIX_VERSION,
+        "| action =", action,
+        "| live_date =", live_date,
+        "| snapshot_open =", live_open,
+        "| snapshot_high =", live_high,
+        "| snapshot_low =", live_low,
+        "| snapshot_close =", live_close,
+        "| result_open =", result_row.get("open"),
+        "| result_high =", result_row.get("max"),
+        "| result_low =", result_row.get("min"),
+        "| result_close =", result_row.get("close"),
+        "| rows =", len(work),
+        flush=True,
+    )
+
+    return work[-30:]
+
 def _generate_futures_kline_chart(
     rows: list[dict],
     futures_id: str,
@@ -1850,6 +2027,12 @@ def get_stock_futures_snapshot(
                 session_mode=session_mode,
             )
 
+            kline_rows = _merge_live_futures_snapshot_into_kline_rows(
+                kline_rows,
+                shioaji_quote,
+                session_mode=session_mode,
+            )
+
             print(
                 "DEBUG futures chart rows",
                 "| count=", len(kline_rows),
@@ -1872,6 +2055,12 @@ def get_stock_futures_snapshot(
                 kline_rows = _prepare_futures_kline_rows(
                     selected_rows,
                     chart_anchor_row,
+                )
+
+                kline_rows = _merge_live_futures_snapshot_into_kline_rows(
+                    kline_rows,
+                    shioaji_quote,
+                    session_mode=session_mode,
                 )
 
                 chart_url = _generate_futures_kline_chart(
