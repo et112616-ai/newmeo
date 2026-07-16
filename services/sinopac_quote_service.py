@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import threading
 import time
+import threading
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -16,11 +16,17 @@ SHIOAJI_SIMULATION = os.getenv("SHIOAJI_SIMULATION", "false").strip().lower() ==
 
 _API = None
 _LOGIN_TS = 0.0
-_LOGIN_LOCK = threading.Lock()
 LOGIN_TTL_SECONDS = 60 * 60 * 12
 
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
+
+INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v1-UNIFIED-1M-BASE"
+_YAHOO_INTRADAY_1M_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_YAHOO_INTRADAY_1M_CACHE_LOCK = threading.Lock()
+YAHOO_INTRADAY_1M_CACHE_TTL_SECONDS = float(
+    os.getenv("YAHOO_INTRADAY_1M_CACHE_TTL_SECONDS", "30") or 30
+)
 
 
 def _debug(*args):
@@ -117,7 +123,8 @@ def _normalize_ts(value: Any) -> str:
 
 def get_api():
     """
-    Lazy login，並用 lock 避免背景預熱與使用者查詢同時重複登入。
+    Lazy login。
+    不在 import 時登入，避免 Render boot 時卡住。
     """
     global _API, _LOGIN_TS
 
@@ -130,36 +137,28 @@ def get_api():
     if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
         return _API
 
-    with _LOGIN_LOCK:
-        # 等 lock 期間，其他 thread 可能已完成登入，所以必須再檢查一次。
-        now = time.time()
+    try:
+        import shioaji as sj
 
-        if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
-            return _API
+        api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
 
-        try:
-            import shioaji as sj
+        api.login(
+            api_key=SHIOAJI_API_KEY,
+            secret_key=SHIOAJI_SECRET_KEY,
+            contracts_timeout=10000,
+        )
 
-            api = sj.Shioaji(simulation=SHIOAJI_SIMULATION)
+        _API = api
+        _LOGIN_TS = now
 
-            api.login(
-                api_key=SHIOAJI_API_KEY,
-                secret_key=SHIOAJI_SECRET_KEY,
-                contracts_timeout=10000,
-            )
+        _debug("login ok", "simulation =", SHIOAJI_SIMULATION)
 
-            _API = api
-            _LOGIN_TS = time.time()
+        return _API
 
-            _debug("login ok", "simulation =", SHIOAJI_SIMULATION)
-
-            return _API
-
-        except Exception as exc:
-            _debug("login failed", exc)
-            _API = None
-            _LOGIN_TS = 0.0
-            return None
+    except Exception as exc:
+        _debug("login failed", exc)
+        _API = None
+        return None
 
 
 def _get_stock_contract(api, stock_id: str):
@@ -774,6 +773,54 @@ def get_stock_intraday_kbars(stock_id: str, time_frame: str = "1m", days: int = 
         )
         return None
 
+def _copy_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    try:
+        result.attrs.update(dict(getattr(df, "attrs", {}) or {}))
+    except Exception:
+        pass
+    return result
+
+
+def _format_yahoo_intraday_time_frame(raw_df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """從同一份 1 分底稿輸出 1m / 5m，並保留原始最新報價時間。"""
+    work = _copy_intraday_df(raw_df)
+    attrs = dict(getattr(work, "attrs", {}) or {})
+
+    if work.empty or tf == "1m":
+        work.attrs.update(attrs)
+        work.attrs["intraday_base_tf"] = "1m"
+        work.attrs["display_tf"] = tf
+        return work
+
+    result = (
+        work.resample("5min", label="left", closed="left")
+        .agg(
+            {
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+        .dropna(subset=["Open", "High", "Low", "Close"])
+    )
+    result = result[result["Close"] > 0]
+    result.attrs.update(attrs)
+    result.attrs["intraday_base_tf"] = "1m"
+    result.attrs["display_tf"] = tf
+
+    if len(work):
+        result.attrs["latest_quote_time"] = str(work.index[-1])
+        try:
+            result.attrs["latest_quote_price"] = float(work["Close"].iloc[-1])
+        except Exception:
+            pass
+
+    return result
+
+
 def get_stock_intraday_yahoo_direct(
     stock_id: str,
     yf_symbol: str = "",
@@ -781,12 +828,13 @@ def get_stock_intraday_yahoo_direct(
     timeout: int = 5,
 ):
     """
-    使用 Yahoo chart API direct 抓個股盤中 1m / 5m 資料。
+    使用 Yahoo chart API direct 抓個股盤中資料。
 
-    重點：
-    - 不走 yfinance library 的 cookie / crumb 流程。
-    - 會把真正昨收存到 df.attrs["previous_close"]。
-    - 回傳欄位：Open, High, Low, Close, Volume。
+    修正版重點：
+    - Yahoo 永遠只抓一份 1 分原始資料。
+    - 5 分資料由同一份 1 分底稿聚合。
+    - 1 分底稿短暫快取，使用者連續切換 1m / 5m 時會看到同一批資料。
+    - 5 分圖仍保留原始 1 分最新時間於 attrs["latest_quote_time"]。
     """
     import time
     from urllib.parse import quote
@@ -801,92 +849,93 @@ def get_stock_intraday_yahoo_direct(
     tf = str(time_frame or "1m").strip()
 
     if tf not in {"1m", "5m"}:
-        print(
-            "DEBUG yahoo_direct intraday | unsupported tf =",
-            tf,
-            flush=True,
-        )
+        print("DEBUG yahoo_direct intraday | unsupported tf =", tf, flush=True)
         return None
 
     symbols = []
-
     if yf_symbol:
         symbols.append(yf_symbol)
-
     if stock_id:
         symbols.extend([f"{stock_id}.TW", f"{stock_id}.TWO"])
 
     clean_symbols = []
-
     for symbol in symbols:
         symbol = str(symbol or "").strip().upper()
-
         if symbol and symbol not in clean_symbols:
             clean_symbols.append(symbol)
 
     if not clean_symbols:
         return None
 
+    # 先找 1 分底稿快取。連續按 1m / 5m 時，兩張圖使用同一份資料。
+    now = time.time()
+    with _YAHOO_INTRADAY_1M_CACHE_LOCK:
+        for symbol in clean_symbols:
+            cached = _YAHOO_INTRADAY_1M_CACHE.get(symbol)
+            if not cached:
+                continue
+            cache_ts, cached_df = cached
+            if now - cache_ts <= YAHOO_INTRADAY_1M_CACHE_TTL_SECONDS:
+                result = _format_yahoo_intraday_time_frame(cached_df, tf)
+                print(
+                    "DEBUG yahoo_direct intraday cache hit",
+                    "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+                    "| stock =", stock_id,
+                    "| symbol =", symbol,
+                    "| tf =", tf,
+                    "| raw_rows =", len(cached_df),
+                    "| rows =", len(result),
+                    "| raw_last =", cached_df.index[-1] if len(cached_df) else "",
+                    "| display_last =", result.index[-1] if len(result) else "",
+                    flush=True,
+                )
+                return result
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
     }
-
     last_error = ""
 
     for symbol in clean_symbols:
         try:
             url = "https://query1.finance.yahoo.com/v8/finance/chart/" + quote(symbol, safe="")
-
             params = {
                 "range": "1d",
                 "interval": "1m",
                 "includePrePost": "false",
                 "events": "history",
             }
-
-            resp = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=timeout,
-            )
-
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
             if resp.status_code != 200:
                 last_error = f"status={resp.status_code}"
                 continue
 
             payload = resp.json()
-
             chart = payload.get("chart") or {}
             error = chart.get("error")
-
             if error:
                 last_error = str(error)
                 continue
 
-            result = chart.get("result") or []
-
-            if not result:
+            result_list = chart.get("result") or []
+            if not result_list:
                 last_error = "empty_result"
                 continue
 
-            item = result[0]
-
+            item = result_list[0]
             meta_data = item.get("meta") or {}
-
             yahoo_previous_close = (
                 meta_data.get("previousClose")
                 or meta_data.get("chartPreviousClose")
                 or meta_data.get("regularMarketPreviousClose")
             )
-
             yahoo_regular_price = meta_data.get("regularMarketPrice")
+            yahoo_regular_time = meta_data.get("regularMarketTime")
 
             timestamps = item.get("timestamp") or []
             indicators = item.get("indicators") or {}
             quote_data = (indicators.get("quote") or [{}])[0]
-
             if not timestamps or not quote_data:
                 last_error = "empty_timestamp_or_quote"
                 continue
@@ -895,13 +944,9 @@ def get_stock_intraday_yahoo_direct(
 
             def _same_len(values):
                 values = values or []
+                return values if len(values) == length else [None] * length
 
-                if len(values) != length:
-                    return [None] * length
-
-                return values
-
-            df = pd.DataFrame(
+            raw_df = pd.DataFrame(
                 {
                     "Open": _same_len(quote_data.get("open")),
                     "High": _same_len(quote_data.get("high")),
@@ -909,90 +954,75 @@ def get_stock_intraday_yahoo_direct(
                     "Close": _same_len(quote_data.get("close")),
                     "Volume": _same_len(quote_data.get("volume")),
                 },
-                index=pd.to_datetime(timestamps, unit="s", utc=True)
-                .tz_convert("Asia/Taipei")
-                .tz_localize(None),
-            )
-
-            df = df.sort_index()
+                index=(
+                    pd.to_datetime(timestamps, unit="s", utc=True)
+                    .tz_convert("Asia/Taipei")
+                    .tz_localize(None)
+                ),
+            ).sort_index()
 
             required = ["Open", "High", "Low", "Close", "Volume"]
-
             for col in required:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+                raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
 
-            df = df.dropna(subset=["Close"])
-            df = df[df["Close"] > 0]
-
-            if df.empty:
+            raw_df = raw_df.dropna(subset=["Close"])
+            raw_df = raw_df[raw_df["Close"] > 0]
+            if raw_df.empty:
                 last_error = "empty_valid_close"
                 continue
 
             for col in ["Open", "High", "Low"]:
-                df[col] = df[col].fillna(df["Close"])
-                df.loc[df[col] <= 0, col] = df.loc[df[col] <= 0, "Close"]
+                raw_df[col] = raw_df[col].fillna(raw_df["Close"])
+                raw_df.loc[raw_df[col] <= 0, col] = raw_df.loc[raw_df[col] <= 0, "Close"]
 
-            df["Volume"] = df["Volume"].fillna(0)
+            raw_df["Volume"] = raw_df["Volume"].fillna(0)
+            raw_df["High"] = raw_df[["High", "Open", "Close"]].max(axis=1)
+            raw_df["Low"] = raw_df[["Low", "Open", "Close"]].min(axis=1)
+            raw_df = raw_df[~raw_df.index.duplicated(keep="last")]
 
-            df["High"] = df[["High", "Open", "Close"]].max(axis=1)
-            df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
-
-            if tf == "5m":
-                df = (
-                    df.resample("5min")
-                    .agg(
-                        {
-                            "Open": "first",
-                            "High": "max",
-                            "Low": "min",
-                            "Close": "last",
-                            "Volume": "sum",
-                        }
+            if yahoo_previous_close is not None:
+                raw_df.attrs["previous_close"] = float(yahoo_previous_close)
+            if yahoo_regular_price is not None:
+                raw_df.attrs["regular_market_price"] = float(yahoo_regular_price)
+            if yahoo_regular_time:
+                try:
+                    regular_ts = (
+                        pd.to_datetime(yahoo_regular_time, unit="s", utc=True)
+                        .tz_convert("Asia/Taipei")
+                        .tz_localize(None)
                     )
-                    .dropna(subset=["Open", "High", "Low", "Close"])
-                )
+                    raw_df.attrs["regular_market_time"] = str(regular_ts)
+                except Exception:
+                    pass
 
-                df = df[df["Close"] > 0]
+            raw_df.attrs["latest_quote_time"] = str(raw_df.index[-1])
+            raw_df.attrs["latest_quote_price"] = float(raw_df["Close"].iloc[-1])
+            raw_df.attrs["symbol"] = symbol
+            raw_df.attrs["source"] = "yahoo_direct_1m_base"
+            raw_df.attrs["intraday_base_tf"] = "1m"
+            raw_df.attrs["version"] = INTRADAY_UNIFIED_FIX_VERSION
 
-            if df.empty:
-                last_error = "empty_after_resample"
-                continue
+            with _YAHOO_INTRADAY_1M_CACHE_LOCK:
+                _YAHOO_INTRADAY_1M_CACHE[symbol] = (time.time(), _copy_intraday_df(raw_df))
 
-            try:
-                if yahoo_previous_close is not None:
-                    df.attrs["previous_close"] = float(yahoo_previous_close)
-
-                if yahoo_regular_price is not None:
-                    df.attrs["regular_market_price"] = float(yahoo_regular_price)
-
-                df.attrs["symbol"] = symbol
-                df.attrs["source"] = "yahoo_direct"
-
-            except Exception:
-                pass
+            formatted = _format_yahoo_intraday_time_frame(raw_df, tf)
 
             print(
                 "DEBUG yahoo_direct intraday",
-                "| stock =",
-                stock_id,
-                "| symbol =",
-                symbol,
-                "| tf =",
-                tf,
-                "| rows =",
-                len(df),
-                "| previous_close =",
-                df.attrs.get("previous_close"),
-                "| first =",
-                df.index[0] if len(df) else "",
-                "| last =",
-                df.index[-1] if len(df) else "",
-                "| sec =",
-                round(time.perf_counter() - t0, 3),
+                "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+                "| stock =", stock_id,
+                "| symbol =", symbol,
+                "| tf =", tf,
+                "| raw_rows =", len(raw_df),
+                "| rows =", len(formatted),
+                "| previous_close =", formatted.attrs.get("previous_close"),
+                "| raw_first =", raw_df.index[0] if len(raw_df) else "",
+                "| raw_last =", raw_df.index[-1] if len(raw_df) else "",
+                "| display_last =", formatted.index[-1] if len(formatted) else "",
+                "| sec =", round(time.perf_counter() - t0, 3),
                 flush=True,
             )
-
-            return df
+            return formatted
 
         except Exception as exc:
             last_error = repr(exc)
@@ -1000,27 +1030,21 @@ def get_stock_intraday_yahoo_direct(
 
     print(
         "DEBUG yahoo_direct intraday failed",
-        "| stock =",
-        stock_id,
-        "| symbols =",
-        clean_symbols,
-        "| error =",
-        last_error,
-        "| sec =",
-        round(time.perf_counter() - t0, 3),
+        "| version =", INTRADAY_UNIFIED_FIX_VERSION,
+        "| stock =", stock_id,
+        "| symbols =", clean_symbols,
+        "| error =", last_error,
+        "| sec =", round(time.perf_counter() - t0, 3),
         flush=True,
     )
-
     return None
-
 
 
 def is_shioaji_api_ready() -> bool:
     """
     只檢查目前 process 的 Shioaji session，不觸發冷登入。
 
-    原版本漏掉真正使用的全域變數名稱 `_API`（大小寫不同），
-    因此即使登入成功也常被判定成 False。
+    舊版漏掉真正使用的全域變數 `_API`，導致已登入仍被判定 cold_api。
     """
     if _API is None:
         return False
