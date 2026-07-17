@@ -7,6 +7,7 @@ from __future__ import annotations
 DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
 MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
+ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -2311,9 +2312,16 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
 
     chart_url = str(getattr(snapshot, "chart_url", "") or "").strip()
 
+    market_update_text, market_update_color = _fresh_update_display(
+        str(getattr(snapshot, "quote_time", "") or "--"),
+        active_mode="instant",
+        current_tf="1m",
+        price_source=str(getattr(snapshot, "quote_source", "") or ""),
+    )
+
     rows = [
         ("資料", getattr(snapshot, "quote_source", "永豐即時"), "#888888"),
-        ("更新", str(getattr(snapshot, "quote_time", "") or "--")[:19], "#888888"),
+        ("更新", market_update_text, market_update_color),
         ("開", _fmt_market_price(getattr(snapshot, "open_price", 0.0)), "#222222"),
         ("高", _fmt_market_price(getattr(snapshot, "high_price", 0.0)), "#222222"),
         ("低", _fmt_market_price(getattr(snapshot, "low_price", 0.0)), "#222222"),
@@ -2582,6 +2590,12 @@ def _build_market_future_kline_flex(snapshot, active_tf: str = "1m") -> dict[str
     }
 
     label = label_map.get(tf, tf)
+    kline_update_text, _kline_update_color = _fresh_update_display(
+        str(getattr(snapshot, "latest_time", "") or "--"),
+        active_mode="k_line",
+        current_tf=tf,
+        price_source="shioaji",
+    )
 
     def _info_row(label_text: str, value_text: str) -> dict[str, Any]:
         return {
@@ -2658,7 +2672,7 @@ def _build_market_future_kline_flex(snapshot, active_tf: str = "1m") -> dict[str
                     "margin": "md",
                     "contents": [
                         _info_row("契約", getattr(snapshot, "contract_code", "TXFR1")),
-                        _info_row("最新時間", str(getattr(snapshot, "latest_time", "") or "--")),
+                        _info_row("更新", kline_update_text),
                         _info_row("K棒數", str(getattr(snapshot, "rows", 0) or 0)),
                     ],
                 },
@@ -3137,6 +3151,12 @@ def _build_market_future_realtime_flex(
         getattr(snapshot, "trading_session", "")
         or session_text
     )
+    future_update_text, future_update_color = _fresh_update_display(
+        quote_time,
+        active_mode="instant",
+        current_tf="1m",
+        price_source=quote_source,
+    )
 
     # 上方價格摘要
     contents.extend(
@@ -3252,7 +3272,7 @@ def _build_market_future_realtime_flex(
                     _info_row("商品", f"{futures_name} ({contract_code})", "#222222"),
                     _info_row("時段", trading_session, "#222222"),
                     _info_row("資料", quote_source, "#888888"),
-                    _info_row("更新", quote_time[:19] if quote_time else "--", "#888888"),
+                    _info_row("更新", future_update_text, future_update_color),
                 ],
             },
             {
@@ -3491,6 +3511,24 @@ def _stock_card_freshness(
         return "延遲行情", colors["延遲行情"]
 
     return "延遲行情", colors["延遲行情"]
+
+
+def _fresh_update_display(
+    update_time: str,
+    active_mode: str = "instant",
+    current_tf: str = "1m",
+    price_source: str = "",
+) -> tuple[str, str]:
+    """統一回傳圖卡更新欄位，例如「13:30｜即時」及對應顏色。"""
+    raw_text = str(update_time or "--").strip()
+    short_text = _short_card_update_time(raw_text)
+    freshness_text, freshness_color = _stock_card_freshness(
+        update_time=raw_text,
+        active_mode=active_mode,
+        current_tf=current_tf,
+        price_source=price_source,
+    )
+    return f"{short_text}｜{freshness_text}", freshness_color
 
 def _build_chart_flex(
     stock_id: str,
@@ -6015,6 +6053,12 @@ def _build_futures_flex(
     quote_source = str(getattr(snapshot, "quote_source", "") or "--")
     quote_time = str(getattr(snapshot, "quote_time", "") or "").strip()
     chart_url = str(getattr(snapshot, "chart_url", "") or "").strip()
+    stock_future_update_text, stock_future_update_color = _fresh_update_display(
+        quote_time or "--",
+        active_mode="instant",
+        current_tf=current_tf,
+        price_source=quote_source,
+    )
 
     # 價格摘要
     contents.extend(
@@ -6156,10 +6200,9 @@ def _build_futures_flex(
         ]
     )
 
-    if quote_time:
-        contents[-1]["contents"].append(
-            _info_row("更新", quote_time[:19], "#888888")
-        )
+    contents[-1]["contents"].append(
+        _info_row("更新", stock_future_update_text, stock_future_update_color)
+    )
 
     contents.extend(
         [
