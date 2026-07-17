@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -17,6 +18,22 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from services.upload_service import publish_figure
+from utils.chart_style import (
+    AXIS_TICK_FONTSIZE,
+    CHART_BACKGROUND,
+    DEFAULT_CANDLE_WIDTH,
+    DOWN_COLOR,
+    FIGURE_SIZES,
+    HIGH_LOW_FONTSIZE,
+    UP_COLOR,
+    annotate_visible_high_low,
+    apply_axis_style,
+    configure_chart_font,
+    hide_chart_spines,
+    set_price_axis_to_visible_high_low,
+)
+
+configure_chart_font(Path(__file__).resolve().parents[1])
 
 try:
     from services.futures_map_service import get_stock_futures_mapping
@@ -1508,7 +1525,7 @@ def _generate_futures_kline_chart(
     df["MA5"] = df["close"].astype(float).rolling(5, min_periods=1).mean()
     df["MA10"] = df["close"].astype(float).rolling(10, min_periods=1).mean()
 
-    fig = plt.figure(figsize=(7.6, 5.6), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=FIGURE_SIZES["stock_future"], dpi=130, facecolor="white")
 
     gs = gridspec.GridSpec(
         2,
@@ -1524,11 +1541,11 @@ def _generate_futures_kline_chart(
     ax_k = fig.add_subplot(gs[0])
     ax_v = fig.add_subplot(gs[1], sharex=ax_k)
 
-    ax_k.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
+    ax_k.set_facecolor(CHART_BACKGROUND)
+    ax_v.set_facecolor(CHART_BACKGROUND)
 
     x_values = list(range(len(df)))
-    width = 0.58
+    width = DEFAULT_CANDLE_WIDTH
 
     for i in x_values:
         row = df.iloc[i]
@@ -1539,7 +1556,7 @@ def _generate_futures_kline_chart(
         c = float(row["close"])
         vol = int(row["volume"])
 
-        color = "#FF2D2D" if c >= o else "#00B050"
+        color = UP_COLOR if c >= o else DOWN_COLOR
 
         ax_k.vlines(
             i,
@@ -1611,17 +1628,37 @@ def _generate_futures_kline_chart(
         pad=8,
     )
 
-    ax_k.grid(True, linestyle=":", alpha=0.35, zorder=1)
-    ax_v.grid(True, linestyle=":", alpha=0.30, zorder=1)
+    # 股票期貨 K 線價格軸：邊界就是可見 K 棒最高／最低，並強制顯示在右側刻度。
+    shared_plot_df = pd.DataFrame(
+        {
+            "High": df["high"].astype(float),
+            "Low": df["low"].astype(float),
+        },
+        index=df.index,
+    )
+    set_price_axis_to_visible_high_low(
+        ax_k,
+        shared_plot_df["High"],
+        shared_plot_df["Low"],
+        tick_fontsize=AXIS_TICK_FONTSIZE,
+    )
+    annotate_visible_high_low(
+        ax_k,
+        shared_plot_df,
+        x_values,
+        fontsize=HIGH_LOW_FONTSIZE,
+    )
+    apply_axis_style(ax_k)
+    apply_axis_style(ax_v)
 
     ax_k.yaxis.tick_right()
     ax_k.yaxis.set_label_position("right")
     ax_v.yaxis.tick_right()
     ax_v.yaxis.set_label_position("right")
 
-    ax_k.tick_params(axis="y", labelsize=8)
-    ax_v.tick_params(axis="y", labelsize=8)
-    ax_v.set_ylabel("量", fontsize=8)
+    ax_k.tick_params(axis="y", labelsize=AXIS_TICK_FONTSIZE)
+    ax_v.tick_params(axis="y", labelsize=AXIS_TICK_FONTSIZE)
+    ax_v.set_ylabel("量", fontsize=AXIS_TICK_FONTSIZE)
 
     ax_k.legend(
         loc="upper left",
@@ -1696,9 +1733,8 @@ def _generate_futures_kline_chart(
 
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
-    for spine in ["top", "left"]:
-        ax_k.spines[spine].set_visible(False)
-        ax_v.spines[spine].set_visible(False)
+    hide_chart_spines(ax_k, hide=("top", "left"))
+    hide_chart_spines(ax_v, hide=("top", "left"))
 
     for spine in ["right", "bottom"]:
         ax_k.spines[spine].set_alpha(0.35)
