@@ -25,6 +25,18 @@ from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
 import pandas as pd
 import requests
+from utils.chart_style import (
+    AXIS_TICK_FONTSIZE,
+    CHART_BACKGROUND,
+    DEFAULT_CANDLE_WIDTH,
+    FIGURE_SIZES,
+    HIGH_LOW_FONTSIZE,
+    annotate_visible_high_low,
+    apply_axis_style,
+    configure_chart_font,
+    hide_chart_spines,
+    set_price_axis_to_visible_high_low,
+)
 
 try:
     import yfinance as yf
@@ -432,49 +444,14 @@ def _setup_chinese_font() -> None:
             return
 
         try:
-            font_dir_candidates = [
-                Path(__file__).resolve().parents[1] / "assets" / "fonts",
-                Path("/opt/render/project/src/assets/fonts"),
-                Path("/mnt/data"),
-            ]
-
-            regular_path = None
-
-            for font_dir in font_dir_candidates:
-                candidates = [
-                    font_dir / "NotoSansTC-Regular.ttf",
-                    font_dir / "NotoSansCJKtc-Regular.otf",
-                ]
-
-                for font_path in candidates:
-                    if font_path.exists():
-                        font_manager.fontManager.addfont(str(font_path))
-
-                        if regular_path is None:
-                            regular_path = font_path
-
-                bold_candidates = [
-                    font_dir / "NotoSansTC-Bold.ttf",
-                    font_dir / "NotoSansCJKtc-Bold.otf",
-                ]
-
-                for font_path in bold_candidates:
-                    if font_path.exists():
-                        font_manager.fontManager.addfont(str(font_path))
-
-            if regular_path is not None:
-                font_name = FontProperties(fname=str(regular_path)).get_name()
-                plt.rcParams["font.family"] = font_name
-
-            plt.rcParams["axes.unicode_minus"] = False
-
+            configure_chart_font(Path(__file__).resolve().parents[1])
         except Exception as exc:
             _debug("font setup failed", exc)
 
         _FONT_SETUP_DONE = True
 
 
-DEFAULT_AXIS_TICK_FONTSIZE = 11
+DEFAULT_AXIS_TICK_FONTSIZE = AXIS_TICK_FONTSIZE
 
 
 def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
@@ -498,16 +475,11 @@ def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
 
 
 def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
-    ax.set_axisbelow(True)
-    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
-    _add_quarter_grid(ax)
-    ax.tick_params(axis="x", labelsize=x_labelsize)
-    ax.tick_params(axis="y", labelsize=y_labelsize)
+    apply_axis_style(ax, x_labelsize=x_labelsize, y_labelsize=y_labelsize)
 
 
 def _hide_top_right_spines(ax) -> None:
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
+    hide_chart_spines(ax)
 
 
 def _get_taiex_contract(api):
@@ -1613,7 +1585,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ma60 = _fmt_index_ma_value(latest.get("MA60"))
     ma120 = _fmt_index_ma_value(latest.get("MA120"))
 
-    fig = plt.figure(figsize=(9.4, 7.6), dpi=130, facecolor="white")
+    fig = plt.figure(figsize=FIGURE_SIZES["market_index"], dpi=130, facecolor="white")
 
     # 上方資訊區 + K線 + 成交量
     gs = gridspec.GridSpec(
@@ -1680,11 +1652,11 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     )
 
     # ========= K線區 =========
-    ax_k.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
+    ax_k.set_facecolor(CHART_BACKGROUND)
+    ax_v.set_facecolor(CHART_BACKGROUND)
 
     x_values = list(range(len(plot_df)))
-    candle_width = 0.58
+    candle_width = DEFAULT_CANDLE_WIDTH
 
     open_values = pd.to_numeric(plot_df["Open"], errors="coerce").astype(float).values
     high_values = pd.to_numeric(plot_df["High"], errors="coerce").astype(float).values
@@ -1754,8 +1726,22 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
                 color=line_color,
             )
 
-    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
-    _apply_axis_style(ax_v, x_labelsize=11, y_labelsize=11)
+    # 大盤 K 線同樣以畫面可見最高／最低作為價格軸上下緣，並顯示精確軸值。
+    set_price_axis_to_visible_high_low(
+        ax_k,
+        plot_df["High"],
+        plot_df["Low"],
+        tick_fontsize=AXIS_TICK_FONTSIZE,
+    )
+    annotate_visible_high_low(
+        ax_k,
+        plot_df,
+        x_values,
+        fontsize=HIGH_LOW_FONTSIZE,
+    )
+
+    _apply_axis_style(ax_k)
+    _apply_axis_style(ax_v)
 
     labels = [idx.strftime("%m/%d") for idx in plot_df.index]
     step = max(1, len(labels) // 6)
