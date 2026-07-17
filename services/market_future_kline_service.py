@@ -17,6 +17,19 @@ import pandas as pd
 from matplotlib import font_manager
 
 from services.upload_service import publish_figure
+from utils.chart_style import (
+    AXIS_TICK_FONTSIZE,
+    CHART_BACKGROUND,
+    DEFAULT_CANDLE_WIDTH,
+    FIGURE_SIZES,
+    HIGH_LOW_FONTSIZE,
+    annotate_visible_high_low,
+    apply_axis_style,
+    configure_chart_font,
+    format_price,
+    hide_chart_spines,
+    set_price_axis_to_visible_high_low,
+)
 
 try:
     from services.sinopac_quote_service import get_api
@@ -55,22 +68,7 @@ RESAMPLE_RULE_MAP = {
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 
-CHART_FONT_PROP = None
-
-if FONT_PATH.exists():
-    font_manager.fontManager.addfont(str(FONT_PATH))
-    CHART_FONT_PROP = font_manager.FontProperties(fname=str(FONT_PATH))
-    plt.rcParams["font.family"] = CHART_FONT_PROP.get_name()
-else:
-    plt.rcParams["font.sans-serif"] = [
-        "Noto Sans CJK TC",
-        "Microsoft JhengHei",
-        "Arial Unicode MS",
-        "DejaVu Sans",
-        "sans-serif",
-    ]
-
-plt.rcParams["axes.unicode_minus"] = False
+CHART_FONT_PROP = configure_chart_font(BASE_DIR)
 
 
 @dataclass
@@ -99,7 +97,7 @@ def _font_kwargs() -> dict:
     return {}
 
 
-DEFAULT_AXIS_TICK_FONTSIZE = 11
+DEFAULT_AXIS_TICK_FONTSIZE = AXIS_TICK_FONTSIZE
 
 
 def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
@@ -123,16 +121,11 @@ def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
 
 
 def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
-    ax.set_axisbelow(True)
-    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
-    _add_quarter_grid(ax)
-    ax.tick_params(axis="x", labelsize=x_labelsize)
-    ax.tick_params(axis="y", labelsize=y_labelsize)
+    apply_axis_style(ax, x_labelsize=x_labelsize, y_labelsize=y_labelsize)
 
 
 def _hide_top_right_spines(ax) -> None:
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
+    hide_chart_spines(ax)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -235,66 +228,12 @@ def _annotate_high_low(
     plot_df 需要有 High / Low 欄位。
     x_values 對應 plot_df 的 x 座標。
     """
-    try:
-        if plot_df is None or plot_df.empty:
-            return
-
-        if "High" not in plot_df.columns or "Low" not in plot_df.columns:
-            return
-
-        high_series = pd.to_numeric(plot_df["High"], errors="coerce")
-        low_series = pd.to_numeric(plot_df["Low"], errors="coerce")
-
-        if high_series.dropna().empty or low_series.dropna().empty:
-            return
-
-        high_idx = high_series.idxmax()
-        low_idx = low_series.idxmin()
-
-        high_pos = list(plot_df.index).index(high_idx)
-        low_pos = list(plot_df.index).index(low_idx)
-
-        high_x = x_values[high_pos]
-        low_x = x_values[low_pos]
-
-        high_y = float(high_series.loc[high_idx])
-        low_y = float(low_series.loc[low_idx])
-
-        y_min = float(low_series.min())
-        y_max = float(high_series.max())
-        y_pad = max((y_max - y_min) * 0.035, y_max * 0.001)
-
-        ax.text(
-            high_x,
-            high_y + y_pad,
-            f"高 {_fmt_price(high_y)}",
-            ha="center",
-            va="bottom",
-            fontsize=fontsize,
-            fontweight="bold",
-            color="#D32F2F",
-            zorder=10,
-        )
-
-        ax.text(
-            low_x,
-            low_y - y_pad,
-            f"低 {_fmt_price(low_y)}",
-            ha="center",
-            va="top",
-            fontsize=fontsize,
-            fontweight="bold",
-            color="#00A84F",
-            zorder=10,
-        )
-
-    except Exception as exc:
-        print(
-            "DEBUG annotate high low failed",
-            "| error =",
-            repr(exc),
-            flush=True,
-        )
+    return annotate_visible_high_low(
+        ax,
+        plot_df,
+        x_values,
+        fontsize=fontsize,
+    )
 
 def _kbars_to_df(kbars: Any) -> pd.DataFrame:
     try:
@@ -459,16 +398,7 @@ def _add_bollinger(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fmt_price(value: Any) -> str:
-    """價格最多保留 2 位小數，並移除尾端多餘的 0。"""
-    try:
-        number = float(value)
-
-        if pd.isna(number):
-            return "--"
-
-        return f"{number:,.2f}".rstrip("0").rstrip(".")
-    except Exception:
-        return "--"
+    return format_price(value)
 
 
 def _draw_market_future_bollinger_chart(
@@ -499,14 +429,14 @@ def _draw_market_future_bollinger_chart(
     font_kwargs = _font_kwargs()
 
     # 單圖：刪除成交量副圖，降低高度，讓 K 線更清楚。
-    fig = plt.figure(figsize=(8.6, 5.6), dpi=118, facecolor="white")
+    fig = plt.figure(figsize=FIGURE_SIZES["market_future"], dpi=118, facecolor="white")
 
     # 上方預留空間放「現價 / BB」
     ax_k = fig.add_axes([0.08, 0.14, 0.88, 0.72])
-    ax_k.set_facecolor("#F8F9FA")
+    ax_k.set_facecolor(CHART_BACKGROUND)
 
     x_values = list(range(len(plot_df)))
-    candle_width = 0.58
+    candle_width = DEFAULT_CANDLE_WIDTH
 
     for i, (_, row) in enumerate(plot_df.iterrows()):
         o = _safe_float(row.get("Open"))
@@ -560,11 +490,19 @@ def _draw_market_future_bollinger_chart(
         zorder=4,
     )
 
+    # 價格軸上下緣精確等於可見 K 棒最高／最低，兩值也會出現在 Y 軸刻度。
+    set_price_axis_to_visible_high_low(
+        ax_k,
+        plot_df["High"],
+        plot_df["Low"],
+        tick_fontsize=AXIS_TICK_FONTSIZE,
+    )
+
     _annotate_high_low(
         ax_k,
         plot_df,
         x_values,
-        fontsize=12,
+        fontsize=HIGH_LOW_FONTSIZE,
     )
 
     # 移到原本標題的位置，不跟 K 線重疊。
@@ -590,7 +528,7 @@ def _draw_market_future_bollinger_chart(
     # 刪除圖內標題，避免和 LINE 圖卡標題重複。
     # ax_k.set_title(...) 不再使用。
 
-    _apply_axis_style(ax_k, x_labelsize=11, y_labelsize=11)
+    _apply_axis_style(ax_k)
 
     labels = []
 
