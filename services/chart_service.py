@@ -14,6 +14,21 @@ import matplotlib.ticker as mticker
 from matplotlib import font_manager
 
 from services.upload_service import publish_figure
+from utils.chart_style import (
+    AXIS_TICK_FONTSIZE,
+    CHART_BACKGROUND,
+    DEFAULT_CANDLE_WIDTH,
+    FIGURE_SIZES,
+    HIGH_LOW_FONTSIZE,
+    INTRADAY_VOLUME_ALPHA,
+    INTRADAY_VOLUME_WIDTH_RATIO,
+    annotate_visible_high_low,
+    apply_axis_style,
+    configure_chart_font,
+    format_price,
+    hide_chart_spines,
+    set_price_axis_to_visible_high_low,
+)
 from utils.formatter import normalize_time_frame
 
 
@@ -25,21 +40,7 @@ INTRADAY_VOLUME_FIX_VERSION = "2026-07-16-v1-COMPACT-5M-VOLUME"
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 
-CHART_FONT_PROP = None
-
-if FONT_PATH.exists():
-    font_manager.fontManager.addfont(str(FONT_PATH))
-    CHART_FONT_PROP = font_manager.FontProperties(fname=str(FONT_PATH))
-    plt.rcParams["font.family"] = CHART_FONT_PROP.get_name()
-else:
-    print(f"Chart font not found: {FONT_PATH}")
-    plt.rcParams["font.sans-serif"] = [
-        "Noto Sans CJK TC",
-        "Microsoft JhengHei",
-        "Arial Unicode MS",
-        "DejaVu Sans",
-        "sans-serif",
-    ]
+CHART_FONT_PROP = configure_chart_font(BASE_DIR)
 
 
 def _font_kwargs() -> dict:
@@ -271,18 +272,9 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     return ref_price
 
 def _fmt_high_low_price(value) -> str:
-    """最高／最低價最多保留 2 位小數，並移除尾端多餘的 0。"""
-    try:
-        number = float(value)
+    return format_price(value)
 
-        if pd.isna(number):
-            return "--"
-
-        return f"{number:,.2f}".rstrip("0").rstrip(".")
-    except Exception:
-        return "--"
-
-DEFAULT_AXIS_TICK_FONTSIZE = 12
+DEFAULT_AXIS_TICK_FONTSIZE = AXIS_TICK_FONTSIZE
 
 
 def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
@@ -314,16 +306,11 @@ def _add_quarter_grid(ax, color: str = "#AEB6BF", alpha: float = 0.26) -> None:
 
 
 def _apply_axis_style(ax, x_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE, y_labelsize: int = DEFAULT_AXIS_TICK_FONTSIZE) -> None:
-    ax.set_axisbelow(True)
-    ax.grid(True, axis="y", linestyle=":", alpha=0.12, linewidth=0.8)
-    _add_quarter_grid(ax)
-    ax.tick_params(axis="x", labelsize=x_labelsize)
-    ax.tick_params(axis="y", labelsize=y_labelsize)
+    apply_axis_style(ax, x_labelsize=x_labelsize, y_labelsize=y_labelsize)
 
 
 def _hide_top_right_spines(ax) -> None:
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
+    hide_chart_spines(ax)
 
 
 def _annotate_high_low(
@@ -337,87 +324,12 @@ def _annotate_high_low(
     plot_df 需要有 High / Low 欄位。
     x_values 對應 plot_df 的 x 座標。
     """
-    try:
-        if plot_df is None or plot_df.empty:
-            return
-
-        if "High" not in plot_df.columns or "Low" not in plot_df.columns:
-            return
-
-        high_series = pd.to_numeric(plot_df["High"], errors="coerce")
-        low_series = pd.to_numeric(plot_df["Low"], errors="coerce")
-
-        if high_series.dropna().empty or low_series.dropna().empty:
-            return
-
-        high_idx = high_series.idxmax()
-        low_idx = low_series.idxmin()
-
-        high_pos = list(plot_df.index).index(high_idx)
-        low_pos = list(plot_df.index).index(low_idx)
-
-        high_x = x_values[high_pos]
-        low_x = x_values[low_pos]
-
-        high_y = float(high_series.loc[high_idx])
-        low_y = float(low_series.loc[low_idx])
-
-        data_y_min = float(low_series.min())
-        data_y_max = float(high_series.max())
-        data_span = max(data_y_max - data_y_min, abs(data_y_max) * 0.01, 1.0)
-
-        # 使用目前座標軸範圍限制文字位置，避免最高點文字跑進上方 MA 區。
-        axis_y_min, axis_y_max = ax.get_ylim()
-        axis_span = max(axis_y_max - axis_y_min, data_span)
-        y_pad = max(data_span * 0.025, axis_span * 0.015)
-
-        high_text_y = min(
-            high_y + y_pad,
-            axis_y_max - axis_span * 0.075,
-        )
-        low_text_y = max(
-            low_y - y_pad,
-            axis_y_min + axis_span * 0.075,
-        )
-
-        # 高低點落在左右邊緣時，文字向圖內對齊，避免被裁切。
-        total_points = max(len(plot_df), 1)
-        high_ha = "left" if high_pos <= 2 else ("right" if high_pos >= total_points - 3 else "center")
-        low_ha = "left" if low_pos <= 2 else ("right" if low_pos >= total_points - 3 else "center")
-
-        ax.text(
-            high_x,
-            high_text_y,
-            f"高 {_fmt_high_low_price(high_y)}",
-            ha=high_ha,
-            va="bottom",
-            fontsize=fontsize,
-            fontweight="bold",
-            color="#D32F2F",
-            zorder=10,
-            clip_on=True,
-        )
-
-        ax.text(
-            low_x,
-            low_text_y,
-            f"低 {_fmt_high_low_price(low_y)}",
-            ha=low_ha,
-            va="top",
-            fontsize=fontsize,
-            fontweight="bold",
-            color="#00A84F",
-            zorder=10,
-            clip_on=True,
-        )
-
-    except Exception as exc:
-        print(
-            "DEBUG annotate high low failed",
-            "| error =",
-            repr(exc),
-            flush=True,
-        )
+    return annotate_visible_high_low(
+        ax,
+        plot_df,
+        x_values,
+        fontsize=fontsize,
+    )
 
 
 def _infer_intraday_interval_minutes(df: pd.DataFrame) -> float:
@@ -572,11 +484,11 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
             return "--"
 
     # ===== 畫布：資訊列 + 主圖 + 成交量 =====
-    fig = plt.figure(figsize=(9.2, 8.0), dpi=140, facecolor="white")
+    fig = plt.figure(figsize=FIGURE_SIZES["stock_instant"], dpi=140, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[0.95, 5.05, 0.88],
+        height_ratios=[0.95, 5.35, 0.72],
         hspace=0.07,
     )
 
@@ -585,8 +497,8 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     ax_v = fig.add_subplot(gs[2], sharex=ax)
 
     ax_info.axis("off")
-    ax.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
+    ax.set_facecolor(CHART_BACKGROUND)
+    ax_v.set_facecolor(CHART_BACKGROUND)
 
     # ===== 上方資訊列：2 排 x 3 欄 =====
     info_items = [
@@ -718,8 +630,8 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         / 1000.0
     )
 
-    # Matplotlib 日期座標的寬度單位是「天」。柱寬約採顯示週期的 72%。
-    bar_width = max(display_interval_minutes * 0.72 / 1440.0, 1.0 / 1440.0)
+    # Matplotlib 日期座標的寬度單位是「天」。成交量柱刻意留縫並降低透明度。
+    bar_width = max(display_interval_minutes * INTRADAY_VOLUME_WIDTH_RATIO / 1440.0, 1.0 / 1440.0)
     bar_width = min(bar_width, 12.0 / 1440.0)
 
     ax_v.bar(
@@ -727,7 +639,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
         volume_lot_series,
         width=bar_width,
         color=vol_colors,
-        alpha=0.66,
+        alpha=INTRADAY_VOLUME_ALPHA,
         edgecolor="none",
         align="center",
         zorder=2,
@@ -1053,7 +965,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=(9.6, 8.0), dpi=132, facecolor="white")
+    fig = plt.figure(figsize=FIGURE_SIZES["stock_kline"], dpi=132, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
@@ -1087,11 +999,11 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         **font_kwargs,
     )
 
-    ax_k.set_facecolor("#F8F9FA")
-    ax_v.set_facecolor("#F8F9FA")
+    ax_k.set_facecolor(CHART_BACKGROUND)
+    ax_v.set_facecolor(CHART_BACKGROUND)
 
     x_values = list(range(len(plot_df)))
-    candle_width = 0.58
+    candle_width = DEFAULT_CANDLE_WIDTH
 
     for i in range(len(plot_df)):
         row = plot_df.iloc[i]
@@ -1126,8 +1038,14 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         if col in plot_df.columns:
             ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
 
-    # 預留上下空間，避免最高／最低文字貼到資訊列或成交量區。
-    ax_k.margins(x=0.025, y=0.14)
+    # K 線價格軸上下緣固定為畫面可見 K 棒的最高／最低，並強制加入 Y 軸刻度。
+    ax_k.margins(x=0.025, y=0)
+    set_price_axis_to_visible_high_low(
+        ax_k,
+        plot_df["High"],
+        plot_df["Low"],
+        tick_fontsize=AXIS_TICK_FONTSIZE,
+    )
 
     # 個股分 K 與日／週／月 K：標示目前顯示範圍內的最高、最低價。
     if tf in {"1m", "5m", "15m", "30m", "60m", "D", "W", "M"}:
@@ -1135,11 +1053,11 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
             ax_k,
             plot_df,
             x_values,
-            fontsize=12,
+            fontsize=HIGH_LOW_FONTSIZE,
         )
 
-    _apply_axis_style(ax_k, x_labelsize=12, y_labelsize=12)
-    _apply_axis_style(ax_v, x_labelsize=12, y_labelsize=12)
+    _apply_axis_style(ax_k)
+    _apply_axis_style(ax_v)
 
     if tf in {"1m", "5m", "15m", "30m", "60m"}:
         index_dates = [idx.date() for idx in plot_df.index]
