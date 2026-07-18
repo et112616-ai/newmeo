@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request
 
-APP_BUILD_VERSION = "2026-07-16-v1.2-BOOTSAFE-LAZY-QUOTE"
+APP_BUILD_VERSION = "2026-07-18-v1.3-TDCC-WEEKLY-FAST-BATCH"
 APP_STARTED_TS = time.time()
 
 print(
@@ -951,8 +951,8 @@ def sync_financial():
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
-    import os
-
+    route_t0 = time.perf_counter()
+    request_id = f"tdcc-{int(time.time())}-{threading.get_ident()}"
     token = str(request.args.get("token", "") or "").strip()
     expected_token = str(os.getenv("TDCC_SYNC_TOKEN", "") or "").strip()
 
@@ -973,19 +973,94 @@ def sync_tdcc_large_holder_route():
     if not stocks:
         stocks = "2317,2330,2327,3264"
 
-    start_date = str(request.args.get("start_date", "") or "").strip()
+    stock_list = []
+    for item in stocks.replace("，", ",").split(","):
+        sid = str(item or "").strip().replace(".TW", "").replace(".TWO", "")
+        if sid and sid not in stock_list:
+            stock_list.append(sid)
 
-    if start_date:
-        os.environ["TDCC_HISTORY_START_DATE"] = start_date
+    mode = str(request.args.get("mode", "latest") or "latest").strip().lower()
+    history = mode in {"history", "backfill", "full"}
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
 
-    max_weeks = str(request.args.get("max_weeks", "") or "").strip()
+    try:
+        max_weeks = max(1, min(int(request.args.get("max_weeks", 8) or 8), 12))
+    except Exception:
+        max_weeks = 8
 
-    if max_weeks:
-        os.environ["TDCC_HISTORY_MAX_WEEKS"] = max_weeks
+    try:
+        offset = max(0, int(request.args.get("offset", 0) or 0))
+    except Exception:
+        offset = 0
 
-    result = sync_tdcc_latest_large_holder_many(stocks)
+    try:
+        default_limit = 1 if history else 20
+        limit = max(1, min(int(request.args.get("limit", default_limit) or default_limit), 50))
+    except Exception:
+        limit = 1 if history else 20
 
-    return jsonify(result)
+    batch_stocks = stock_list[offset : offset + limit]
+    next_offset = offset + len(batch_stocks)
+    has_more = next_offset < len(stock_list)
+
+    print(
+        "TDCC_ROUTE start",
+        "| request_id =", request_id,
+        "| mode =", "history" if history else "latest",
+        "| total_stocks =", len(stock_list),
+        "| offset =", offset,
+        "| limit =", limit,
+        "| batch =", batch_stocks,
+        flush=True,
+    )
+
+    try:
+        result = sync_tdcc_latest_large_holder_many(
+            batch_stocks,
+            history=history,
+            start_date=start_date,
+            max_weeks=max_weeks,
+        )
+        result["request_id"] = request_id
+        result["batch"] = {
+            "offset": offset,
+            "limit": limit,
+            "processed": len(batch_stocks),
+            "total_stocks": len(stock_list),
+            "next_offset": next_offset if has_more else None,
+            "has_more": has_more,
+        }
+        result["route_seconds"] = round(time.perf_counter() - route_t0, 3)
+
+        print(
+            "TDCC_ROUTE done",
+            "| request_id =", request_id,
+            "| ok =", bool(result.get("ok")),
+            "| success =", result.get("success", 0),
+            "| failed =", result.get("failed", 0),
+            "| has_more =", has_more,
+            "| sec =", result["route_seconds"],
+            flush=True,
+        )
+        return jsonify(result), 200
+
+    except Exception as exc:
+        print(
+            "TDCC_ROUTE failed",
+            "| request_id =", request_id,
+            "| error =", repr(exc),
+            "| sec =", round(time.perf_counter() - route_t0, 3),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify(
+            {
+                "ok": False,
+                "request_id": request_id,
+                "message": "TDCC sync failed",
+                "error": repr(exc),
+            }
+        ), 500
 
 
 @app.route("/get_chart", methods=["POST"])
