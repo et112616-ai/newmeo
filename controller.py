@@ -161,26 +161,32 @@ def _normalize_action(action: str | None) -> str:
         "holder": "large_holder",
         "大戶": "large_holder",
 
+        "large_holder_200": "large_holder_200",
         "large_holder_400": "large_holder_400",
         "large_holder_600": "large_holder_600",
         "large_holder_800": "large_holder_800",
         "large_holder_1000": "large_holder_1000",
+        "holder_200": "large_holder_200",
         "holder_400": "large_holder_400",
         "holder_600": "large_holder_600",
         "holder_800": "large_holder_800",
         "holder_1000": "large_holder_1000",
+        "200": "large_holder_200",
         "400": "large_holder_400",
         "600": "large_holder_600",
         "800": "large_holder_800",
         "1000": "large_holder_1000",
+        "200大戶": "large_holder_200",
         "400大戶": "large_holder_400",
         "600大戶": "large_holder_600",
         "800大戶": "large_holder_800",
         "1000大戶": "large_holder_1000",
+        "200張": "large_holder_200",
         "400張": "large_holder_400",
         "600張": "large_holder_600",
         "800張": "large_holder_800",
         "1000張": "large_holder_1000",
+        "200張大戶": "large_holder_200",
         "400張大戶": "large_holder_400",
         "600張大戶": "large_holder_600",
         "800張大戶": "large_holder_800",
@@ -4082,7 +4088,7 @@ def _lh_row_to_computed(row, sorted_rows: list) -> dict[str, Any]:
 def _large_holder_threshold_from_action(action: str | None) -> int:
     text = str(action or "").strip().lower()
 
-    for threshold in [400, 600, 800, 1000]:
+    for threshold in [200, 400, 600, 800, 1000]:
         if str(threshold) in text:
             return threshold
 
@@ -4112,7 +4118,7 @@ def _large_holder_threshold_buttons(
 
     buttons = []
 
-    for threshold in [400, 600, 800, 1000]:
+    for threshold in [200, 400, 600, 800, 1000]:
         action_name = f"large_holder_{threshold}"
         is_active = active_threshold == threshold
 
@@ -4135,7 +4141,7 @@ def _large_holder_threshold_buttons(
                     {
                         "type": "text",
                         "text": str(threshold),
-                        "size": "sm",
+                        "size": "xs",
                         "weight": "bold" if is_active else "regular",
                         "align": "center",
                         "gravity": "center",
@@ -4171,7 +4177,7 @@ def _build_large_holder_flex(
     except Exception:
         threshold = 1000
 
-    if threshold not in {400, 600, 800, 1000}:
+    if threshold not in {200, 400, 600, 800, 1000}:
         threshold = 1000
 
     threshold_label = _large_holder_threshold_label(threshold)
@@ -7115,7 +7121,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # -------------------------
         # 3. 大戶持股
         # -------------------------
-        if action in {"large_holder", "large_holder_400", "large_holder_600", "large_holder_800", "large_holder_1000"}:
+        if action in {"large_holder", "large_holder_200", "large_holder_400", "large_holder_600", "large_holder_800", "large_holder_1000"}:
             t_data0 = time.perf_counter()
 
             holder_threshold = _large_holder_threshold_from_action(action)
