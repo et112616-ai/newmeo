@@ -5,6 +5,8 @@ from io import StringIO
 from typing import Any, Dict, List, Optional
 
 import os
+import threading
+import time
 import pandas as pd
 import requests
 
@@ -20,6 +22,13 @@ TDCC_LATEST_CSV_URLS = [
     "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5",
     "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5",
 ]
+
+TDCC_WEEKLY_SYNC_VERSION = "2026-07-18-v2-ONE-CSV-PARALLEL-LATEST"
+_TDCC_LATEST_DF_CACHE: tuple[float, pd.DataFrame] = (0.0, pd.DataFrame())
+_TDCC_LATEST_DF_CACHE_LOCK = threading.Lock()
+TDCC_LATEST_DF_CACHE_TTL_SECONDS = float(
+    os.getenv("TDCC_LATEST_DF_CACHE_TTL_SECONDS", "120") or 120
+)
 
 
 # ============================================================
@@ -887,6 +896,108 @@ def _read_tdcc_csv(text: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _request_tdcc_latest_dataframe(force_refresh: bool = False) -> pd.DataFrame:
+    """每次批次只下載一次 TDCC 最新全市場 CSV，其他股票共用同一份資料。"""
+    global _TDCC_LATEST_DF_CACHE
+
+    now = time.monotonic()
+    cache_ts, cached_df = _TDCC_LATEST_DF_CACHE
+
+    if (
+        not force_refresh
+        and cached_df is not None
+        and not cached_df.empty
+        and now - cache_ts < TDCC_LATEST_DF_CACHE_TTL_SECONDS
+    ):
+        return cached_df.copy()
+
+    with _TDCC_LATEST_DF_CACHE_LOCK:
+        now = time.monotonic()
+        cache_ts, cached_df = _TDCC_LATEST_DF_CACHE
+
+        if (
+            not force_refresh
+            and cached_df is not None
+            and not cached_df.empty
+            and now - cache_ts < TDCC_LATEST_DF_CACHE_TTL_SECONDS
+        ):
+            return cached_df.copy()
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            )
+        }
+        started = time.perf_counter()
+
+        for url in TDCC_LATEST_CSV_URLS:
+            try:
+                res = requests.get(url, headers=headers, timeout=(4, 12))
+
+                if res.status_code >= 400:
+                    print(
+                        "TDCC_WEEKLY csv failed",
+                        "| version =", TDCC_WEEKLY_SYNC_VERSION,
+                        "| status =", res.status_code,
+                        "| url =", url,
+                        flush=True,
+                    )
+                    continue
+
+                text = res.content.decode("utf-8-sig", errors="ignore")
+                df = _read_tdcc_csv(text)
+
+                required = {
+                    "資料日期",
+                    "證券代號",
+                    "持股分級",
+                    "占集保庫存數比例%",
+                }
+                if df.empty or not required.issubset(set(df.columns)):
+                    print(
+                        "TDCC_WEEKLY csv invalid",
+                        "| version =", TDCC_WEEKLY_SYNC_VERSION,
+                        "| url =", url,
+                        "| rows =", len(df),
+                        "| columns =", list(df.columns),
+                        flush=True,
+                    )
+                    continue
+
+                df = df.fillna("").copy()
+                df["證券代號"] = df["證券代號"].astype(str).str.strip()
+                _TDCC_LATEST_DF_CACHE = (time.monotonic(), df.copy())
+
+                print(
+                    "TDCC_WEEKLY csv ready",
+                    "| version =", TDCC_WEEKLY_SYNC_VERSION,
+                    "| rows =", len(df),
+                    "| sec =", round(time.perf_counter() - started, 3),
+                    "| url =", url,
+                    flush=True,
+                )
+                return df
+
+            except Exception as exc:
+                print(
+                    "TDCC_WEEKLY csv exception",
+                    "| version =", TDCC_WEEKLY_SYNC_VERSION,
+                    "| url =", url,
+                    "| error =", repr(exc),
+                    flush=True,
+                )
+
+        print(
+            "TDCC_WEEKLY csv unavailable",
+            "| version =", TDCC_WEEKLY_SYNC_VERSION,
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return pd.DataFrame()
+
+
 def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
     """
     抓 TDCC 最新一週全市場集保戶股權分散表 CSV。
@@ -898,55 +1009,23 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
     """
     sid = _clean_stock_id(stock_id)
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
+    df = _request_tdcc_latest_dataframe()
+
+    if df.empty:
+        return []
+
+    target = df[df["證券代號"] == sid]
+
+    if target.empty:
+        print(
+            "TDCC_WEEKLY stock missing",
+            "| version =", TDCC_WEEKLY_SYNC_VERSION,
+            "| stock_id =", sid,
+            flush=True,
         )
-    }
+        return []
 
-    for url in TDCC_LATEST_CSV_URLS:
-        try:
-            res = requests.get(url, headers=headers, timeout=25)
-
-            if res.status_code >= 400:
-                print(f"_request_tdcc_latest_rows failed: status={res.status_code}, url={url}", flush=True)
-                continue
-
-            text = res.content.decode("utf-8-sig", errors="ignore")
-            df = _read_tdcc_csv(text)
-
-            if df.empty:
-                print(f"_request_tdcc_latest_rows empty csv: url={url}", flush=True)
-                continue
-
-            df.columns = [str(c).strip() for c in df.columns]
-
-            required = [
-                "資料日期",
-                "證券代號",
-                "持股分級",
-                "占集保庫存數比例%",
-            ]
-
-            if not all(c in df.columns for c in required):
-                print(f"_request_tdcc_latest_rows missing columns: {list(df.columns)}", flush=True)
-                continue
-
-            df["證券代號"] = df["證券代號"].astype(str).str.strip()
-            target = df[df["證券代號"] == sid]
-
-            if target.empty:
-                print(f"_request_tdcc_latest_rows no stock: stock_id={sid}, url={url}", flush=True)
-                continue
-
-            return target.to_dict("records")
-
-        except Exception as exc:
-            print(f"_request_tdcc_latest_rows failed: stock_id={sid}, error={exc}", flush=True)
-
-    return []
+    return target.to_dict("records")
 
 
 def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
@@ -1798,9 +1877,20 @@ def sync_tdcc_large_holder_history_since(
 
     return result
 
-def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
-    import os
-    import time
+def sync_tdcc_latest_large_holder_many(
+    stock_ids=None,
+    history: bool = False,
+    start_date: str | None = None,
+    max_weeks: int | None = None,
+    max_workers: int = 4,
+) -> dict:
+    """
+    每週排程預設只同步 TDCC 最新一期。
+
+    history=True 才執行多週歷史補抓，避免一般 Make 排程超過 40 秒。
+    最新模式會先下載一次全市場 CSV，再平行寫入各股票的 Supabase 資料。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     t0 = time.perf_counter()
 
@@ -1812,77 +1902,117 @@ def sync_tdcc_latest_large_holder_many(stock_ids=None) -> dict:
     else:
         raw_items = list(stock_ids or [])
 
-    clean_ids = []
-
+    clean_ids: list[str] = []
     for item in raw_items:
         sid = _clean_stock_id(str(item or "").strip())
-
         if sid and sid not in clean_ids:
             clean_ids.append(sid)
 
-    start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
-    max_weeks = int(os.getenv("TDCC_HISTORY_MAX_WEEKS", "8"))
+    start_date = (
+        str(start_date or "").strip()
+        or os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip()
+        or "20260626"
+    )
+    max_weeks = max(1, min(int(max_weeks or os.getenv("TDCC_HISTORY_MAX_WEEKS", "8")), 12))
+    mode = "history" if history else "latest"
 
     result = {
         "ok": True,
-        "source": "TDCC_HISTORY",
-        "start_date": start_date,
+        "version": TDCC_WEEKLY_SYNC_VERSION,
+        "mode": mode,
+        "source": "TDCC_HISTORY" if history else "TDCC_LATEST_CSV",
+        "start_date": start_date if history else "",
         "total": len(clean_ids),
         "success": 0,
         "failed": 0,
         "items": [],
     }
 
-    for sid in clean_ids:
-        try:
-            item = sync_tdcc_large_holder_history_since(
-                sid,
-                start_date=start_date,
-                max_weeks=max_weeks,
-            )
+    print(
+        "TDCC_WEEKLY batch start",
+        "| version =", TDCC_WEEKLY_SYNC_VERSION,
+        "| mode =", mode,
+        "| stocks =", clean_ids,
+        flush=True,
+    )
 
-            if not item.get("ok"):
-                fallback = sync_tdcc_latest_large_holder(sid)
-                fallback["fallback_from_history"] = item
-                item = fallback
+    if not clean_ids:
+        result.update({"ok": False, "message": "no stocks", "seconds": 0.0})
+        return result
 
-            if item.get("ok"):
-                result["success"] += 1
-            else:
-                result["failed"] += 1
-
-            result["items"].append(item)
-
-        except Exception as exc:
-            result["failed"] += 1
-            result["items"].append(
+    if history:
+        # 歷史模式保留循序執行；請由人工或小批次呼叫，不供每週 Make 使用。
+        ordered_items = []
+        for sid in clean_ids:
+            try:
+                item = sync_tdcc_large_holder_history_since(
+                    sid,
+                    start_date=start_date,
+                    max_weeks=max_weeks,
+                )
+            except Exception as exc:
+                item = {"stock_id": sid, "ok": False, "error": repr(exc)}
+            ordered_items.append(item)
+    else:
+        # 先在主執行緒下載一次；工作執行緒只做記憶體篩選與 Supabase upsert。
+        latest_df = _request_tdcc_latest_dataframe(force_refresh=True)
+        if latest_df.empty:
+            result.update(
                 {
-                    "stock_id": sid,
                     "ok": False,
-                    "error": repr(exc),
+                    "failed": len(clean_ids),
+                    "items": [
+                        {"stock_id": sid, "ok": False, "message": "TDCC CSV 未取得"}
+                        for sid in clean_ids
+                    ],
+                    "seconds": round(time.perf_counter() - t0, 3),
                 }
             )
+            return result
 
+        item_by_stock: dict[str, dict] = {}
+        worker_count = max(1, min(int(max_workers or 4), 6, len(clean_ids)))
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(sync_tdcc_latest_large_holder, sid): sid
+                for sid in clean_ids
+            }
+
+            for future in as_completed(future_map):
+                sid = future_map[future]
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    item = {"stock_id": sid, "ok": False, "error": repr(exc)}
+                item_by_stock[sid] = item
+                print(
+                    "TDCC_WEEKLY stock done",
+                    "| version =", TDCC_WEEKLY_SYNC_VERSION,
+                    "| stock_id =", sid,
+                    "| ok =", bool(item.get("ok")),
+                    "| message =", item.get("message", ""),
+                    flush=True,
+                )
+
+        ordered_items = [item_by_stock[sid] for sid in clean_ids]
+
+    result["items"] = ordered_items
+    result["success"] = sum(1 for item in ordered_items if item.get("ok"))
+    result["failed"] = len(ordered_items) - result["success"]
     result["ok"] = result["failed"] == 0
     result["seconds"] = round(time.perf_counter() - t0, 3)
 
     print(
-        "DEBUG tdcc sync many",
-        "| source =",
-        result["source"],
-        "| start_date =",
-        result["start_date"],
-        "| total =",
-        result["total"],
-        "| success =",
-        result["success"],
-        "| failed =",
-        result["failed"],
-        "| seconds =",
-        result["seconds"],
+        "TDCC_WEEKLY batch done",
+        "| version =", TDCC_WEEKLY_SYNC_VERSION,
+        "| mode =", mode,
+        "| total =", result["total"],
+        "| success =", result["success"],
+        "| failed =", result["failed"],
+        "| seconds =", result["seconds"],
         flush=True,
     )
-
     return result
 
 def _finmind_large_holder_level(level) -> bool:
