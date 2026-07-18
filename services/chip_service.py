@@ -481,7 +481,7 @@ def _is_large_holder_level(level_raw: Any) -> bool:
 
 
 
-LARGE_HOLDER_THRESHOLDS = [400, 600, 800, 1000]
+LARGE_HOLDER_THRESHOLDS = [200, 400, 600, 800, 1000]
 
 
 def _normalize_large_holder_threshold(value: Any = 1000) -> int:
@@ -490,7 +490,7 @@ def _normalize_large_holder_threshold(value: Any = 1000) -> int:
     except Exception:
         num = 1000
 
-    if num in {400, 600, 800, 1000}:
+    if num in {200, 400, 600, 800, 1000}:
         return num
 
     return 1000
@@ -499,6 +499,7 @@ def _normalize_large_holder_threshold(value: Any = 1000) -> int:
 def _tdcc_holding_level_num(level_raw: Any) -> int:
     """
     TDCC 股權分散表持股分級：
+    11 = 200,001 ~ 400,000 股
     12 = 400,001 ~ 600,000 股
     13 = 600,001 ~ 800,000 股
     14 = 800,001 ~ 1,000,000 股
@@ -534,6 +535,8 @@ def _tdcc_holding_level_num(level_raw: Any) -> int:
         return 14
     if "600001" in text and "800000" in text:
         return 13
+    if "200001" in text and "400000" in text:
+        return 11
     if "400001" in text and "600000" in text:
         return 12
 
@@ -554,6 +557,8 @@ def _tdcc_holding_level_num(level_raw: Any) -> int:
             return 13
         if first >= 400001:
             return 12
+        if first >= 200001:
+            return 11
 
     except Exception:
         pass
@@ -566,13 +571,15 @@ def _threshold_from_tdcc_level(level_num: int) -> list[int]:
     回傳此 TDCC 分級應該累計到哪些門檻。
     """
     if level_num == 15:
-        return [400, 600, 800, 1000]
+        return [200, 400, 600, 800, 1000]
     if level_num == 14:
-        return [400, 600, 800]
+        return [200, 400, 600, 800]
     if level_num == 13:
-        return [400, 600]
+        return [200, 400, 600]
     if level_num == 12:
-        return [400]
+        return [200, 400]
+    if level_num == 11:
+        return [200]
     return []
 
 
@@ -589,7 +596,7 @@ def _empty_large_holder_metrics() -> dict[int, dict[str, float]]:
 def _calc_large_holder_threshold_metrics(rows: list[dict]) -> dict[int, dict[str, float]]:
     """
     從同一天同一檔股票的 TDCC 分級 rows，
-    加總 400 / 600 / 800 / 1000 張以上人數與持股比。
+    加總 200 / 400 / 600 / 800 / 1000 張以上人數與持股比。
     """
     metrics = _empty_large_holder_metrics()
 
@@ -657,7 +664,7 @@ def _supabase_table_url(table: str) -> str:
 
 def _upsert_large_holder_history_full(payload: dict[str, Any]) -> bool:
     """
-    寫入含 400 / 600 / 800 / 1000 欄位的大戶資料。
+    寫入含 200 / 400 / 600 / 800 / 1000 欄位的大戶資料。
     若新欄位尚未建立，會失敗並回 False，呼叫端會 fallback 舊版 upsert。
     """
     url = _supabase_table_url("tdcc_large_holder_history")
@@ -1030,7 +1037,7 @@ def _request_tdcc_latest_rows(stock_id: str) -> list[dict]:
 
 def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
     """
-    從 TDCC latest CSV 抓出最新一週 400 / 600 / 800 / 1000 張以上資料。
+    從 TDCC latest CSV 抓出最新一週 200 / 400 / 600 / 800 / 1000 張以上資料。
     """
     sid = _clean_stock_id(stock_id)
     rows = _request_tdcc_latest_rows(sid)
@@ -1164,7 +1171,7 @@ def _large_holder_from_supabase_history(
     從 Supabase 撈最近幾週大戶資料。
 
     threshold:
-    - 400 / 600 / 800 / 1000
+    - 200 / 400 / 600 / 800 / 1000
     """
     sid = _clean_stock_id(stock_id)
     threshold = _normalize_large_holder_threshold(threshold)
@@ -1248,7 +1255,7 @@ def _large_holder_from_supabase_history(
 
 def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
     """
-    同步單檔 TDCC latest CSV 的最新一週 400 / 600 / 800 / 1000 張以上資料。
+    同步單檔 TDCC latest CSV 的最新一週 200 / 400 / 600 / 800 / 1000 張以上資料。
     """
     sid = _clean_stock_id(stock_id)
     record = _extract_tdcc_latest_large_holder_record(sid)
@@ -1283,6 +1290,8 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
         "trade_date": payload.get("trade_date"),
         "ratio": payload.get("large_holder_ratio"),
         "people": payload.get("large_holder_people"),
+        "ratio_200": payload.get("large_holder_200_ratio"),
+        "people_200": payload.get("large_holder_200_people"),
         "ratio_400": payload.get("large_holder_400_ratio"),
         "people_400": payload.get("large_holder_400_people"),
         "ratio_600": payload.get("large_holder_600_ratio"),
@@ -2273,7 +2282,7 @@ def get_large_holder_table(stock_id: str, threshold: int = 1000) -> list[dict]:
     )
 
     # 如果 Supabase 目前不足 2 週，第一次查詢時自動補歷史。
-    # 這會把 400 / 600 / 800 / 1000 一起寫入。
+    # 這會把 200 / 400 / 600 / 800 / 1000 一起寫入。
     if len(history or []) < 2:
         try:
             start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
