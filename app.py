@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request
 
-APP_BUILD_VERSION = "2026-07-18-v1.3-TDCC-WEEKLY-FAST-BATCH"
+APP_BUILD_VERSION = "2026-07-20-v1.4-LINE-REPLY-FIRST-IMAGE-CACHE"
 APP_STARTED_TS = time.time()
 
 print(
@@ -231,6 +231,18 @@ def _line_should_process_event(event: dict) -> bool:
     return True
 
 app = Flask(__name__)
+
+
+@app.after_request
+def _add_chart_cache_headers(response):
+    """唯一檔名圖表可長效快取，避免每台 LINE 裝置重複回源 Render。"""
+    try:
+        if request.path.startswith("/static/charts/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+    except Exception:
+        pass
+    return response
 
 
 @app.route("/route_probe", methods=["GET"])
@@ -479,17 +491,17 @@ def verify_line_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected_signature, signature)
 
 
-def reply_to_line(reply_token: str, messages: list[dict[str, Any]]) -> None:
+def reply_to_line(reply_token: str, messages: list[dict[str, Any]]) -> bool:
     """
     Render 直接呼叫 LINE Reply API，不再經過 Make。
     """
     if not LINE_CHANNEL_ACCESS_TOKEN:
         print("LINE_CHANNEL_ACCESS_TOKEN not set, skip LINE reply.", flush=True)
-        return
+        return False
 
     if not reply_token:
         print("No replyToken, skip LINE reply.", flush=True)
-        return
+        return False
 
     url = "https://api.line.me/v2/bot/message/reply"
 
@@ -517,10 +529,12 @@ def reply_to_line(reply_token: str, messages: list[dict[str, Any]]) -> None:
             resp.text,
             flush=True,
         )
+        return 200 <= resp.status_code < 300
 
     except Exception:
         print("LINE reply failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
+        return False
 
 
 def push_to_line(target_id: str, messages: list[dict[str, Any]]) -> bool:
@@ -566,7 +580,7 @@ def _line_target_id(event: dict[str, Any]) -> str:
 
 
 def _process_line_event_async(event: dict[str, Any]) -> None:
-    """在背景 thread 執行查詢，完成後以 push message 回傳。"""
+    """在背景 thread 執行查詢；使用者事件優先 Reply，失敗才 Push。"""
     event_id = str(event.get("webhookEventId") or "").strip()
     target_id = _line_target_id(event)
     reply_token = str(event.get("replyToken") or "").strip()
@@ -591,11 +605,12 @@ def _process_line_event_async(event: dict[str, Any]) -> None:
         msg = handle_request(bot_req)
         messages = msg if isinstance(msg, list) else [msg]
 
-        sent = push_to_line(target_id, messages)
+        # Reply 不計入 LINE OA 每月訊息數，且目前完整查詢約 5~7 秒，
+        # 通常仍在 replyToken 可用時間內。只有 Reply 失敗才退回 Push。
+        sent = reply_to_line(reply_token, messages) if reply_token else False
 
-        # 極少數事件沒有 userId/groupId/roomId 時，才退回 reply API。
-        if not sent and reply_token:
-            reply_to_line(reply_token, messages)
+        if not sent:
+            sent = push_to_line(target_id, messages)
 
         print(
             "LINE async event complete",
@@ -611,8 +626,9 @@ def _process_line_event_async(event: dict[str, Any]) -> None:
 
         error_messages = [{"type": "text", "text": "查詢失敗，請稍後再試。"}]
 
-        if not push_to_line(target_id, error_messages) and reply_token:
-            reply_to_line(reply_token, error_messages)
+        sent = reply_to_line(reply_token, error_messages) if reply_token else False
+        if not sent:
+            push_to_line(target_id, error_messages)
 
 
 _BACKGROUND_WARMUP_STARTED = False
