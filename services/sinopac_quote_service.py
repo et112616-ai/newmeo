@@ -46,7 +46,7 @@ STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
 
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2.1-UNIFIED-ALL-TF-LOGIN-HOTFIX"
 SHIOAJI_LOGIN_FIX_VERSION = "2026-07-16-v1-COMPATIBLE-LOGIN"
-QUOTE_SERVICE_VERSION = "2026-07-20-v2.1-REALTIME-NONBLOCKING-SAFE"
+QUOTE_SERVICE_VERSION = "2026-07-20-v2.2-REALTIME-POSTFORK-MONITOR"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -330,11 +330,19 @@ def start_shioaji_reconnect_monitor() -> bool:
     global _RECONNECT_MONITOR_STARTED, _RECONNECT_MONITOR_THREAD
 
     with _RECONNECT_MONITOR_LOCK:
-        if _RECONNECT_MONITOR_STARTED:
-            return bool(
-                _RECONNECT_MONITOR_THREAD is not None
-                and _RECONNECT_MONITOR_THREAD.is_alive()
-            )
+        monitor_alive = bool(
+            _RECONNECT_MONITOR_THREAD is not None
+            and _RECONNECT_MONITOR_THREAD.is_alive()
+        )
+
+        if _RECONNECT_MONITOR_STARTED and monitor_alive:
+            return True
+
+        # Gunicorn --preload 會在 Master import 後才 fork Worker。
+        # Master 建立的 thread 不會存活於 Worker，但旗標會被複製；
+        # 發現 thread 已死時必須允許 Worker 重新建立。
+        _RECONNECT_MONITOR_STARTED = False
+        _RECONNECT_MONITOR_THREAD = None
 
         _RECONNECT_MONITOR_STARTED = True
         _RECONNECT_MONITOR_THREAD = threading.Thread(
