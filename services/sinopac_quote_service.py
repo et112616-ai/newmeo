@@ -17,13 +17,31 @@ SHIOAJI_SIMULATION = os.getenv("SHIOAJI_SIMULATION", "false").strip().lower() ==
 _API = None
 _LOGIN_TS = 0.0
 _LOGIN_LOCK = threading.Lock()
-LOGIN_TTL_SECONDS = 60 * 60 * 12
+LOGIN_TTL_SECONDS = int(os.getenv("SHIOAJI_LOGIN_TTL_SECONDS", str(60 * 60 * 12)) or 0)
+
+# 登入年齡只保留給健康狀態與除錯顯示，不再因超過 12 小時就把仍可用的
+# Shioaji session 判定為 cold_api。實際 snapshots() 失敗時才讓 session 失效，
+# 再由背景監控重新登入。
+_LAST_LOGIN_SUCCESS = ""
+_LAST_LOGIN_ERROR = ""
+_CONSECUTIVE_LOGIN_FAILURES = 0
+_RECONNECT_MONITOR_STARTED = False
+_RECONNECT_MONITOR_THREAD = None
+_RECONNECT_MONITOR_LOCK = threading.Lock()
+SHIOAJI_RECONNECT_CHECK_SECONDS = max(
+    15,
+    int(os.getenv("SHIOAJI_RECONNECT_CHECK_SECONDS", "60") or 60),
+)
+SHIOAJI_ALLOW_COLD_STOCK_LOGIN = (
+    os.getenv("SHIOAJI_ALLOW_COLD_STOCK_LOGIN", "1").strip() == "1"
+)
 
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
 
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2.1-UNIFIED-ALL-TF-LOGIN-HOTFIX"
 SHIOAJI_LOGIN_FIX_VERSION = "2026-07-16-v1-COMPATIBLE-LOGIN"
+QUOTE_SERVICE_VERSION = "2026-07-20-v2-REALTIME-KEEPALIVE-RECONNECT"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -177,7 +195,29 @@ def _login_shioaji_compatible(api) -> None:
     )
 
 
-def get_api():
+def _api_has_contracts(api: Any) -> bool:
+    if api is None:
+        return False
+
+    try:
+        return hasattr(api, "Contracts")
+    except Exception:
+        return False
+
+
+def _invalidate_api(reason: Any = "") -> None:
+    """標記目前 session 失效，交由下一次查詢或背景監控重新登入。"""
+    global _API, _LOGIN_TS, _LAST_LOGIN_ERROR
+
+    _API = None
+    _LOGIN_TS = 0.0
+    if reason:
+        _LAST_LOGIN_ERROR = str(reason)
+
+    _debug("session invalidated", "| reason =", str(reason or "unknown"))
+
+
+def get_api(force_reconnect: bool = False):
     """
     Lazy login。
     不在 import 時登入，避免 Render boot 時卡住。
@@ -185,21 +225,20 @@ def get_api():
     使用 lock 避免多個請求同時建立 Shioaji session。
     """
     global _API, _LOGIN_TS
+    global _LAST_LOGIN_SUCCESS, _LAST_LOGIN_ERROR, _CONSECUTIVE_LOGIN_FAILURES
 
     if not SHIOAJI_API_KEY or not SHIOAJI_SECRET_KEY:
         _debug("missing api key or secret")
         return None
 
-    now = time.time()
-
-    if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
+    # 不再因登入超過固定時數就把可用 session 判成 cold_api。
+    # Shioaji / Solace 連線若真的失效，snapshot 例外會呼叫 _invalidate_api()。
+    if not force_reconnect and _api_has_contracts(_API):
         return _API
 
     with _LOGIN_LOCK:
-        now = time.time()
-
         # 取得 lock 後再次檢查，避免其他 thread 已完成登入。
-        if _API is not None and now - _LOGIN_TS < LOGIN_TTL_SECONDS:
+        if not force_reconnect and _api_has_contracts(_API):
             return _API
 
         try:
@@ -210,6 +249,9 @@ def get_api():
 
             _API = api
             _LOGIN_TS = time.time()
+            _LAST_LOGIN_SUCCESS = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _LAST_LOGIN_ERROR = ""
+            _CONSECUTIVE_LOGIN_FAILURES = 0
 
             _debug(
                 "login ok",
@@ -220,6 +262,8 @@ def get_api():
             return _API
 
         except Exception as exc:
+            _CONSECUTIVE_LOGIN_FAILURES += 1
+            _LAST_LOGIN_ERROR = repr(exc)
             _debug(
                 "login failed",
                 "| version =", SHIOAJI_LOGIN_FIX_VERSION,
@@ -228,6 +272,73 @@ def get_api():
             _API = None
             _LOGIN_TS = 0.0
             return None
+
+
+def get_shioaji_status() -> dict[str, Any]:
+    ready = is_shioaji_api_ready()
+    login_age = max(0.0, time.time() - _LOGIN_TS) if _LOGIN_TS > 0 else 0.0
+
+    return {
+        "ready": ready,
+        "quote_service_version": QUOTE_SERVICE_VERSION,
+        "last_login_success": _LAST_LOGIN_SUCCESS,
+        "last_login_error": _LAST_LOGIN_ERROR,
+        "consecutive_failures": _CONSECUTIVE_LOGIN_FAILURES,
+        "login_age_seconds": round(login_age, 1),
+        "login_ttl_seconds": LOGIN_TTL_SECONDS,
+        "ttl_enforced": False,
+        "reconnect_monitor_alive": bool(
+            _RECONNECT_MONITOR_THREAD is not None
+            and _RECONNECT_MONITOR_THREAD.is_alive()
+        ),
+    }
+
+
+def warmup_shioaji_once(force_reconnect: bool = False) -> dict[str, Any]:
+    started = time.perf_counter()
+    api = get_api(force_reconnect=force_reconnect)
+    status = get_shioaji_status()
+    status["ready"] = bool(api is not None and is_shioaji_api_ready())
+    status["warmup_seconds"] = round(time.perf_counter() - started, 3)
+    return status
+
+
+def _shioaji_reconnect_monitor_loop() -> None:
+    while True:
+        try:
+            if not is_shioaji_api_ready():
+                status = warmup_shioaji_once(force_reconnect=False)
+                _debug(
+                    "reconnect monitor",
+                    "| ready =", status.get("ready"),
+                    "| sec =", status.get("warmup_seconds"),
+                    "| error =", status.get("last_login_error"),
+                )
+        except Exception as exc:
+            _debug("reconnect monitor failed", "| error =", repr(exc))
+
+        time.sleep(SHIOAJI_RECONNECT_CHECK_SECONDS)
+
+
+def start_shioaji_reconnect_monitor() -> bool:
+    """啟動每個 Gunicorn worker 各自的 Shioaji 背景復線監控。"""
+    global _RECONNECT_MONITOR_STARTED, _RECONNECT_MONITOR_THREAD
+
+    with _RECONNECT_MONITOR_LOCK:
+        if _RECONNECT_MONITOR_STARTED:
+            return bool(
+                _RECONNECT_MONITOR_THREAD is not None
+                and _RECONNECT_MONITOR_THREAD.is_alive()
+            )
+
+        _RECONNECT_MONITOR_STARTED = True
+        _RECONNECT_MONITOR_THREAD = threading.Thread(
+            target=_shioaji_reconnect_monitor_loop,
+            name="shioaji-reconnect-monitor",
+            daemon=True,
+        )
+        _RECONNECT_MONITOR_THREAD.start()
+        return True
 
 
 def _get_stock_contract(api, stock_id: str):
@@ -344,6 +455,7 @@ def get_stock_snapshot(stock_id: str) -> dict[str, Any] | None:
 
     except Exception as exc:
         _debug("stock snapshot failed", sid, exc)
+        _invalidate_api(repr(exc))
         return None
 
 
@@ -1119,16 +1231,7 @@ def is_shioaji_api_ready() -> bool:
 
     舊版漏掉真正使用的全域變數 `_API`，導致已登入仍被判定 cold_api。
     """
-    if _API is None:
-        return False
-
-    if time.time() - _LOGIN_TS >= LOGIN_TTL_SECONDS:
-        return False
-
-    try:
-        return hasattr(_API, "Contracts")
-    except Exception:
-        return False
+    return _api_has_contracts(_API)
 
 
 def append_stock_snapshot_to_intraday_df_fast(
@@ -1153,7 +1256,11 @@ def append_stock_snapshot_to_intraday_df_fast(
 
     stock_id = str(stock_id or "").strip()
 
-    if not allow_cold_login and not is_shioaji_api_ready():
+    effective_allow_cold_login = bool(
+        allow_cold_login or SHIOAJI_ALLOW_COLD_STOCK_LOGIN
+    )
+
+    if not effective_allow_cold_login and not is_shioaji_api_ready():
         print(
             "DEBUG shioaji fast append skip",
             "| stock =",
@@ -1165,6 +1272,14 @@ def append_stock_snapshot_to_intraday_df_fast(
         )
         return df
 
+    if not is_shioaji_api_ready():
+        print(
+            "DEBUG shioaji fast append cold login",
+            "| stock =", stock_id,
+            "| enabled =", effective_allow_cold_login,
+            flush=True,
+        )
+
     try:
         result = append_stock_snapshot_to_intraday_df(df, stock_id)
 
@@ -1173,7 +1288,7 @@ def append_stock_snapshot_to_intraday_df_fast(
             "| stock =",
             stock_id,
             "| allow_cold_login =",
-            allow_cold_login,
+            effective_allow_cold_login,
             "| sec =",
             round(time.perf_counter() - t0, 3),
             flush=True,
