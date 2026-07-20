@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request
 
-APP_BUILD_VERSION = "2026-07-20-v1.4-LINE-REPLY-FIRST-IMAGE-CACHE"
+APP_BUILD_VERSION = "2026-07-20-v1.5-POSTFORK-REALTIME-WARMUP"
 APP_STARTED_TS = time.time()
 
 print(
@@ -633,6 +633,7 @@ def _process_line_event_async(event: dict[str, Any]) -> None:
 
 _BACKGROUND_WARMUP_STARTED = False
 _BACKGROUND_WARMUP_LOCK = threading.Lock()
+_BACKGROUND_WARMUP_PID = 0
 
 
 def _background_shioaji_warmup() -> None:
@@ -656,7 +657,16 @@ def _background_shioaji_warmup() -> None:
 
 
 def _start_background_warmup_once() -> None:
-    global _BACKGROUND_WARMUP_STARTED
+    global _BACKGROUND_WARMUP_STARTED, _BACKGROUND_WARMUP_PID
+
+    current_pid = os.getpid()
+
+    # Gunicorn --preload：Master import 時的旗標會被 fork 到 Worker，
+    # 但 Master 建立的 thread 不會存活。PID 改變時必須重設一次。
+    with _BACKGROUND_WARMUP_LOCK:
+        if _BACKGROUND_WARMUP_PID != current_pid:
+            _BACKGROUND_WARMUP_PID = current_pid
+            _BACKGROUND_WARMUP_STARTED = False
 
     try:
         start_shioaji_reconnect_monitor()
@@ -681,7 +691,10 @@ def _start_background_warmup_once() -> None:
         ).start()
 
 
-_start_background_warmup_once()
+@app.before_request
+def _ensure_worker_background_warmup():
+    """第一個 Worker request 非阻塞啟動行情預熱，兼容 Gunicorn --preload。"""
+    _start_background_warmup_once()
 
 @app.route("/warmup_all", methods=["GET"])
 def warmup_all():
