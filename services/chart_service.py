@@ -1,7 +1,4 @@
-from __future__ import annotations
 
-from datetime import time
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -34,7 +31,7 @@ from utils.formatter import normalize_time_frame
 
 plt.rcParams["axes.unicode_minus"] = False
 
-INTRADAY_AXIS_FIX_VERSION = "2026-07-16-v2-OHLC-OPENING-POINT"
+INTRADAY_AXIS_FIX_VERSION = "2026-07-20-v3-ACTUAL-DAY-EXTREMA"
 INTRADAY_VOLUME_FIX_VERSION = "2026-07-16-v1-COMPACT-5M-VOLUME"
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -165,10 +162,12 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     設定台股即時圖價格軸與右側漲跌幅軸。
 
     重要：
-    - Y 軸範圍使用今日 Open / High / Low / Close 與昨收共同決定。
-    - 不再強制把昨收置於正中央。
-    - 因此今日最低價或最高價即使只出現在分鐘 K 的 Low / High，
-      也一定會被納入可視範圍。
+    - 下緣直接使用今日實際最低價，不再由參考價乘上漲跌幅推算，
+      也不額外減去 padding，避免出現 190.8 這類非有效跳動價格。
+    - 上緣至少包含今日實際最高價；若昨收／參考價高於今日最高，
+      則保留參考價，讓參考線與右側漲跌幅軸仍可正確顯示。
+    - 今日高低價取自 df 的 High / Low；Shioaji snapshot 已補入 df 時，
+      會自然優先反映永豐當日高低價。
     """
     ref_price = _get_reference_price(df)
 
@@ -177,7 +176,6 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
     except Exception:
         ref_price = 0.0
 
-    price_candidates: list[float] = []
     debug_values: dict[str, float] = {}
 
     for col in ["Open", "High", "Low", "Close"]:
@@ -191,7 +189,6 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
 
         col_min = float(values.min())
         col_max = float(values.max())
-        price_candidates.extend([col_min, col_max])
 
         if col == "Open":
             debug_values["open"] = float(values.iloc[0])
@@ -203,31 +200,37 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
             debug_values["close_min"] = col_min
             debug_values["close_max"] = col_max
 
-    if ref_price > 0:
-        price_candidates.append(ref_price)
+    day_low = debug_values.get("low")
+    day_high = debug_values.get("high")
 
-    price_candidates = [
-        value for value in price_candidates
-        if pd.notna(value) and float(value) > 0
-    ]
-
-    if not price_candidates:
+    if not day_low or not day_high:
         return ref_price
 
-    price_min = min(price_candidates)
-    price_max = max(price_candidates)
-    price_span = price_max - price_min
+    ymin = float(day_low)
+    ymax = max(float(day_high), float(ref_price or 0.0))
 
-    if price_span <= 0:
-        price_span = max(ref_price * 0.01, price_max * 0.01, 1.0)
-
-    # 保留約 15% 上下空間，讓高低點標示與線條不貼邊。
-    padding = max(price_span * 0.15, ref_price * 0.0025, 0.5)
-    ymin = price_min - padding
-    ymax = price_max + padding
+    if ymax <= ymin:
+        # 極少數無波動資料仍需留一個合法繪圖範圍。
+        ymax = ymin + max(abs(ymin) * 0.001, 0.01)
 
     ax.set_ylim(ymin, ymax)
-    ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=6, min_n_ticks=5))
+
+    # 一般刻度之外，強制加入當日最低與上緣，確保邊界能對應左側 Y 軸數值。
+    locator = mticker.MaxNLocator(nbins=6, min_n_ticks=5)
+    regular_ticks = locator.tick_values(ymin, ymax)
+    price_ticks = sorted({
+        ymin,
+        *[
+            float(value)
+            for value in regular_ticks
+            if ymin < float(value) < ymax
+        ],
+        ymax,
+    })
+    ax.yaxis.set_major_locator(mticker.FixedLocator(price_ticks))
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, _pos: format_price(value))
+    )
 
     ax.axhline(
         ref_price,
@@ -252,6 +255,9 @@ def _set_centered_price_axis(ax, df: pd.DataFrame) -> float:
 
         secax.yaxis.set_major_formatter(
             mticker.FuncFormatter(lambda value, pos: f"{value:+.1f}%")
+        )
+        secax.yaxis.set_major_locator(
+            mticker.FixedLocator([price_to_pct(value) for value in price_ticks])
         )
         secax.tick_params(axis="y", labelsize=DEFAULT_AXIS_TICK_FONTSIZE)
 
@@ -526,7 +532,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
             f"{label} {value}",
             ha="left",
             va="center",
-            fontsize=16,
+            fontsize=18,
             fontweight="bold",
             color="#333333",
             transform=ax_info.transAxes,
