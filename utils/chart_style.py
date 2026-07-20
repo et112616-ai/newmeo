@@ -24,6 +24,13 @@ DEFAULT_CANDLE_WIDTH = 0.58
 INTRADAY_VOLUME_ALPHA = 0.38
 INTRADAY_VOLUME_WIDTH_RATIO = 0.62
 
+# LINE Flex 圖片以「顯示面積」換取可讀性，不用堆高像素。
+# 官方上限為 1024 x 1024；保留安全餘裕可降低不同裝置載入失敗率。
+LINE_IMAGE_EXPORT_DPI = 100
+LINE_IMAGE_MAX_EDGE = 960
+LINE_IMAGE_TARGET_BYTES = 900 * 1024
+LINE_STOCK_CHART_ASPECT_RATIO = "6:5"
+
 FIGURE_SIZES = {
     "stock_instant": (9.2, 8.0),
     "stock_kline": (9.6, 8.0),
