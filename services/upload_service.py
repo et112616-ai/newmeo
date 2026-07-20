@@ -15,7 +15,7 @@ from utils.chart_style import (
 )
 
 
-UPLOAD_SERVICE_VERSION = "2026-07-20-v2-LINE-STABLE-960PX-ATOMIC"
+UPLOAD_SERVICE_VERSION = "2026-07-20-v2.1-LINE-STABLE-960PX-RGB-ATOMIC"
 
 
 def _safe_filename(value: str) -> str:
@@ -54,8 +54,15 @@ def _optimize_png_for_line(source_path: str, output_path: str) -> tuple[int, int
     with Image.open(source_path) as image:
         image.load()  # 完整解碼，避免把半張或損壞圖片發布出去。
 
-        if image.mode not in {"RGB", "RGBA"}:
-            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+        # LINE 官方雖支援透明 PNG，但部分桌面版／舊客戶端載入 RGBA 圖片較不穩。
+        # 圖表原本就是白底，因此一律壓平成標準 RGB PNG，跨裝置最單純。
+        if image.mode == "RGBA" or "A" in image.getbands():
+            rgba = image.convert("RGBA")
+            white = Image.new("RGB", rgba.size, "white")
+            white.paste(rgba, mask=rgba.getchannel("A"))
+            image = white
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
 
         width, height = image.size
         longest = max(width, height)
