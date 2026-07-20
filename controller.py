@@ -3546,7 +3546,7 @@ def _build_chart_flex(
     price_change: float,
     active_mode: str,
     current_tf: str,
-    image_aspect_ratio: str = "4:3",
+    image_aspect_ratio: str = "6:5",
     price_source: str = "",
 ) -> dict[str, Any]:
     color = _price_color(price_change)
