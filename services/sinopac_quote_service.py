@@ -33,7 +33,12 @@ SHIOAJI_RECONNECT_CHECK_SECONDS = max(
     int(os.getenv("SHIOAJI_RECONNECT_CHECK_SECONDS", "60") or 60),
 )
 SHIOAJI_ALLOW_COLD_STOCK_LOGIN = (
-    os.getenv("SHIOAJI_ALLOW_COLD_STOCK_LOGIN", "1").strip() == "1"
+    os.getenv("SHIOAJI_ALLOW_COLD_STOCK_LOGIN", "0").strip() == "1"
+)
+# 最後一道保險：即使 Render 還殘留舊環境變數 = 1，也不允許 LINE
+# 使用者請求同步等待 Shioaji login。只有維運者明確開啟第三個開關才會阻塞。
+SHIOAJI_REQUEST_BLOCKING_LOGIN = (
+    os.getenv("SHIOAJI_REQUEST_BLOCKING_LOGIN", "0").strip() == "1"
 )
 
 _STOCK_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -41,7 +46,7 @@ STOCK_SNAPSHOT_CACHE_TTL_SECONDS = 3
 
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2.1-UNIFIED-ALL-TF-LOGIN-HOTFIX"
 SHIOAJI_LOGIN_FIX_VERSION = "2026-07-16-v1-COMPATIBLE-LOGIN"
-QUOTE_SERVICE_VERSION = "2026-07-20-v2-REALTIME-KEEPALIVE-RECONNECT"
+QUOTE_SERVICE_VERSION = "2026-07-20-v2.1-REALTIME-NONBLOCKING-SAFE"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -1257,15 +1262,24 @@ def append_stock_snapshot_to_intraday_df_fast(
     stock_id = str(stock_id or "").strip()
 
     effective_allow_cold_login = bool(
-        allow_cold_login or SHIOAJI_ALLOW_COLD_STOCK_LOGIN
+        allow_cold_login
+        and SHIOAJI_ALLOW_COLD_STOCK_LOGIN
+        and SHIOAJI_REQUEST_BLOCKING_LOGIN
     )
 
     if not effective_allow_cold_login and not is_shioaji_api_ready():
+        # 只要求背景監控登入；目前 LINE request 立即沿用 Yahoo，不等待 login lock。
+        try:
+            start_shioaji_reconnect_monitor()
+        except Exception:
+            pass
+
         print(
             "DEBUG shioaji fast append skip",
             "| stock =",
             stock_id,
             "| reason = cold_api",
+            "| background_requested = True",
             "| sec =",
             round(time.perf_counter() - t0, 3),
             flush=True,
