@@ -14,12 +14,16 @@ from services.market_index_service import get_market_index_1m_history
 from services.supabase_service import upsert_market_prediction_rows
 
 
-MARKET_PREDICTION_DATA_VERSION = "2026-07-21-v1-TAIEX-TXF-15M-DATASET"
+MARKET_PREDICTION_DATA_VERSION = "2026-07-21-v2-FINMIND-BACKFILL-COMPLETE-DAYS"
 TAIPEI_TZ = "Asia/Taipei"
 SESSION_START = "09:00"
 SESSION_END = "13:30"
 LAST_LABEL_TIME = "13:15"
 MAX_REQUEST_DAYS = 30
+MIN_COMPLETE_DAY_ROWS = max(
+    1,
+    int(os.getenv("MARKET_PREDICTION_MIN_DAY_ROWS", "240")),
+)
 
 
 def _debug(*args: Any) -> None:
@@ -229,6 +233,12 @@ def build_market_prediction_frame(
     if aligned.empty:
         return pd.DataFrame()
 
+    day_counts = aligned.groupby(aligned.index.normalize()).size()
+    complete_days = day_counts[day_counts >= MIN_COMPLETE_DAY_ROWS].index
+    aligned = aligned[aligned.index.normalize().isin(complete_days)].copy()
+    if aligned.empty:
+        return pd.DataFrame()
+
     threshold = neutral_threshold_pct
     if threshold is None:
         threshold = _safe_float(
@@ -243,6 +253,9 @@ def build_market_prediction_frame(
     result.attrs["version"] = MARKET_PREDICTION_DATA_VERSION
     result.attrs["taiex_contract_code"] = taiex_contract_code
     result.attrs["txf_contract_code"] = txf_contract_code
+    result.attrs["taiex_source"] = str(
+        getattr(taiex_df, "attrs", {}).get("source") or "unknown"
+    )
     return result
 
 
@@ -255,9 +268,19 @@ def _quality_report(
     txf = _normalize_1m_frame(txf_df, "txf")
 
     union_rows = len(taiex.index.union(txf.index)) if not taiex.empty or not txf.empty else 0
+    raw_aligned_index = taiex.index.intersection(txf.index)
+    raw_aligned_rows = len(raw_aligned_index)
+    raw_day_counts = pd.Series(dtype=int)
+    if raw_aligned_rows:
+        raw_day_counts = pd.Series(
+            1,
+            index=pd.DatetimeIndex(raw_aligned_index).normalize(),
+        ).groupby(level=0).sum()
+    complete_days = raw_day_counts[raw_day_counts >= MIN_COMPLETE_DAY_ROWS]
+    partial_days = raw_day_counts[raw_day_counts < MIN_COMPLETE_DAY_ROWS]
     aligned_rows = len(frame)
     missing_ratio = (
-        1.0 - aligned_rows / union_rows
+        1.0 - raw_aligned_rows / union_rows
         if union_rows > 0
         else 1.0
     )
@@ -287,15 +310,30 @@ def _quality_report(
             "taiex_volatility_15m",
             "txf_volume_ratio_30m",
         ]
-        feature_ready_rows = int(frame[required_features].notna().all(axis=1).sum())
+        feature_ready = frame[required_features].notna().all(axis=1)
+        feature_ready_rows = int(feature_ready.sum())
+        training_ready_rows = int((feature_ready & labeled).sum())
+    else:
+        training_ready_rows = 0
 
     return {
         "taiex_rows": int(len(taiex)),
         "txf_rows": int(len(txf)),
         "aligned_rows": int(aligned_rows),
+        "aligned_before_day_filter_rows": int(raw_aligned_rows),
         "labeled_rows": int(labeled.sum()) if len(labeled) else 0,
         "trade_days": trade_days,
         "feature_ready_rows": feature_ready_rows,
+        "training_ready_rows": training_ready_rows,
+        "minimum_complete_day_rows": MIN_COMPLETE_DAY_ROWS,
+        "complete_trade_days": int(len(complete_days)),
+        "partial_trade_days": int(len(partial_days)),
+        "excluded_partial_days": [day.strftime("%Y-%m-%d") for day in partial_days.index],
+        "taiex_source": str(getattr(taiex_df, "attrs", {}).get("source") or "unknown"),
+        "taiex_source_rows": {
+            "finmind": int(getattr(taiex_df, "attrs", {}).get("finmind_rows") or 0),
+            "shioaji": int(getattr(taiex_df, "attrs", {}).get("shioaji_rows") or 0),
+        },
         "direction_counts": direction_counts,
         "alignment_missing_ratio": round(float(missing_ratio), 6),
         "duplicate_timestamps": int(frame.index.duplicated().sum()) if not frame.empty else 0,
@@ -336,7 +374,7 @@ def _records_for_supabase(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "trade_date": local_ts.strftime("%Y-%m-%d"),
             "taiex_contract_code": str(frame.attrs.get("taiex_contract_code") or "IX0001"),
             "txf_contract_code": str(frame.attrs.get("txf_contract_code") or "TXFR1"),
-            "source": "Shioaji_IX0001_TXFR1",
+            "source": f"{frame.attrs.get('taiex_source') or 'TAIEX'}+Shioaji_TXFR1",
             "dataset_version": MARKET_PREDICTION_DATA_VERSION,
             "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
         }
@@ -376,7 +414,7 @@ def sync_market_prediction_data(
     if taiex_df is None or taiex_df.empty:
         return {
             "ok": False,
-            "message": "Shioaji 未回傳加權指數 IX0001 分鐘資料",
+            "message": "Shioaji 與 FinMind 均未回傳加權指數分鐘資料",
             "start_date": start,
             "end_date": end,
             "version": MARKET_PREDICTION_DATA_VERSION,
