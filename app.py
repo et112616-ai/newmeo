@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-21-v1.8-PREDICTION-FINMIND-BACKFILL"
+APP_BUILD_VERSION = "2026-07-21-v2.0-MARKET-15M-MODEL-BACKTEST"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1061,7 +1061,7 @@ def sync_market_prediction_data_route():
 
     try:
         # 僅在維運端點被呼叫時載入，避免大盤繪圖服務拖慢 Gunicorn cold boot。
-        module = importlib.import_module("services.market_prediction_data_service")
+        module = importlib.import_module("services.market_prediction_data_service_v2")
         sync_fn = getattr(module, "sync_market_prediction_data")
         result = sync_fn(
             start_date=start_date,
@@ -1092,6 +1092,54 @@ def sync_market_prediction_data_route():
         return jsonify({
             "ok": False,
             "message": "market prediction data sync failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/train_market_prediction_model", methods=["GET", "POST"])
+def train_market_prediction_model_route():
+    """以嚴格最近15分鐘特徵訓練，並用最後一段日期做樣本外回測。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
+    end_date = str(request.args.get("end_date", "") or "").strip() or None
+    force = str(request.args.get("force", "0") or "0").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+    started = time.perf_counter()
+
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_model_service_v1"
+        )
+        train_fn = getattr(module, "train_market_prediction_model")
+        result = train_fn(
+            start_date=start_date,
+            end_date=end_date,
+            force=force,
+        )
+        print(
+            "MARKET_PREDICTION_MODEL_ROUTE",
+            "| ok =", result.get("ok"),
+            "| days =", result.get("trade_days"),
+            "| rows =", result.get("training_rows"),
+            "| ready =", result.get("deployment_ready"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_MODEL_ROUTE failed",
+            "| error =", repr(exc),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction model training failed",
             "error": repr(exc),
         }), 500
 
