@@ -19,13 +19,13 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from services.market_prediction_repository_v2 import (
+from services.market_prediction_repository_v3 import (
     REPOSITORY_VERSION,
-    get_market_prediction_rows_paginated,
+    load_market_prediction_rows_paginated,
 )
 
 
-MODEL_VERSION = "2026-07-21-v2-STRICT-15M-PAGINATED"
+MODEL_VERSION = "2026-07-21-v3-STRICT-15M-KEYSET-PAGINATED"
 TAIPEI_TZ = "Asia/Taipei"
 CLASS_LABELS = [-1, 0, 1]
 CLASS_NAMES = {-1: "down", 0: "flat", 1: "up"}
@@ -266,7 +266,21 @@ def train_market_prediction_model(
         cached["cached"] = True
         return cached
 
-    rows = get_market_prediction_rows_paginated(start, end, limit=50000)
+    rows, repository_status = load_market_prediction_rows_paginated(
+        start,
+        end,
+        limit=50000,
+    )
+    if not repository_status.get("ok"):
+        return {
+            "ok": False,
+            "message": "Supabase 模型資料分頁讀取失敗",
+            "version": MODEL_VERSION,
+            "repository_version": REPOSITORY_VERSION,
+            "repository_status": repository_status,
+            "database_rows": 0,
+            "training_rows": 0,
+        }
     frame = _prepare_training_frame(rows)
     if len(frame) < MIN_TRAINING_ROWS:
         return {
@@ -275,6 +289,7 @@ def train_market_prediction_model(
             "version": MODEL_VERSION,
             "database_rows": len(rows),
             "training_rows": len(frame),
+            "repository_status": repository_status,
         }
 
     try:
@@ -286,6 +301,7 @@ def train_market_prediction_model(
             "version": MODEL_VERSION,
             "database_rows": len(rows),
             "training_rows": len(frame),
+            "repository_status": repository_status,
         }
 
     train = split["train"]
@@ -333,6 +349,7 @@ def train_market_prediction_model(
         "feature_window_minutes": 15,
         "prediction_horizon_minutes": 15,
         "repository_version": REPOSITORY_VERSION,
+        "repository_status": repository_status,
         "features": FEATURE_COLUMNS,
         "database_rows": int(len(rows)),
         "training_rows": int(len(frame)),
