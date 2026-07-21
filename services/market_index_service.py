@@ -575,6 +575,127 @@ def _get_taiex_contract(api):
     return None
 
 
+def _index_kbars_to_df(kbars: Any) -> pd.DataFrame:
+    """將 Shioaji 指數 Kbars 轉成統一的 1 分 OHLCV DataFrame。"""
+    try:
+        if isinstance(kbars, dict):
+            raw = kbars
+        elif hasattr(kbars, "__dict__"):
+            raw = dict(kbars.__dict__)
+        else:
+            raw = dict(kbars)
+        df = pd.DataFrame(raw)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty or "ts" not in df.columns:
+        return pd.DataFrame()
+
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts"]).copy()
+
+    try:
+        if getattr(df["ts"].dt, "tz", None) is not None:
+            df["ts"] = (
+                df["ts"].dt.tz_convert("Asia/Taipei").dt.tz_localize(None)
+            )
+    except Exception:
+        pass
+
+    df = df.rename(
+        columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+            "amount": "Amount",
+        }
+    )
+
+    for col in ("Open", "High", "Low", "Close"):
+        if col not in df.columns:
+            return pd.DataFrame()
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0.0
+    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0.0)
+
+    if "Amount" in df.columns:
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.set_index("ts").sort_index()
+    df.index = pd.DatetimeIndex(df.index).floor("min")
+
+    aggregations = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+    if "Amount" in df.columns:
+        aggregations["Amount"] = "sum"
+
+    return df.groupby(level=0).agg(aggregations).sort_index()
+
+
+def get_market_index_1m_history(
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """取得加權指數 IX0001 的 Shioaji 1 分 K，供預測資料層使用。"""
+    try:
+        start_ts = pd.Timestamp(str(start_date)).normalize()
+        end_ts = pd.Timestamp(str(end_date)).normalize()
+    except Exception:
+        return pd.DataFrame()
+
+    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts < start_ts:
+        return pd.DataFrame()
+
+    if (end_ts - start_ts).days > 30:
+        raise ValueError("Shioaji Kbars 單次查詢不可超過 30 天")
+
+    api = get_api()
+    if api is None:
+        return pd.DataFrame()
+
+    contract = _get_taiex_contract(api)
+    if contract is None:
+        return pd.DataFrame()
+
+    try:
+        kbars = api.kbars(
+            contract=contract,
+            start=start_ts.strftime("%Y-%m-%d"),
+            end=end_ts.strftime("%Y-%m-%d"),
+        )
+        result = _index_kbars_to_df(kbars)
+    except Exception as exc:
+        _debug(
+            "index kbars failed",
+            "| start =", start_date,
+            "| end =", end_date,
+            "| error =", repr(exc),
+        )
+        return pd.DataFrame()
+
+    if result is None or result.empty:
+        return pd.DataFrame()
+
+    result.attrs["contract_code"] = str(getattr(contract, "code", "IX0001") or "IX0001")
+    result.attrs["source"] = "Shioaji_IX0001_Kbars"
+    result.attrs["start_date"] = start_ts.strftime("%Y-%m-%d")
+    result.attrs["end_date"] = end_ts.strftime("%Y-%m-%d")
+    return result
+
+
 def _snapshot_from_dict(data: dict[str, Any]) -> MarketIndexSnapshot:
     return MarketIndexSnapshot(
         available=bool(data.get("available")),
