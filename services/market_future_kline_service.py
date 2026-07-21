@@ -298,16 +298,26 @@ def _kbars_to_df(kbars: Any) -> pd.DataFrame:
     return df[needed]
 
 
-def _fetch_1m_kbars(contract, tf: str) -> pd.DataFrame:
+def _fetch_1m_kbars(
+    contract,
+    tf: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
     api = get_api()
 
     if api is None:
         return pd.DataFrame()
 
-    days = LOOKBACK_DAYS_MAP.get(tf, 7)
     today = datetime.now(ZoneInfo("Asia/Taipei")).date()
-    start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-    end = today.strftime("%Y-%m-%d")
+
+    if start_date and end_date:
+        start = str(start_date).strip()
+        end = str(end_date).strip()
+    else:
+        days = LOOKBACK_DAYS_MAP.get(tf, 7)
+        start = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = today.strftime("%Y-%m-%d")
 
     try:
         kbars = api.kbars(
@@ -345,6 +355,53 @@ def _fetch_1m_kbars(contract, tf: str) -> pd.DataFrame:
             repr(exc),
         )
         return pd.DataFrame()
+
+
+def get_market_future_1m_history(
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """取得台指期近月 1 分 K，供大盤預測資料層使用。
+
+    Shioaji 單次 Kbars 日期範圍上限為 30 天；此函式刻意不在內部
+    自動切段，避免 LINE/Make 單次 HTTP 請求執行過久。
+    """
+    try:
+        start_ts = pd.Timestamp(str(start_date)).normalize()
+        end_ts = pd.Timestamp(str(end_date)).normalize()
+    except Exception:
+        return pd.DataFrame()
+
+    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts < start_ts:
+        return pd.DataFrame()
+
+    if (end_ts - start_ts).days > 30:
+        raise ValueError("Shioaji Kbars 單次查詢不可超過 30 天")
+
+    api = get_api()
+    if api is None:
+        return pd.DataFrame()
+
+    contract = _get_txf_contract(api)
+    if contract is None:
+        return pd.DataFrame()
+
+    df = _fetch_1m_kbars(
+        contract,
+        "1m",
+        start_date=start_ts.strftime("%Y-%m-%d"),
+        end_date=end_ts.strftime("%Y-%m-%d"),
+    )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    result = df.copy()
+    result.attrs["contract_code"] = _contract_code(contract)
+    result.attrs["source"] = "Shioaji_TXFR1_Kbars"
+    result.attrs["start_date"] = start_ts.strftime("%Y-%m-%d")
+    result.attrs["end_date"] = end_ts.strftime("%Y-%m-%d")
+    return result
 
 
 def _resample_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
