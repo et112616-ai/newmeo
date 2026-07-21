@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -58,6 +59,15 @@ except Exception:
 
 MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v2-IX0001-YAHOO-SNAPSHOT-FALLBACK"
 MARKET_INDEX_SNAPSHOT_FIX_VERSION = "2026-07-16-v2-IND-ZERO-SNAPSHOT-FALLBACK"
+MARKET_INDEX_1M_HISTORY_VERSION = "2026-07-21-v2-SHIOAJI-FINMIND-MERGE"
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
+FINMIND_INDEX_TIMEOUT_SECONDS = float(
+    os.getenv("FINMIND_INDEX_TIMEOUT_SECONDS", "8")
+)
+FINMIND_INDEX_WORKERS = max(
+    1,
+    min(int(os.getenv("FINMIND_INDEX_WORKERS", "6")), 8),
+)
 
 # =========================
 # Cache settings
@@ -645,11 +655,105 @@ def _index_kbars_to_df(kbars: Any) -> pd.DataFrame:
     return df.groupby(level=0).agg(aggregations).sort_index()
 
 
+def _finmind_taiex_day_1m(day: str) -> pd.DataFrame:
+    """抓取 FinMind 單日 5 秒加權指數，彙整成 1 分 OHLC。"""
+    token = str(os.getenv("FINMIND_TOKEN", "") or "").strip()
+    params = {
+        "dataset": "TaiwanVariousIndicators5Seconds",
+        "start_date": day,
+    }
+    headers: dict[str, str] = {}
+    if token:
+        params["token"] = token
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = requests.get(
+            FINMIND_API_URL,
+            params=params,
+            headers=headers,
+            timeout=FINMIND_INDEX_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return pd.DataFrame()
+
+        raw = pd.DataFrame(rows)
+        if "date" not in raw.columns or "TAIEX" not in raw.columns:
+            return pd.DataFrame()
+
+        raw["ts"] = pd.to_datetime(raw["date"], errors="coerce")
+        raw["TAIEX"] = pd.to_numeric(raw["TAIEX"], errors="coerce")
+        raw = raw.dropna(subset=["ts", "TAIEX"]).copy()
+        raw = raw.set_index("ts").sort_index()
+        raw = raw.between_time("09:00", "13:30", inclusive="both")
+        if raw.empty:
+            return pd.DataFrame()
+
+        result = raw["TAIEX"].resample("1min").ohlc()
+        result.columns = ["Open", "High", "Low", "Close"]
+        result = result.dropna(subset=["Open", "High", "Low", "Close"])
+        result["Volume"] = 0.0
+        return result
+    except Exception as exc:
+        _debug("finmind 5s failed", "| day =", day, "| error =", repr(exc))
+        return pd.DataFrame()
+
+
+def _finmind_taiex_history_1m(days: list[str]) -> pd.DataFrame:
+    """FinMind 限制一次一天；小量並行抓取缺少的交易日。"""
+    requested = sorted(set(str(day) for day in days if day))
+    if not requested:
+        return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    with ThreadPoolExecutor(max_workers=min(FINMIND_INDEX_WORKERS, len(requested))) as pool:
+        jobs = {pool.submit(_finmind_taiex_day_1m, day): day for day in requested}
+        for job in as_completed(jobs):
+            day = jobs[job]
+            try:
+                frame = job.result()
+            except Exception as exc:
+                _debug("finmind worker failed", "| day =", day, "| error =", repr(exc))
+                continue
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames).sort_index()
+    result = result[~result.index.duplicated(keep="last")]
+    result.attrs["source"] = "FinMind_TaiwanVariousIndicators5Seconds"
+    return result
+
+
+def _finmind_backfill_days(
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    shioaji_df: pd.DataFrame,
+) -> list[str]:
+    """找出永豐尚未覆蓋或只有少量分鐘資料的平日。"""
+    weekdays = pd.date_range(start_ts, end_ts, freq="B")
+    counts: dict[pd.Timestamp, int] = {}
+    if shioaji_df is not None and not shioaji_df.empty:
+        normalized_days = pd.DatetimeIndex(shioaji_df.index).normalize()
+        counts = pd.Series(1, index=normalized_days).groupby(level=0).sum().to_dict()
+
+    return [
+        day.strftime("%Y-%m-%d")
+        for day in weekdays
+        if int(counts.get(day.normalize(), 0)) < 240
+    ]
+
+
 def get_market_index_1m_history(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    """取得加權指數 IX0001 的 Shioaji 1 分 K，供預測資料層使用。"""
+    """取得大盤 1 分 K：FinMind 回補歷史，重疊分鐘以 Shioaji 優先。"""
     try:
         start_ts = pd.Timestamp(str(start_date)).normalize()
         end_ts = pd.Timestamp(str(end_date)).normalize()
@@ -662,37 +766,60 @@ def get_market_index_1m_history(
     if (end_ts - start_ts).days > 30:
         raise ValueError("Shioaji Kbars 單次查詢不可超過 30 天")
 
+    shioaji_df = pd.DataFrame()
+    contract_code = "IX0001"
     api = get_api()
-    if api is None:
+    contract = _get_taiex_contract(api) if api is not None else None
+    if contract is not None:
+        contract_code = str(getattr(contract, "code", "IX0001") or "IX0001")
+        try:
+            kbars = api.kbars(
+                contract=contract,
+                start=start_ts.strftime("%Y-%m-%d"),
+                end=end_ts.strftime("%Y-%m-%d"),
+            )
+            shioaji_df = _index_kbars_to_df(kbars)
+        except Exception as exc:
+            _debug(
+                "index kbars failed",
+                "| start =", start_date,
+                "| end =", end_date,
+                "| error =", repr(exc),
+            )
+
+    backfill_days = _finmind_backfill_days(start_ts, end_ts, shioaji_df)
+    finmind_df = _finmind_taiex_history_1m(backfill_days)
+
+    frames = [df for df in (finmind_df, shioaji_df) if df is not None and not df.empty]
+    if not frames:
         return pd.DataFrame()
 
-    contract = _get_taiex_contract(api)
-    if contract is None:
-        return pd.DataFrame()
+    # FinMind 先、Shioaji 後；重疊時間戳保留後者（即永豐）。
+    result = pd.concat(frames).sort_index(kind="stable")
+    result = result[~result.index.duplicated(keep="last")].sort_index()
+    sources = []
+    if finmind_df is not None and not finmind_df.empty:
+        sources.append("FinMind_TaiwanVariousIndicators5Seconds")
+    if shioaji_df is not None and not shioaji_df.empty:
+        sources.append("Shioaji_IX0001_Kbars")
 
-    try:
-        kbars = api.kbars(
-            contract=contract,
-            start=start_ts.strftime("%Y-%m-%d"),
-            end=end_ts.strftime("%Y-%m-%d"),
-        )
-        result = _index_kbars_to_df(kbars)
-    except Exception as exc:
-        _debug(
-            "index kbars failed",
-            "| start =", start_date,
-            "| end =", end_date,
-            "| error =", repr(exc),
-        )
-        return pd.DataFrame()
-
-    if result is None or result.empty:
-        return pd.DataFrame()
-
-    result.attrs["contract_code"] = str(getattr(contract, "code", "IX0001") or "IX0001")
-    result.attrs["source"] = "Shioaji_IX0001_Kbars"
+    result.attrs["contract_code"] = contract_code
+    result.attrs["source"] = "+".join(sources)
+    result.attrs["history_version"] = MARKET_INDEX_1M_HISTORY_VERSION
+    result.attrs["finmind_requested_days"] = len(backfill_days)
+    result.attrs["finmind_rows"] = int(len(finmind_df)) if finmind_df is not None else 0
+    result.attrs["shioaji_rows"] = int(len(shioaji_df)) if shioaji_df is not None else 0
     result.attrs["start_date"] = start_ts.strftime("%Y-%m-%d")
     result.attrs["end_date"] = end_ts.strftime("%Y-%m-%d")
+    _debug(
+        "merged 1m history",
+        "| version =", MARKET_INDEX_1M_HISTORY_VERSION,
+        "| source =", result.attrs["source"],
+        "| finmind_days =", len(backfill_days),
+        "| finmind_rows =", result.attrs["finmind_rows"],
+        "| shioaji_rows =", result.attrs["shioaji_rows"],
+        "| merged_rows =", len(result),
+    )
     return result
 
 
