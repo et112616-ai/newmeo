@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-21-v1.7-MARKET-PREDICTION-DATA"
+APP_BUILD_VERSION = "2026-07-21-v1.8-PREDICTION-FINMIND-BACKFILL"
 APP_STARTED_TS = time.time()
 
 print(
