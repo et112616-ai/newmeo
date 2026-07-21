@@ -11,3 +11,4 @@ twstock>=1.4.0
 supabase>=2.6.0
 Pillow>=10.0
 shioaji
+scikit-learn>=1.4.0,<2.0
