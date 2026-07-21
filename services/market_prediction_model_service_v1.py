@@ -19,10 +19,13 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from services.supabase_service import get_market_prediction_rows
+from services.market_prediction_repository_v2 import (
+    REPOSITORY_VERSION,
+    get_market_prediction_rows_paginated,
+)
 
 
-MODEL_VERSION = "2026-07-21-v1-STRICT-15M-LOGISTIC"
+MODEL_VERSION = "2026-07-21-v2-STRICT-15M-PAGINATED"
 TAIPEI_TZ = "Asia/Taipei"
 CLASS_LABELS = [-1, 0, 1]
 CLASS_NAMES = {-1: "down", 0: "flat", 1: "up"}
@@ -263,7 +266,7 @@ def train_market_prediction_model(
         cached["cached"] = True
         return cached
 
-    rows = get_market_prediction_rows(start, end, limit=50000)
+    rows = get_market_prediction_rows_paginated(start, end, limit=50000)
     frame = _prepare_training_frame(rows)
     if len(frame) < MIN_TRAINING_ROWS:
         return {
@@ -329,6 +332,7 @@ def train_market_prediction_model(
         "end_date": end,
         "feature_window_minutes": 15,
         "prediction_horizon_minutes": 15,
+        "repository_version": REPOSITORY_VERSION,
         "features": FEATURE_COLUMNS,
         "database_rows": int(len(rows)),
         "training_rows": int(len(frame)),
