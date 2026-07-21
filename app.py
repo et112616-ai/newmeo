@@ -20,7 +20,12 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request
 
-APP_BUILD_VERSION = "2026-07-20-v1.5-POSTFORK-REALTIME-WARMUP"
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    str(Path(__file__).resolve().parent / ".mplconfig"),
+)
+
+APP_BUILD_VERSION = "2026-07-21-v1.7-MARKET-PREDICTION-DATA"
 APP_STARTED_TS = time.time()
 
 print(
@@ -32,8 +37,29 @@ print(
 )
 
 from services.futures_map_service import sync_stock_futures_map_from_taifex
-from services.market_index_service import get_market_index_snapshot
 from services.market_future_service import get_market_future_snapshot
+
+_MARKET_INDEX_FN = None
+_MARKET_INDEX_IMPORT_LOCK = threading.Lock()
+
+
+def get_market_index_snapshot(*args, **kwargs):
+    global _MARKET_INDEX_FN
+
+    if _MARKET_INDEX_FN is None:
+        with _MARKET_INDEX_IMPORT_LOCK:
+            if _MARKET_INDEX_FN is None:
+                started = time.perf_counter()
+                module = importlib.import_module("services.market_index_service")
+                _MARKET_INDEX_FN = getattr(module, "get_market_index_snapshot")
+                print(
+                    "DEBUG lazy market_index_service import",
+                    "| sec =",
+                    round(time.perf_counter() - started, 3),
+                    flush=True,
+                )
+
+    return _MARKET_INDEX_FN(*args, **kwargs)
 
 # 完全容錯匯入 quote service：
 # 1. 不直接 from ... import 版本常數。
@@ -185,9 +211,34 @@ def start_shioaji_reconnect_monitor() -> bool:
 
 
 from config import PORT, TDCC_SYNC_STOCKS, TDCC_SYNC_TOKEN
-from controller import handle_request
 from services.chip_service import sync_tdcc_latest_large_holder_many
 from utils.parser import parse_make_payload
+
+_HANDLE_REQUEST_FN = None
+_CONTROLLER_IMPORT_LOCK = threading.Lock()
+
+
+def _load_handle_request():
+    global _HANDLE_REQUEST_FN
+
+    if _HANDLE_REQUEST_FN is None:
+        with _CONTROLLER_IMPORT_LOCK:
+            if _HANDLE_REQUEST_FN is None:
+                started = time.perf_counter()
+                module = importlib.import_module("controller")
+                _HANDLE_REQUEST_FN = getattr(module, "handle_request")
+                print(
+                    "DEBUG lazy controller import",
+                    "| sec =",
+                    round(time.perf_counter() - started, 3),
+                    flush=True,
+                )
+
+    return _HANDLE_REQUEST_FN
+
+
+def handle_request(bot_req):
+    return _load_handle_request()(bot_req)
 
 _LINE_EVENT_SEEN: dict[str, float] = {}
 _LINE_EVENT_SEEN_TTL_SECONDS = 180
@@ -655,6 +706,21 @@ def _background_shioaji_warmup() -> None:
         print("DEBUG background shioaji warmup failed", flush=True)
         print(traceback.format_exc(), flush=True)
 
+    if str(os.getenv("ENABLE_BACKGROUND_CONTROLLER_WARMUP", "1")).strip() == "1":
+        try:
+            started = time.perf_counter()
+            _load_handle_request()
+            print(
+                "DEBUG background controller warmup",
+                "| ok = True",
+                "| sec =",
+                round(time.perf_counter() - started, 3),
+                flush=True,
+            )
+        except Exception:
+            print("DEBUG background controller warmup failed", flush=True)
+            print(traceback.format_exc(), flush=True)
+
 
 def _start_background_warmup_once() -> None:
     global _BACKGROUND_WARMUP_STARTED, _BACKGROUND_WARMUP_PID
@@ -975,6 +1041,57 @@ def sync_financial():
         return jsonify({
             "status": "error",
             "message": "sync financial failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/sync_market_prediction_data", methods=["GET", "POST"])
+def sync_market_prediction_data_route():
+    """抓取並檢查 TAIEX/TXF 對齊資料；persist=1 時寫入 Supabase。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
+    end_date = str(request.args.get("end_date", "") or "").strip() or None
+    persist = str(request.args.get("persist", "0") or "0").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+
+    started = time.perf_counter()
+
+    try:
+        # 僅在維運端點被呼叫時載入，避免大盤繪圖服務拖慢 Gunicorn cold boot。
+        module = importlib.import_module("services.market_prediction_data_service")
+        sync_fn = getattr(module, "sync_market_prediction_data")
+        result = sync_fn(
+            start_date=start_date,
+            end_date=end_date,
+            persist=persist,
+        )
+
+        print(
+            "MARKET_PREDICTION_DATA_ROUTE",
+            "| ok =", result.get("ok"),
+            "| start =", result.get("start_date"),
+            "| end =", result.get("end_date"),
+            "| rows =", (result.get("quality") or {}).get("aligned_rows"),
+            "| persist =", (result.get("persist") or {}).get("success"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_DATA_ROUTE failed",
+            "| error =", repr(exc),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction data sync failed",
             "error": repr(exc),
         }), 500
 
