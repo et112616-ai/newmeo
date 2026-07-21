@@ -98,3 +98,89 @@ def get_large_holder_history_rows(stock_id: str, limit: int = 7) -> list[dict[st
     except Exception as exc:
         print(f"get_large_holder_history_rows failed: stock_id={stock_id}, error={exc}", flush=True)
         return []
+
+
+def upsert_market_prediction_rows(
+    rows: list[dict[str, Any]],
+    batch_size: int = 500,
+) -> dict[str, Any]:
+    """分批寫入 TAIEX/TXF 對齊後的 1 分模型資料。"""
+    client = get_supabase_client()
+
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+
+    clean_rows = [row for row in rows if isinstance(row, dict) and row.get("ts")]
+    if not clean_rows:
+        return {"success": True, "rows": 0, "batches": 0, "message": "no rows"}
+
+    batch_size = max(50, min(int(batch_size or 500), 1000))
+    written = 0
+    batches = 0
+
+    try:
+        for offset in range(0, len(clean_rows), batch_size):
+            batch = clean_rows[offset : offset + batch_size]
+            client.table("market_prediction_1m").upsert(
+                batch,
+                on_conflict="ts",
+            ).execute()
+            written += len(batch)
+            batches += 1
+
+        return {
+            "success": True,
+            "rows": written,
+            "batches": batches,
+            "message": "ok",
+        }
+
+    except Exception as exc:
+        print(
+            "upsert_market_prediction_rows failed:"
+            f" written={written}, total={len(clean_rows)}, error={exc}",
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": written,
+            "batches": batches,
+            "message": repr(exc),
+        }
+
+
+def get_market_prediction_rows(
+    start_date: str,
+    end_date: str,
+    limit: int = 10000,
+) -> list[dict[str, Any]]:
+    """讀取指定日期區間的大盤模型資料，供後續離線訓練使用。"""
+    client = get_supabase_client()
+
+    if client is None:
+        return []
+
+    try:
+        safe_limit = max(1, min(int(limit or 10000), 50000))
+        response = (
+            client.table("market_prediction_1m")
+            .select("*")
+            .gte("trade_date", str(start_date))
+            .lte("trade_date", str(end_date))
+            .order("ts", desc=False)
+            .limit(safe_limit)
+            .execute()
+        )
+        rows = response.data or []
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(
+            "get_market_prediction_rows failed:"
+            f" start={start_date}, end={end_date}, error={exc}",
+            flush=True,
+        )
+        return []
