@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-21-v2.1-MARKET-MODEL-PAGINATED-V2"
+APP_BUILD_VERSION = "2026-07-21-v2.2-MARKET-MODEL-KEYSET-V3"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1111,7 +1111,7 @@ def train_market_prediction_model_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_model_service_v2"
+            "services.market_prediction_model_service_v3"
         )
         train_fn = getattr(module, "train_market_prediction_model")
         result = train_fn(
