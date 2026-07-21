@@ -5,7 +5,10 @@ from typing import Any
 from services.supabase_service import get_supabase_client
 
 
-REPOSITORY_VERSION = "2026-07-21-v3-KEYSET-TS-PAGINATION"
+REPOSITORY_VERSION = "2026-07-21-v4-KEYSET-LEAN-COLUMNS"
+MODEL_SELECT_COLUMNS = (
+    "ts,trade_date,taiex_close,txf_close,txf_volume,target_direction"
+)
 
 
 def load_market_prediction_rows_paginated(
@@ -36,7 +39,7 @@ def load_market_prediction_rows_paginated(
             current_size = min(safe_page_size, safe_limit - len(rows))
             query = (
                 client.table("market_prediction_1m")
-                .select("*")
+                .select(MODEL_SELECT_COLUMNS)
                 .gte("trade_date", str(start_date))
                 .lte("trade_date", str(end_date))
                 .order("ts", desc=False)
