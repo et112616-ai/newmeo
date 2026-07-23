@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-23-v2.5-FIXED-100PT-FORWARD-V6"
+APP_BUILD_VERSION = "2026-07-23-v2.6-TWO-STAGE-SELECTIVE-100PT-V7"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1111,7 +1111,7 @@ def train_market_prediction_model_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_model_service_v6"
+            "services.market_prediction_selective_service_v7"
         )
         train_fn = getattr(module, "train_market_prediction_model")
         result = train_fn(
@@ -1182,7 +1182,7 @@ def evaluate_market_prediction_forward_route():
     started = time.perf_counter()
     try:
         module = importlib.import_module(
-            "services.market_prediction_model_service_v6"
+            "services.market_prediction_selective_service_v7"
         )
         evaluate_fn = getattr(
             module,
