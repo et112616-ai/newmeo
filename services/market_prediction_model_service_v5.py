@@ -19,13 +19,13 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from services.market_prediction_repository_v4 import (
+from services.market_prediction_repository_v5 import (
     REPOSITORY_VERSION,
     load_market_prediction_rows_paginated,
 )
 
 
-MODEL_VERSION = "2026-07-21-v4-WALK-FORWARD-NONOVERLAP"
+MODEL_VERSION = "2026-07-23-v5-FROZEN-FORWARD-HOLDOUT"
 TAIPEI_TZ = "Asia/Taipei"
 CLASS_LABELS = [-1, 0, 1]
 CLASS_NAMES = {-1: "down", 0: "flat", 1: "up"}
@@ -53,6 +53,7 @@ FEATURE_COLUMNS = [
 ]
 
 _MODEL_CACHE: dict[str, Any] = {}
+_FORWARD_CACHE: dict[str, Any] = {}
 
 
 def _debug(*args: Any) -> None:
@@ -594,6 +595,287 @@ def train_market_prediction_model(
         "| baseline_macro_f1 =", baseline["macro_f1"],
         "| shadow_ready =", shadow_mode_ready,
         "| production_ready =", production_ready,
+        "| sec =", report["seconds"],
+    )
+    return report
+
+
+def _class_recall_from_confusion(
+    matrix: dict[str, dict[str, int]],
+) -> dict[str, float | None]:
+    result: dict[str, float | None] = {}
+    for class_name in ("down", "flat", "up"):
+        row = matrix.get(class_name, {})
+        total = sum(int(value or 0) for value in row.values())
+        correct = int(row.get(class_name, 0) or 0)
+        result[class_name] = (
+            round(float(correct / total), 6) if total > 0 else None
+        )
+    return result
+
+
+def _forward_day_reports(
+    model: Pipeline,
+    frame: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for trade_date, day_frame in frame.groupby("trade_date", sort=True):
+        metrics = _metrics(model, day_frame)
+        reports.append(
+            {
+                "trade_date": pd.Timestamp(trade_date).strftime("%Y-%m-%d"),
+                "rows": metrics["rows"],
+                "accuracy": metrics["accuracy"],
+                "balanced_accuracy": metrics["balanced_accuracy"],
+                "macro_f1": metrics["macro_f1"],
+                "prediction_counts": metrics["prediction_counts"],
+            }
+        )
+    return reports
+
+
+def evaluate_market_prediction_forward(
+    training_start_date: str,
+    training_cutoff: str,
+    evaluation_start_date: str,
+    evaluation_end_date: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """以 cutoff 前資料定型模型，之後區間只評估，禁止資料洩漏。"""
+    started = time.perf_counter()
+    try:
+        training_start = pd.Timestamp(training_start_date).normalize()
+        cutoff = pd.Timestamp(training_cutoff).normalize()
+        evaluation_start = pd.Timestamp(evaluation_start_date).normalize()
+        evaluation_end = pd.Timestamp(evaluation_end_date).normalize()
+    except Exception:
+        return {
+            "ok": False,
+            "message": "日期格式必須是 YYYY-MM-DD",
+            "version": MODEL_VERSION,
+        }
+
+    if any(pd.isna(value) for value in (
+        training_start,
+        cutoff,
+        evaluation_start,
+        evaluation_end,
+    )):
+        return {
+            "ok": False,
+            "message": "日期格式必須是 YYYY-MM-DD",
+            "version": MODEL_VERSION,
+        }
+    if cutoff < training_start:
+        return {
+            "ok": False,
+            "message": "training_cutoff 不可早於 training_start_date",
+            "version": MODEL_VERSION,
+        }
+    if evaluation_end < evaluation_start:
+        return {
+            "ok": False,
+            "message": "evaluation_end_date 不可早於 evaluation_start_date",
+            "version": MODEL_VERSION,
+        }
+    if evaluation_start <= cutoff:
+        return {
+            "ok": False,
+            "message": "前瞻區間必須晚於 training_cutoff，避免資料洩漏",
+            "version": MODEL_VERSION,
+        }
+
+    training_start_text = training_start.strftime("%Y-%m-%d")
+    cutoff_text = cutoff.strftime("%Y-%m-%d")
+    evaluation_start_text = evaluation_start.strftime("%Y-%m-%d")
+    evaluation_end_text = evaluation_end.strftime("%Y-%m-%d")
+    cache_key = ":".join(
+        (
+            training_start_text,
+            cutoff_text,
+            evaluation_start_text,
+            evaluation_end_text,
+        )
+    )
+    if not force and cache_key in _FORWARD_CACHE:
+        cached = dict(_FORWARD_CACHE[cache_key])
+        cached["cached"] = True
+        return cached
+
+    training_rows, training_repository_status = (
+        load_market_prediction_rows_paginated(
+            training_start_text,
+            cutoff_text,
+            limit=50000,
+        )
+    )
+    if not training_repository_status.get("ok"):
+        return {
+            "ok": False,
+            "message": "Supabase 歷史訓練資料讀取失敗",
+            "version": MODEL_VERSION,
+            "repository_version": REPOSITORY_VERSION,
+            "training_repository_status": training_repository_status,
+        }
+
+    evaluation_rows, evaluation_repository_status = (
+        load_market_prediction_rows_paginated(
+            evaluation_start_text,
+            evaluation_end_text,
+            limit=50000,
+        )
+    )
+    if not evaluation_repository_status.get("ok"):
+        return {
+            "ok": False,
+            "message": "Supabase 前瞻評估資料讀取失敗",
+            "version": MODEL_VERSION,
+            "repository_version": REPOSITORY_VERSION,
+            "evaluation_repository_status": evaluation_repository_status,
+        }
+
+    training_frame = _prepare_training_frame(training_rows)
+    evaluation_frame = _prepare_training_frame(evaluation_rows)
+    if len(training_frame) < MIN_TRAINING_ROWS:
+        return {
+            "ok": False,
+            "message": (
+                f"歷史可訓練資料不足：目前 {len(training_frame)} 筆，"
+                f"至少需要 {MIN_TRAINING_ROWS} 筆"
+            ),
+            "version": MODEL_VERSION,
+            "training_database_rows": len(training_rows),
+            "training_rows": len(training_frame),
+        }
+    if evaluation_frame.empty:
+        return {
+            "ok": False,
+            "message": "前瞻區間沒有可評估資料",
+            "version": MODEL_VERSION,
+            "evaluation_database_rows": len(evaluation_rows),
+            "evaluation_rows": 0,
+        }
+
+    try:
+        historical_split = _date_split(training_frame)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "version": MODEL_VERSION,
+            "training_database_rows": len(training_rows),
+            "training_rows": len(training_frame),
+        }
+
+    best_c, candidates = _select_c(
+        historical_split["train"],
+        historical_split["validation"],
+    )
+    frozen_model = _new_pipeline(best_c)
+    frozen_model.fit(
+        training_frame[FEATURE_COLUMNS],
+        training_frame["target_direction"],
+    )
+    majority_class = int(
+        training_frame["target_direction"].value_counts().idxmax()
+    )
+
+    forward_metrics = _metrics(frozen_model, evaluation_frame)
+    majority = _majority_baseline(training_frame, evaluation_frame)
+    momentum = _rule_baseline(evaluation_frame, "momentum")
+    mean_reversion = _rule_baseline(evaluation_frame, "mean_reversion")
+    non_overlapping = _non_overlap_evaluation(
+        frozen_model,
+        evaluation_frame,
+        majority_class,
+    )
+    calibration_frame = _non_overlapping(evaluation_frame, 0)
+    calibration = (
+        _confidence_calibration(frozen_model, calibration_frame)
+        if not calibration_frame.empty
+        else {"rows": 0, "expected_calibration_error": None, "bins": []}
+    )
+    class_recall = _class_recall_from_confusion(
+        forward_metrics["confusion_matrix"]
+    )
+
+    strongest_rule_f1 = max(
+        float(non_overlapping["majority"].get("macro_f1_mean") or 0.0),
+        float(non_overlapping["momentum"].get("macro_f1_mean") or 0.0),
+        float(non_overlapping["mean_reversion"].get("macro_f1_mean") or 0.0),
+    )
+    model_f1 = float(
+        non_overlapping["model"].get("macro_f1_mean") or 0.0
+    )
+    forward_days = int(evaluation_frame["trade_date"].nunique())
+    preliminary = forward_days < 20
+
+    report = {
+        "ok": True,
+        "message": "ok",
+        "version": MODEL_VERSION,
+        "cached": False,
+        "mode": "frozen_forward_holdout",
+        "feature_window_minutes": 15,
+        "prediction_horizon_minutes": 15,
+        "neutral_threshold_pct": 0.08,
+        "repository_version": REPOSITORY_VERSION,
+        "leakage_guard": {
+            "passed": True,
+            "training_start_date": training_start_text,
+            "model_fitted_through": cutoff_text,
+            "evaluation_start_date": evaluation_start_text,
+            "evaluation_end_date": evaluation_end_text,
+            "evaluation_rows_used_for_fit": 0,
+        },
+        "training": {
+            "database_rows": int(len(training_rows)),
+            "rows": int(len(training_frame)),
+            "trade_days": int(training_frame["trade_date"].nunique()),
+            "selected_c": best_c,
+            "repository_status": training_repository_status,
+        },
+        "evaluation": {
+            "database_rows": int(len(evaluation_rows)),
+            "rows": int(len(evaluation_frame)),
+            "trade_days": forward_days,
+            "repository_status": evaluation_repository_status,
+            **forward_metrics,
+            "class_recall": class_recall,
+            "by_day": _forward_day_reports(frozen_model, evaluation_frame),
+        },
+        "baselines": {
+            "majority": majority,
+            "momentum": momentum,
+            "mean_reversion": mean_reversion,
+        },
+        "non_overlapping_15m": non_overlapping,
+        "forward_macro_f1_gain_vs_strongest_rule": round(
+            model_f1 - strongest_rule_f1,
+            6,
+        ),
+        "calibration": calibration,
+        "validation_candidates": candidates,
+        "preliminary": preliminary,
+        "minimum_recommended_forward_days": 20,
+        "readiness_note": (
+            "前瞻樣本未滿20個交易日，目前僅供觀察"
+            if preliminary
+            else "前瞻樣本已滿20個交易日，可評估是否進入LINE影子測試"
+        ),
+        "seconds": round(time.perf_counter() - started, 3),
+    }
+
+    _FORWARD_CACHE.clear()
+    _FORWARD_CACHE[cache_key] = report
+    _debug(
+        "forward_evaluated",
+        "| fitted_through =", cutoff_text,
+        "| evaluation =", f"{evaluation_start_text}:{evaluation_end_text}",
+        "| days =", forward_days,
+        "| rows =", len(evaluation_frame),
+        "| balanced_accuracy =", forward_metrics["balanced_accuracy"],
+        "| macro_f1 =", forward_metrics["macro_f1"],
         "| sec =", report["seconds"],
     )
     return report
