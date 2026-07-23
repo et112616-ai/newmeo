@@ -5,7 +5,7 @@ from typing import Any
 from services.supabase_service import get_supabase_client
 
 
-REPOSITORY_VERSION = "2026-07-21-v4-KEYSET-LEAN-COLUMNS"
+REPOSITORY_VERSION = "2026-07-23-v5-FORWARD-HOLDOUT-KEYSET"
 MODEL_SELECT_COLUMNS = (
     "ts,trade_date,taiex_close,txf_close,txf_volume,target_direction"
 )
