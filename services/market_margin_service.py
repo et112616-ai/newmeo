@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 
-MARKET_MARGIN_SERVICE_VERSION = "2026-07-23-v4-TWSE-TPEX-SWITCH"
+MARKET_MARGIN_SERVICE_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "").strip()
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 TPEX_MARGIN_API_URL = (
@@ -157,7 +157,7 @@ def get_market_margin_snapshot(
         if scope == "otc":
             parsed = _request_tpex_market_margin(days=days)
             source = "TPEx"
-            has_margin_money = False
+            has_margin_money = True
         else:
             rows = _request_finmind_market_margin(days=days)
             parsed = _parse_market_margin_rows(rows)
@@ -242,7 +242,7 @@ def get_market_margin_snapshot(
             market_scope=scope,
             market_name=market_name,
             source="TPEx" if scope == "otc" else "FinMind / TWSE",
-            has_margin_money=scope != "otc",
+            has_margin_money=True,
         )
 
 
@@ -324,6 +324,7 @@ def _request_tpex_margin_day(target_date) -> dict[str, Any] | None:
             parsed = _aggregate_tpex_margin_rows(
                 rows=rows,
                 fields=fields,
+                summary=list(table.get("summary") or []),
                 date_text=str(payload.get("date") or ""),
                 fallback_date=target_date.strftime("%Y-%m-%d"),
             )
@@ -406,6 +407,7 @@ def _request_tpex_market_margin(days: int = 45) -> list[dict[str, Any]]:
 def _aggregate_tpex_margin_rows(
     rows: list[list[Any]],
     fields: list[str],
+    summary: list[list[Any]] | None,
     date_text: str,
     fallback_date: str,
 ) -> dict[str, Any] | None:
@@ -460,6 +462,27 @@ def _aggregate_tpex_margin_rows(
     margin_balance = totals["margin_balance"]
     short_balance = totals["short_balance"]
     ratio = short_balance / margin_balance * 100 if margin_balance > 0 else 0.0
+    margin_money_yes = 0
+    margin_money_balance = 0
+
+    for summary_row in summary or []:
+        if not isinstance(summary_row, (list, tuple)):
+            continue
+
+        label = "".join(str(value or "") for value in summary_row[:2])
+
+        if "融資金" not in label:
+            continue
+
+        # TPEx summary 的融資金單位是仟元；服務內統一轉為元，
+        # 與上市 FinMind MarginPurchaseMoney 的單位一致。
+        if len(summary_row) > 2:
+            margin_money_yes = _safe_int(summary_row[2]) * 1_000
+
+        if len(summary_row) > 6:
+            margin_money_balance = _safe_int(summary_row[6]) * 1_000
+
+        break
 
     iso_date = fallback_date
     compact_date = "".join(ch for ch in str(date_text) if ch.isdigit())
@@ -476,8 +499,8 @@ def _aggregate_tpex_margin_rows(
         "margin_buy": totals["margin_buy"],
         "margin_sell": totals["margin_sell"],
         "margin_return": totals["margin_return"],
-        "margin_money_balance": 0,
-        "margin_money_change": 0,
+        "margin_money_balance": margin_money_balance,
+        "margin_money_change": margin_money_balance - margin_money_yes,
         "short_balance": short_balance,
         "short_change": short_balance - totals["short_yes"],
         "short_buy": totals["short_buy"],
