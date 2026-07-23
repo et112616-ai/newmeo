@@ -8,6 +8,7 @@ DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
 MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
+MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v4-TWSE-TPEX-SWITCH"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -101,6 +102,8 @@ def _normalize_action(action: str | None) -> str:
         "加權法人": "market_chip",
 
         "market_margin": "market_margin",
+        "market_margin_tse": "market_margin_tse",
+        "market_margin_otc": "market_margin_otc",
         "index_margin": "market_margin",
         "大盤融資券": "market_margin",
         "加權融資券": "market_margin",
@@ -306,8 +309,17 @@ def _fmt_margin_mmdd(date_text: str) -> str:
 
 def _build_market_margin_flex(snapshot) -> dict[str, Any]:
     """
-    大盤融資券卡片。
+    上市／上櫃大盤融資券卡片。
     """
+    market_scope = str(
+        getattr(snapshot, "market_scope", "tse") or "tse"
+    ).strip().lower()
+    market_scope = "otc" if market_scope == "otc" else "tse"
+    market_name = "上櫃" if market_scope == "otc" else "上市"
+    has_margin_money = bool(
+        getattr(snapshot, "has_margin_money", market_scope == "tse")
+    )
+    card_title = f"{market_name}大盤融資券"
 
     def _summary_row(label: str, value: str, color: str = "#222222") -> dict[str, Any]:
         return {
@@ -354,6 +366,8 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         }
 
     def _table_header() -> dict[str, Any]:
+        margin_column = "融資金額增減" if has_margin_money else "融資增減"
+
         return {
             "type": "box",
             "layout": "horizontal",
@@ -362,16 +376,25 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             "cornerRadius": "sm",
             "contents": [
                 _cell("日期", 2, "#555555", "bold", "start"),
-                _cell("融資金額增減", 4, "#555555", "bold", "end"),
+                _cell(margin_column, 4, "#555555", "bold", "end"),
                 _cell("融券增減", 3, "#555555", "bold", "end"),
                 _cell("資券比", 2, "#555555", "bold", "end"),
             ],
         }
 
     def _table_row(item: dict) -> dict[str, Any]:
+        margin_change = float(item.get("margin_change") or 0)
         margin_money_change = float(item.get("margin_money_change") or 0)
         short_change = int(item.get("short_change") or 0)
         ratio = float(item.get("margin_short_ratio") or 0)
+        margin_display = (
+            _fmt_margin_money_yi(margin_money_change, signed=True)
+            if has_margin_money
+            else _fmt_margin_int(margin_change, signed=True)
+        )
+        margin_color_value = (
+            margin_money_change if has_margin_money else margin_change
+        )
 
         return {
             "type": "box",
@@ -386,9 +409,9 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
                     "start",
                 ),
                 _cell(
-                    _fmt_margin_money_yi(margin_money_change, signed=True),
+                    margin_display,
                     4,
-                    _margin_change_color(margin_money_change),
+                    _margin_change_color(margin_color_value),
                 ),
                 _cell(
                     _fmt_margin_int(short_change, signed=True),
@@ -407,12 +430,13 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         contents: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": "大盤融資券",
+                "text": card_title,
                 "size": "xxl",
                 "weight": "bold",
                 "color": "#111111",
                 "wrap": True,
             },
+            _market_margin_scope_buttons(market_scope),
             {
                 "type": "separator",
                 "margin": "md",
@@ -435,7 +459,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
 
         return {
             "type": "flex",
-            "altText": "大盤融資券",
+            "altText": card_title,
             "contents": {
                 "type": "bubble",
                 "size": "mega",
@@ -472,17 +496,67 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         table_contents.append(
             {
                 "type": "text",
-                "text": "暫無近10日資料",
+                "text": "暫無近5日資料",
                 "size": "sm",
                 "color": "#999999",
                 "margin": "sm",
             }
         )
 
+    summary_contents: list[dict[str, Any]] = [
+        _summary_row("融資餘額", _fmt_margin_int(margin_balance), "#222222"),
+        _summary_row(
+            "融資增減",
+            _fmt_margin_int(margin_change, signed=True),
+            _margin_change_color(margin_change),
+        ),
+        _summary_row("融券餘額", _fmt_margin_int(short_balance), "#222222"),
+        _summary_row(
+            "融券增減",
+            _fmt_margin_int(short_change, signed=True),
+            _margin_change_color(short_change),
+        ),
+        _summary_row("資券比", _fmt_margin_ratio(ratio), "#222222"),
+    ]
+
+    if has_margin_money:
+        summary_contents.extend(
+            [
+                _summary_row(
+                    "融資金額",
+                    _fmt_margin_money_yi(margin_money_balance),
+                    "#222222",
+                ),
+                _summary_row(
+                    "融資金額增減",
+                    _fmt_margin_money_yi(
+                        margin_money_change,
+                        signed=True,
+                    ),
+                    _margin_change_color(margin_money_change),
+                ),
+            ]
+        )
+
+    source = str(getattr(snapshot, "source", "") or "")
+    trend_title = (
+        "近5日融資金額與融券變化"
+        if has_margin_money
+        else "近5日融資與融券變化"
+    )
+    unit_note = (
+        "融資金額增減：億元；融券增減：張；"
+        "資券比：融券餘額 ÷ 融資餘額。"
+        if has_margin_money
+        else
+        "融資增減、融券增減：張；"
+        "資券比：融券餘額 ÷ 融資餘額。"
+    )
+
     contents: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": "大盤融資券",
+            "text": card_title,
             "size": "xxl",
             "weight": "bold",
             "color": "#111111",
@@ -495,6 +569,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             "color": "#666666",
             "margin": "xs",
         },
+        _market_margin_scope_buttons(market_scope),
         {
             "type": "separator",
             "margin": "md",
@@ -504,19 +579,11 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             "layout": "vertical",
             "spacing": "sm",
             "margin": "md",
-            "contents": [
-                _summary_row("融資餘額", _fmt_margin_int(margin_balance), "#222222"),
-                _summary_row("融資增減", _fmt_margin_int(margin_change, signed=True), _margin_change_color(margin_change)),
-                _summary_row("融券餘額", _fmt_margin_int(short_balance), "#222222"),
-                _summary_row("融券增減", _fmt_margin_int(short_change, signed=True), _margin_change_color(short_change)),
-                _summary_row("資券比", _fmt_margin_ratio(ratio), "#222222"),
-                _summary_row("融資金額", _fmt_margin_money_yi(margin_money_balance), "#222222"),
-                _summary_row("融資金額增減", _fmt_margin_money_yi(margin_money_change, signed=True), _margin_change_color(margin_money_change)),
-            ],
+            "contents": summary_contents,
         },
         {
             "type": "text",
-            "text": "近5日融資金額與融券變化",
+            "text": trend_title,
             "size": "md",
             "weight": "bold",
             "color": "#222222",
@@ -534,7 +601,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
         },
         {
             "type": "text",
-            "text": "融資金額增減：億元；融券增減：張；資券比：融券餘額 ÷ 融資餘額。盤後資料。",
+            "text": f"{unit_note}資料來源：{source}；盤後資料。",
             "size": "xs",
             "color": "#888888",
             "wrap": True,
@@ -550,7 +617,7 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
 
     return {
         "type": "flex",
-        "altText": "大盤融資券",
+        "altText": card_title,
         "contents": {
             "type": "bubble",
             "size": "mega",
@@ -1993,6 +2060,45 @@ def _postback_button(
         ],
     }
 
+
+def _market_margin_scope_buttons(
+    active_scope: str = "tse",
+) -> dict[str, Any]:
+    """
+    大盤融資券市場切換列。
+
+    使用獨立 action 而不是增加第 5 個 postback 欄位，
+    可維持現有四欄 parser 相容性。
+    """
+    scope = str(active_scope or "tse").strip().lower()
+    scope = "otc" if scope == "otc" else "tse"
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label="上市",
+                data="TAIEX,market_margin_tse,market_index,D",
+                active=scope == "tse",
+                display_text="大盤融資券 上市",
+                height="42px",
+                text_size="sm",
+            ),
+            _postback_button(
+                label="上櫃",
+                data="TAIEX,market_margin_otc,market_index,D",
+                active=scope == "otc",
+                display_text="大盤融資券 上櫃",
+                height="42px",
+                text_size="sm",
+            ),
+        ],
+    }
+
+
 def _market_index_buttons(active_action: str = "market_index") -> list[dict[str, Any]]:
     """
     大盤主功能列：
@@ -2027,7 +2133,11 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
             _postback_button(
                 label="融資券",
                 data="TAIEX,market_margin,market_index,D",
-                active=active_action == "market_margin",
+                active=active_action in {
+                    "market_margin",
+                    "market_margin_tse",
+                    "market_margin_otc",
+                },
                 display_text="大盤 融資券",
                 height="50px",
                 text_size="xxs",
@@ -2447,7 +2557,11 @@ def _market_future_nav_buttons(active_action: str = "market_future_all") -> list
             _postback_button(
                 label="融資券",
                 data="TAIEX,market_margin,market_index,D",
-                active=active_action == "market_margin",
+                active=active_action in {
+                    "market_margin",
+                    "market_margin_tse",
+                    "market_margin_otc",
+                },
                 display_text="大盤 融資券",
                 height="50px",
                 text_size="xxs",
@@ -5774,6 +5888,8 @@ MARKET_INDEX_ACTIONS = {
     "market_index",
     "market_chip",
     "market_margin",
+    "market_margin_tse",
+    "market_margin_otc",
     "market_future_day",
     "market_future_all",
     "market_future_k",
@@ -6387,11 +6503,44 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 _build_market_chip_flex(snapshot),
                 )
 
-            if action == "market_margin":
-                snapshot = get_market_margin_snapshot()
+            if action in {
+                "market_margin",
+                "market_margin_tse",
+                "market_margin_otc",
+            }:
+                market_scope = (
+                    "otc"
+                    if action == "market_margin_otc"
+                    else "tse"
+                )
+                snapshot = get_market_margin_snapshot(
+                    market_scope=market_scope
+                )
+                market_name = (
+                    "上櫃"
+                    if market_scope == "otc"
+                    else "上市"
+                )
+
+                print(
+                    "DEBUG market_margin controller",
+                    "| version =",
+                    MARKET_MARGIN_SWITCH_VERSION,
+                    "| action =",
+                    action,
+                    "| market_scope =",
+                    market_scope,
+                    "| available =",
+                    getattr(snapshot, "available", None),
+                    "| latest_date =",
+                    getattr(snapshot, "latest_date", ""),
+                    "| source =",
+                    getattr(snapshot, "source", ""),
+                    flush=True,
+                )
 
                 return _reply_with_title(
-                "大盤融資券",
+                f"{market_name}大盤融資券",
                 _build_market_margin_flex(snapshot),
                 )
 
