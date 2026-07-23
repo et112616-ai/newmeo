@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-21-v2.3-MARKET-WALK-FORWARD-V4"
+APP_BUILD_VERSION = "2026-07-23-v2.4-FROZEN-FORWARD-HOLDOUT-V5"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1111,7 +1111,7 @@ def train_market_prediction_model_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_model_service_v4"
+            "services.market_prediction_model_service_v5"
         )
         train_fn = getattr(module, "train_market_prediction_model")
         result = train_fn(
@@ -1140,6 +1140,86 @@ def train_market_prediction_model_route():
         return jsonify({
             "ok": False,
             "message": "market prediction model training failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/evaluate_market_prediction_forward", methods=["GET", "POST"])
+def evaluate_market_prediction_forward_route():
+    """模型只看 cutoff 以前資料，之後資料僅評分，不參與訓練。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    training_start_date = str(
+        request.args.get("training_start_date", "") or ""
+    ).strip()
+    training_cutoff = str(
+        request.args.get("training_cutoff", "") or ""
+    ).strip()
+    evaluation_start_date = str(
+        request.args.get("evaluation_start_date", "") or ""
+    ).strip()
+    evaluation_end_date = str(
+        request.args.get("evaluation_end_date", "") or ""
+    ).strip()
+    force = str(request.args.get("force", "0") or "0").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+    required = {
+        "training_start_date": training_start_date,
+        "training_cutoff": training_cutoff,
+        "evaluation_start_date": evaluation_start_date,
+        "evaluation_end_date": evaluation_end_date,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        return jsonify({
+            "ok": False,
+            "message": "缺少必要日期參數",
+            "missing": missing,
+        }), 400
+
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_model_service_v5"
+        )
+        evaluate_fn = getattr(
+            module,
+            "evaluate_market_prediction_forward",
+        )
+        result = evaluate_fn(
+            training_start_date=training_start_date,
+            training_cutoff=training_cutoff,
+            evaluation_start_date=evaluation_start_date,
+            evaluation_end_date=evaluation_end_date,
+            force=force,
+        )
+        evaluation = result.get("evaluation") or {}
+        print(
+            "MARKET_PREDICTION_FORWARD_ROUTE",
+            "| ok =", result.get("ok"),
+            "| fitted_through =", (
+                result.get("leakage_guard") or {}
+            ).get("model_fitted_through"),
+            "| days =", evaluation.get("trade_days"),
+            "| rows =", evaluation.get("rows"),
+            "| macro_f1 =", evaluation.get("macro_f1"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_FORWARD_ROUTE failed",
+            "| error =", repr(exc),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction forward evaluation failed",
             "error": repr(exc),
         }), 500
 
