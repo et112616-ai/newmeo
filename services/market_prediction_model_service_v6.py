@@ -19,18 +19,19 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from services.market_prediction_repository_v5 import (
+from services.market_prediction_repository_v6 import (
     REPOSITORY_VERSION,
     load_market_prediction_rows_paginated,
 )
 
 
-MODEL_VERSION = "2026-07-23-v5-FROZEN-FORWARD-HOLDOUT"
+MODEL_VERSION = "2026-07-23-v6-FIXED-100PT-FORWARD-HOLDOUT"
 TAIPEI_TZ = "Asia/Taipei"
 CLASS_LABELS = [-1, 0, 1]
 CLASS_NAMES = {-1: "down", 0: "flat", 1: "up"}
 MIN_TRADE_DAYS = 50
 MIN_TRAINING_ROWS = 8000
+NEUTRAL_THRESHOLD_POINTS = 100.0
 
 FEATURE_COLUMNS = [
     "taiex_return_1m",
@@ -85,7 +86,6 @@ def _prepare_training_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
         "taiex_close",
         "txf_close",
         "txf_volume",
-        "target_direction",
     ]
     if any(column not in frame.columns for column in required_raw):
         return pd.DataFrame()
@@ -100,7 +100,6 @@ def _prepare_training_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
         "taiex_close",
         "txf_close",
         "txf_volume",
-        "target_direction",
     ]
     for column in numeric:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -108,6 +107,26 @@ def _prepare_training_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     frame = frame.dropna(subset=numeric).copy()
     frame["trade_date"] = frame.index.normalize()
     grouped = frame.groupby("trade_date", sort=False)
+
+    # V6 不沿用資料表內舊的 0.08% 標籤，直接由大盤點數重算答案：
+    # 上漲 > +100、盤整 -100~+100、下跌 < -100。
+    frame["taiex_change_15m_points"] = (
+        grouped["taiex_close"].shift(-15) - frame["taiex_close"]
+    )
+    target_change = frame["taiex_change_15m_points"]
+    frame["target_direction"] = np.where(
+        target_change.isna(),
+        np.nan,
+        np.where(
+            target_change > NEUTRAL_THRESHOLD_POINTS,
+            1,
+            np.where(
+                target_change < -NEUTRAL_THRESHOLD_POINTS,
+                -1,
+                0,
+            ),
+        ),
+    )
 
     for minutes in (1, 3, 5, 10, 15):
         frame[f"taiex_return_{minutes}m"] = grouped["taiex_close"].pct_change(
@@ -118,6 +137,10 @@ def _prepare_training_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
             periods=minutes,
             fill_method=None,
         ) * 100.0
+
+    frame["taiex_previous_change_15m_points"] = (
+        frame["taiex_close"] - grouped["taiex_close"].shift(15)
+    )
 
     frame["basis"] = frame["txf_close"] - frame["taiex_close"]
     frame["basis_pct"] = frame["basis"] / frame["taiex_close"] * 100.0
@@ -258,9 +281,18 @@ def _aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _rule_baseline(frame: pd.DataFrame, mode: str) -> dict[str, Any]:
     y_true = frame["target_direction"].astype(int).to_numpy()
-    returns = frame["taiex_return_15m"].to_numpy(dtype=float)
-    threshold = 0.08
-    momentum = np.where(returns > threshold, 1, np.where(returns < -threshold, -1, 0))
+    previous_change = frame["taiex_previous_change_15m_points"].to_numpy(
+        dtype=float
+    )
+    momentum = np.where(
+        previous_change > NEUTRAL_THRESHOLD_POINTS,
+        1,
+        np.where(
+            previous_change < -NEUTRAL_THRESHOLD_POINTS,
+            -1,
+            0,
+        ),
+    )
     y_pred = -momentum if mode == "mean_reversion" else momentum
     return _label_metrics(y_true, y_pred.astype(int))
 
@@ -545,6 +577,14 @@ def train_market_prediction_model(
         "end_date": end,
         "feature_window_minutes": 15,
         "prediction_horizon_minutes": 15,
+        "neutral_threshold_type": "fixed_points",
+        "neutral_threshold_points": int(NEUTRAL_THRESHOLD_POINTS),
+        "label_definition": {
+            "change": "TAIEX(t+15m) - TAIEX(t)",
+            "down": "< -100 points",
+            "flat": "-100 to +100 points (inclusive)",
+            "up": "> +100 points",
+        },
         "repository_version": REPOSITORY_VERSION,
         "repository_status": repository_status,
         "features": FEATURE_COLUMNS,
@@ -818,7 +858,14 @@ def evaluate_market_prediction_forward(
         "mode": "frozen_forward_holdout",
         "feature_window_minutes": 15,
         "prediction_horizon_minutes": 15,
-        "neutral_threshold_pct": 0.08,
+        "neutral_threshold_type": "fixed_points",
+        "neutral_threshold_points": int(NEUTRAL_THRESHOLD_POINTS),
+        "label_definition": {
+            "change": "TAIEX(t+15m) - TAIEX(t)",
+            "down": "< -100 points",
+            "flat": "-100 to +100 points (inclusive)",
+            "up": "> +100 points",
+        },
         "repository_version": REPOSITORY_VERSION,
         "leakage_guard": {
             "passed": True,
