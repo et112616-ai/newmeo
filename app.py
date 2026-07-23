@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-23-v2.6-TWO-STAGE-SELECTIVE-100PT-V7"
+APP_BUILD_VERSION = "2026-07-23-v2.7-MARKET-WEIGHT-DATA-V8"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1092,6 +1092,92 @@ def sync_market_prediction_data_route():
         return jsonify({
             "ok": False,
             "message": "market prediction data sync failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/sync_market_weights", methods=["GET", "POST"])
+def sync_market_weights_route():
+    """盤後估算並保存上市前20大權重。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    trade_date = str(
+        request.args.get("trade_date", "") or ""
+    ).strip() or None
+    persist = str(
+        request.args.get("persist", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_weight_service_v1"
+        )
+        build_fn = getattr(module, "build_daily_market_weights")
+        result = build_fn(trade_date=trade_date, persist=persist)
+        print(
+            "MARKET_WEIGHT_SYNC_ROUTE",
+            "| ok =", result.get("ok"),
+            "| date =", result.get("trade_date"),
+            "| rows =", result.get("top_rows"),
+            "| persisted =", (result.get("persist") or {}).get("success"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_WEIGHT_SYNC_ROUTE failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market weight sync failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/market_contribution_snapshot", methods=["GET", "POST"])
+def market_contribution_snapshot_route():
+    """盤中計算前20大貢獻與上市/上櫃強弱差。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    persist = str(
+        request.args.get("persist", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_weight_service_v1"
+        )
+        build_fn = getattr(
+            module,
+            "build_market_contribution_snapshot",
+        )
+        result = build_fn(persist=persist)
+        feature = result.get("feature") or {}
+        print(
+            "MARKET_CONTRIBUTION_ROUTE",
+            "| ok =", result.get("ok"),
+            "| weight_date =", feature.get("weight_trade_date"),
+            "| components =", result.get("component_rows"),
+            "| contribution =", feature.get("top20_contribution_points"),
+            "| persisted =", (result.get("persist") or {}).get("success"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_CONTRIBUTION_ROUTE failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market contribution snapshot failed",
             "error": repr(exc),
         }), 500
 
