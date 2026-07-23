@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
 
+MARKET_MARGIN_SERVICE_VERSION = "2026-07-23-v4-TWSE-TPEX-SWITCH"
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "").strip()
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
+TPEX_MARGIN_API_URL = (
+    "https://www.tpex.org.tw/web/stock/margin_trading/"
+    "margin_balance/margin_bal_result.php"
+)
 
 MARKET_MARGIN_CACHE_TTL_SECONDS = 30 * 60
 _MARKET_MARGIN_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -43,6 +50,9 @@ class MarketMarginSnapshot:
     recent_rows: list[dict[str, Any]] = field(default_factory=list)
 
     source: str = "FinMind"
+    market_scope: str = "tse"
+    market_name: str = "上市"
+    has_margin_money: bool = True
 
 
 def _debug(*args):
@@ -99,15 +109,40 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketMarginSnapshot:
         recent_rows=list(data.get("recent_rows") or []),
 
         source=str(data.get("source") or "FinMind"),
+        market_scope=_normalize_market_scope(data.get("market_scope")),
+        market_name=str(data.get("market_name") or "上市"),
+        has_margin_money=bool(data.get("has_margin_money", True)),
     )
 
 
-def get_market_margin_snapshot(days: int = 45) -> MarketMarginSnapshot:
+def _normalize_market_scope(value: Any) -> str:
+    text = str(value or "").strip().lower()
+
+    if text in {"otc", "tpex", "上櫃", "櫃買"}:
+        return "otc"
+
+    return "tse"
+
+
+def _market_name(market_scope: str) -> str:
+    return "上櫃" if _normalize_market_scope(market_scope) == "otc" else "上市"
+
+
+def get_market_margin_snapshot(
+    days: int = 45,
+    market_scope: str = "tse",
+) -> MarketMarginSnapshot:
     """
-    取得台灣整體市場融資融券資料。
-    資料來源：FinMind TaiwanStockTotalMarginPurchaseShortSale。
+    取得上市或上櫃市場融資融券資料。
+
+    上市：
+        FinMind TaiwanStockTotalMarginPurchaseShortSale。
+    上櫃：
+        TPEx 上櫃股票融資融券餘額，逐日彙總市場數字。
     """
-    cache_key = f"market_margin:{days}"
+    scope = _normalize_market_scope(market_scope)
+    market_name = _market_name(scope)
+    cache_key = f"market_margin:{scope}:{days}"
     now = time.time()
 
     cached = _MARKET_MARGIN_CACHE.get(cache_key)
@@ -119,20 +154,24 @@ def get_market_margin_snapshot(days: int = 45) -> MarketMarginSnapshot:
             return _snapshot_from_dict(data)
 
     try:
-        rows = _request_finmind_market_margin(days=days)
-
-        if not rows:
-            return MarketMarginSnapshot(
-                available=False,
-                message="查無大盤融資融券資料。",
-            )
-
-        parsed = _parse_market_margin_rows(rows)
+        if scope == "otc":
+            parsed = _request_tpex_market_margin(days=days)
+            source = "TPEx"
+            has_margin_money = False
+        else:
+            rows = _request_finmind_market_margin(days=days)
+            parsed = _parse_market_margin_rows(rows)
+            source = "FinMind / TWSE"
+            has_margin_money = True
 
         if not parsed:
             return MarketMarginSnapshot(
                 available=False,
-                message="大盤融資融券資料格式解析失敗。",
+                message=f"查無{market_name}融資融券資料。",
+                market_scope=scope,
+                market_name=market_name,
+                source=source,
+                has_margin_money=has_margin_money,
             )
 
         latest = parsed[-1]
@@ -163,12 +202,21 @@ def get_market_margin_snapshot(days: int = 45) -> MarketMarginSnapshot:
 
             "recent_rows": recent_rows,
 
-            "source": "FinMind",
+            "source": source,
+            "market_scope": scope,
+            "market_name": market_name,
+            "has_margin_money": has_margin_money,
         }
 
         _MARKET_MARGIN_CACHE[cache_key] = (now, data)
 
         _debug(
+            "version =",
+            MARKET_MARGIN_SERVICE_VERSION,
+            "market =",
+            scope,
+            "source =",
+            source,
             "latest =",
             data["latest_date"],
             "margin_balance =",
@@ -190,12 +238,16 @@ def get_market_margin_snapshot(days: int = 45) -> MarketMarginSnapshot:
 
         return MarketMarginSnapshot(
             available=False,
-            message=f"取得大盤融資融券資料失敗：{exc}",
+            message=f"取得{market_name}融資融券資料失敗：{exc}",
+            market_scope=scope,
+            market_name=market_name,
+            source="TPEx" if scope == "otc" else "FinMind / TWSE",
+            has_margin_money=scope != "otc",
         )
 
 
 def _request_finmind_market_margin(days: int = 45) -> list[dict[str, Any]]:
-    end_date = datetime.now().date()
+    end_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
     start_date = end_date - timedelta(days=max(days, 15))
 
     params = {
@@ -234,6 +286,205 @@ def _request_finmind_market_margin(days: int = 45) -> list[dict[str, Any]]:
         _debug("request failed", exc)
 
     return []
+
+
+def _to_roc_date(target_date) -> str:
+    return f"{target_date.year - 1911:03d}/{target_date.month:02d}/{target_date.day:02d}"
+
+
+def _request_tpex_margin_day(target_date) -> dict[str, Any] | None:
+    params = {
+        "l": "zh-tw",
+        "o": "json",
+        "d": _to_roc_date(target_date),
+    }
+
+    try:
+        resp = requests.get(
+            TPEX_MARGIN_API_URL,
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 market-margin-service/1.0",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        tables = payload.get("tables") or []
+
+        for table in tables:
+            rows = table.get("data") or []
+            fields = table.get("fields") or []
+
+            if not rows or not fields:
+                continue
+
+            parsed = _aggregate_tpex_margin_rows(
+                rows=rows,
+                fields=fields,
+                date_text=str(payload.get("date") or ""),
+                fallback_date=target_date.strftime("%Y-%m-%d"),
+            )
+
+            if parsed:
+                return parsed
+
+    except Exception as exc:
+        _debug(
+            "tpex day failed",
+            "| date =",
+            target_date,
+            "| error =",
+            repr(exc),
+        )
+
+    return None
+
+
+def _request_tpex_market_margin(days: int = 45) -> list[dict[str, Any]]:
+    """
+    TPEx 舊版查詢端點可指定日期，這裡只抓最近 10 個平日，
+    並行請求後保留最近 5 個有資料的交易日，避免逐檔再查行情。
+    """
+    end_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    target_dates = []
+    cursor = end_date
+    max_calendar_days = max(16, min(int(days or 45), 45))
+
+    for _ in range(max_calendar_days):
+        if cursor.weekday() < 5:
+            target_dates.append(cursor)
+
+        if len(target_dates) >= 10:
+            break
+
+        cursor -= timedelta(days=1)
+
+    parsed_rows: list[dict[str, Any]] = []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(_request_tpex_margin_day, target_date): target_date
+            for target_date in target_dates
+        }
+
+        for future in as_completed(futures):
+            try:
+                row = future.result()
+            except Exception as exc:
+                _debug(
+                    "tpex future failed",
+                    "| date =",
+                    futures[future],
+                    "| error =",
+                    repr(exc),
+                )
+                continue
+
+            if row:
+                parsed_rows.append(row)
+
+    parsed_rows.sort(key=lambda item: str(item.get("date") or ""))
+    result = parsed_rows[-5:]
+
+    _debug(
+        "tpex rows =",
+        len(result),
+        "requested_days =",
+        len(target_dates),
+        "first =",
+        result[0]["date"] if result else "",
+        "latest =",
+        result[-1]["date"] if result else "",
+    )
+
+    return result
+
+
+def _aggregate_tpex_margin_rows(
+    rows: list[list[Any]],
+    fields: list[str],
+    date_text: str,
+    fallback_date: str,
+) -> dict[str, Any] | None:
+    field_index = {
+        str(field).replace("\n", "").replace(" ", "").strip(): index
+        for index, field in enumerate(fields)
+    }
+
+    def _index(*names: str) -> int | None:
+        for name in names:
+            key = str(name).replace("\n", "").replace(" ", "").strip()
+
+            if key in field_index:
+                return field_index[key]
+
+        return None
+
+    indices = {
+        "margin_yes": _index("前資餘額(張)", "前資餘額"),
+        "margin_buy": _index("資買"),
+        "margin_sell": _index("資賣"),
+        "margin_return": _index("現償"),
+        "margin_balance": _index("資餘額"),
+        "short_yes": _index("前券餘額(張)", "前券餘額"),
+        "short_sell": _index("券賣"),
+        "short_buy": _index("券買"),
+        "short_return": _index("券償"),
+        "short_balance": _index("券餘額"),
+    }
+
+    required = {
+        "margin_yes",
+        "margin_balance",
+        "short_yes",
+        "short_balance",
+    }
+
+    if any(indices[name] is None for name in required):
+        _debug("tpex schema mismatch", fields)
+        return None
+
+    totals = {name: 0 for name in indices}
+
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+
+        for name, index in indices.items():
+            if index is not None and index < len(row):
+                totals[name] += _safe_int(row[index])
+
+    margin_balance = totals["margin_balance"]
+    short_balance = totals["short_balance"]
+    ratio = short_balance / margin_balance * 100 if margin_balance > 0 else 0.0
+
+    iso_date = fallback_date
+    compact_date = "".join(ch for ch in str(date_text) if ch.isdigit())
+
+    if len(compact_date) == 8:
+        iso_date = (
+            f"{compact_date[:4]}-{compact_date[4:6]}-{compact_date[6:8]}"
+        )
+
+    return {
+        "date": iso_date,
+        "margin_balance": margin_balance,
+        "margin_change": margin_balance - totals["margin_yes"],
+        "margin_buy": totals["margin_buy"],
+        "margin_sell": totals["margin_sell"],
+        "margin_return": totals["margin_return"],
+        "margin_money_balance": 0,
+        "margin_money_change": 0,
+        "short_balance": short_balance,
+        "short_change": short_balance - totals["short_yes"],
+        "short_buy": totals["short_buy"],
+        "short_sell": totals["short_sell"],
+        "short_return": totals["short_return"],
+        "margin_short_ratio": round(ratio, 2),
+    }
 
 
 def _parse_market_margin_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
