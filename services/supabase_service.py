@@ -1,4 +1,4 @@
-from __future__ import annotations
+
 
 from datetime import datetime
 from typing import Any, Optional
@@ -184,3 +184,143 @@ def get_market_prediction_rows(
             flush=True,
         )
         return []
+
+
+def upsert_market_weight_rows(
+    rows: list[dict[str, Any]],
+    batch_size: int = 100,
+) -> dict[str, Any]:
+    """寫入每日上市權重；預設只會有前20名。"""
+    client = get_supabase_client()
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+    clean_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("trade_date")
+        and row.get("stock_id")
+    ]
+    if not clean_rows:
+        return {
+            "success": True,
+            "rows": 0,
+            "batches": 0,
+            "message": "no rows",
+        }
+    safe_batch_size = max(20, min(int(batch_size or 100), 500))
+    written = 0
+    batches = 0
+    try:
+        for offset in range(0, len(clean_rows), safe_batch_size):
+            batch = clean_rows[offset : offset + safe_batch_size]
+            client.table("market_weight_daily").upsert(
+                batch,
+                on_conflict="trade_date,stock_id",
+            ).execute()
+            written += len(batch)
+            batches += 1
+        return {
+            "success": True,
+            "rows": written,
+            "batches": batches,
+            "message": "ok",
+        }
+    except Exception as exc:
+        print(
+            "upsert_market_weight_rows failed:"
+            f" written={written}, total={len(clean_rows)}, error={exc}",
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": written,
+            "batches": batches,
+            "message": repr(exc),
+        }
+
+
+def get_latest_market_weight_rows(
+    before_date: str | None = None,
+    limit: int = 20,
+) -> tuple[list[dict[str, Any]], str]:
+    """取得指定日期以前最近一個權重交易日，防止盤中使用未來資料。"""
+    client = get_supabase_client()
+    if client is None:
+        return [], ""
+    try:
+        date_query = (
+            client.table("market_weight_daily")
+            .select("trade_date")
+            .order("trade_date", desc=True)
+        )
+        if before_date:
+            date_query = date_query.lt("trade_date", str(before_date))
+        date_response = date_query.limit(1).execute()
+        date_rows = date_response.data or []
+        if not isinstance(date_rows, list) or not date_rows:
+            return [], ""
+        weight_date = str(date_rows[0].get("trade_date") or "")
+        if not weight_date:
+            return [], ""
+        safe_limit = max(1, min(int(limit or 20), 100))
+        response = (
+            client.table("market_weight_daily")
+            .select(
+                "trade_date,stock_id,stock_name,close_price,"
+                "issued_shares,market_cap,weight_ratio,weight_rank,source"
+            )
+            .eq("trade_date", weight_date)
+            .order("weight_rank", desc=False)
+            .limit(safe_limit)
+            .execute()
+        )
+        rows = response.data or []
+        return (rows if isinstance(rows, list) else []), weight_date
+    except Exception as exc:
+        print(
+            "get_latest_market_weight_rows failed:"
+            f" before_date={before_date}, error={exc}",
+            flush=True,
+        )
+        return [], ""
+
+
+def upsert_market_contribution_row(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """寫入一筆盤中聚合特徵。"""
+    client = get_supabase_client()
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+    if not isinstance(row, dict) or not row.get("ts"):
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "invalid row",
+        }
+    try:
+        client.table("market_contribution_1m").upsert(
+            row,
+            on_conflict="ts",
+        ).execute()
+        return {"success": True, "rows": 1, "message": "ok"}
+    except Exception as exc:
+        print(
+            "upsert_market_contribution_row failed:",
+            repr(exc),
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": 0,
+            "message": repr(exc),
+        }
