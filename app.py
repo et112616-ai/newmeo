@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-24-v2.9-MAKE-40S-SAFE-SKIP"
+APP_BUILD_VERSION = "2026-07-24-v3.0-MARKET-PREDICTION-SHADOW"
 APP_STARTED_TS = time.time()
 
 print(
@@ -42,6 +42,7 @@ from services.market_future_service import get_market_future_snapshot
 _MARKET_INDEX_FN = None
 _MARKET_INDEX_IMPORT_LOCK = threading.Lock()
 _MARKET_CONTRIBUTION_ROUTE_LOCK = threading.Lock()
+_MARKET_PREDICTION_SHADOW_LOCK = threading.Lock()
 
 
 def get_market_index_snapshot(*args, **kwargs):
@@ -1378,6 +1379,166 @@ def evaluate_market_prediction_forward_route():
             "message": "market prediction forward evaluation failed",
             "error": repr(exc),
         }), 500
+
+
+@app.route(
+    "/prepare_market_prediction_shadow_model",
+    methods=["GET", "POST"],
+)
+def prepare_market_prediction_shadow_model_route():
+    """建立一次可序列化的快速模型；一般 LINE 查詢不會重新訓練。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    training_start_date = str(
+        request.args.get("training_start_date", "2026-04-14")
+        or "2026-04-14"
+    ).strip()
+    training_cutoff = str(
+        request.args.get("training_cutoff", "2026-07-13")
+        or "2026-07-13"
+    ).strip()
+    persist = str(
+        request.args.get("persist", "1") or "1"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_shadow_service_v1"
+        )
+        prepare_fn = getattr(module, "prepare_shadow_model")
+        result = prepare_fn(
+            training_start_date=training_start_date,
+            training_cutoff=training_cutoff,
+            persist=persist,
+        )
+        print(
+            "MARKET_PREDICTION_SHADOW_PREPARE",
+            "| ok =", result.get("ok"),
+            "| artifact =", result.get("artifact_key"),
+            "| rows =", result.get("training_rows"),
+            "| persisted =", (result.get("persist") or {}).get("success"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_SHADOW_PREPARE failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction shadow prepare failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route(
+    "/market_prediction_shadow_snapshot",
+    methods=["GET", "POST"],
+)
+def market_prediction_shadow_snapshot_route():
+    """每15分鐘保存一次影子預測；重疊請求安全略過並固定回 HTTP 200。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    persist = str(
+        request.args.get("persist", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    force_live = str(
+        request.args.get("force_live", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    acquired = _MARKET_PREDICTION_SHADOW_LOCK.acquire(blocking=False)
+    if not acquired:
+        return jsonify({
+            "ok": True,
+            "skipped": True,
+            "skip_reason": "shadow_prediction_already_running",
+            "message": "已有影子預測正在執行，本次安全略過",
+            "version": APP_BUILD_VERSION,
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_shadow_service_v1"
+        )
+        predict_fn = getattr(module, "predict_market_shadow")
+        result = predict_fn(
+            persist=persist,
+            force_live=force_live,
+        )
+        print(
+            "MARKET_PREDICTION_SHADOW_SNAPSHOT",
+            "| ok =", result.get("ok"),
+            "| signal =", result.get("signal"),
+            "| prediction_ts =", result.get("prediction_ts"),
+            "| persisted =", (result.get("persist") or {}).get("success"),
+            "| settled =", (result.get("settlement") or {}).get("settled_rows"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        # 排程端以 JSON 內的 ok/message 判斷；避免非盤中或資料不足被 Make
+        # 當成 DataError，導致不必要的自動重試與用量浪費。
+        return jsonify(result), 200
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_SHADOW_SNAPSHOT failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction shadow snapshot failed",
+            "error": repr(exc),
+        }), 200
+    finally:
+        if acquired:
+            _MARKET_PREDICTION_SHADOW_LOCK.release()
+
+
+@app.route(
+    "/market_prediction_shadow_quality",
+    methods=["GET", "POST"],
+)
+def market_prediction_shadow_quality_route():
+    """查看影子訊號累積天數、覆蓋率與方向精準度。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    start_date = str(
+        request.args.get("start_date", "") or ""
+    ).strip() or None
+    end_date = str(
+        request.args.get("end_date", "") or ""
+    ).strip() or None
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_shadow_service_v1"
+        )
+        evaluate_fn = getattr(module, "evaluate_shadow_history")
+        result = evaluate_fn(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_SHADOW_QUALITY failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction shadow quality failed",
+            "error": repr(exc),
+        }), 500
+
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
