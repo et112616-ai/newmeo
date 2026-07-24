@@ -1,3 +1,6 @@
+controller_v5_1_post_market_carousel.py
+
+
 from __future__ import annotations
 
 # ============================================================
@@ -4460,6 +4463,7 @@ def _build_chart_flex(
     current_tf: str,
     image_aspect_ratio: str = "6:5",
     price_source: str = "",
+    show_period_buttons: bool = True,
 ) -> dict[str, Any]:
     color = _price_color(price_change)
     active_mode_norm = _normalize_action(active_mode)
@@ -4595,16 +4599,22 @@ def _build_chart_flex(
                 },
             ],
         },
-        {
-            "type": "separator",
-            "margin": "md",
-        },
-        (
-            _post_market_mode_buttons(stock_id, active_mode_norm)
-            if active_mode_norm in {"post_market_short", "post_market_daytrade"}
-            else _time_buttons(stock_id, active_mode_norm, tf_norm)
-        ),
     ]
+
+    if show_period_buttons:
+        body_contents.extend(
+            [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                (
+                    _post_market_mode_buttons(stock_id, active_mode_norm)
+                    if active_mode_norm in {"post_market_short", "post_market_daytrade"}
+                    else _time_buttons(stock_id, active_mode_norm, tf_norm)
+                ),
+            ]
+        )
 
     if image_url:
         body_contents.append(
@@ -7630,16 +7640,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # -------------------------
         if action in {"post_market", "post_market_short", "post_market_daytrade"}:
             t_post0 = time.perf_counter()
-            analysis_mode = (
-                "daytrade"
-                if action == "post_market_daytrade"
-                else "short"
-            )
-            active_post_mode = (
-                "post_market_daytrade"
-                if analysis_mode == "daytrade"
-                else "post_market_short"
-            )
 
             df, tf = _get_history_df_tf_safe(meta, "D")
 
@@ -7688,40 +7688,45 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             daytrade_ratio = None
             daytrade_date = ""
             daytrade_status = ""
-            if analysis_mode == "daytrade":
-                try:
-                    # 官方當沖資料為盤後資料；失敗時只隱藏欄位，不阻擋圖卡。
-                    from services.stock_daytrade_ratio_service_v1 import (
-                        get_stock_daytrade_ratio,
-                    )
+            try:
+                # 官方當沖資料為盤後資料；失敗時只隱藏欄位，不阻擋任一圖卡。
+                from services.stock_daytrade_ratio_service_v1 import (
+                    get_stock_daytrade_ratio,
+                )
 
-                    daytrade_snapshot = get_stock_daytrade_ratio(
-                        meta.stock_id,
-                        daily_df=df_for_post,
+                daytrade_snapshot = get_stock_daytrade_ratio(
+                    meta.stock_id,
+                    daily_df=df_for_post,
+                )
+                if getattr(daytrade_snapshot, "available", False):
+                    daytrade_ratio = float(
+                        getattr(daytrade_snapshot, "ratio_pct", 0.0) or 0.0
                     )
-                    if getattr(daytrade_snapshot, "available", False):
-                        daytrade_ratio = float(
-                            getattr(daytrade_snapshot, "ratio_pct", 0.0) or 0.0
-                        )
-                        daytrade_date = str(
-                            getattr(daytrade_snapshot, "latest_date", "") or ""
-                        )
-                        daytrade_status = str(
-                            getattr(daytrade_snapshot, "publication_status", "") or ""
-                        )
-                except Exception as exc:
-                    print(
-                        "DEBUG post_market daytrade ratio failed",
-                        "| stock_id =", meta.stock_id,
-                        "| error =", repr(exc),
-                        flush=True,
+                    daytrade_date = str(
+                        getattr(daytrade_snapshot, "latest_date", "") or ""
                     )
+                    daytrade_status = str(
+                        getattr(daytrade_snapshot, "publication_status", "") or ""
+                    )
+            except Exception as exc:
+                print(
+                    "DEBUG post_market daytrade ratio failed",
+                    "| stock_id =", meta.stock_id,
+                    "| error =", repr(exc),
+                    flush=True,
+                )
 
-            image_url = generate_post_market_analysis_chart(
+            short_image_url = generate_post_market_analysis_chart(
                 df_for_post,
                 meta.stock_id,
                 stock_name,
-                analysis_mode=analysis_mode,
+                analysis_mode="short",
+            )
+            daytrade_image_url = generate_post_market_analysis_chart(
+                df_for_post,
+                meta.stock_id,
+                stock_name,
+                analysis_mode="daytrade",
                 daytrade_ratio=daytrade_ratio,
                 daytrade_date=daytrade_date,
                 daytrade_status=daytrade_status,
@@ -7731,33 +7736,54 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 "DEBUG stock timing post_market",
                 "| stock_id =", meta.stock_id,
                 "| rows =", 0 if df_for_post is None else len(df_for_post),
-                "| mode =", analysis_mode,
                 "| daytrade_ratio =", daytrade_ratio,
-                "| image_url =", image_url,
+                "| short_image_url =", short_image_url,
+                "| daytrade_image_url =", daytrade_image_url,
                 "| sec =", round(time.perf_counter() - t_post0, 3),
                 flush=True,
             )
 
-            flex = _build_chart_flex(
+            short_flex = _build_chart_flex(
                 stock_id=meta.stock_id,
                 stock_name=stock_name,
-                image_url=image_url,
+                image_url=short_image_url,
                 price_info=price_info,
                 change_info=change_info,
                 update_time=update_time,
                 price_change=price_change,
-                active_mode=active_post_mode,
+                active_mode="post_market_short",
                 current_tf="D",
                 image_aspect_ratio="1:1",
                 price_source="daily_history",
+                show_period_buttons=False,
+            )
+            daytrade_flex = _build_chart_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                image_url=daytrade_image_url,
+                price_info=price_info,
+                change_info=change_info,
+                update_time=update_time,
+                price_change=price_change,
+                active_mode="post_market_daytrade",
+                current_tf="D",
+                image_aspect_ratio="1:1",
+                price_source="daily_history",
+                show_period_buttons=False,
             )
 
-            reply_title = (
-                f"{stock_name} 隔日沖支撐壓力"
-                if analysis_mode == "daytrade"
-                else f"{stock_name} 短線支撐壓力"
-            )
-            return _reply_with_title(reply_title, flex)
+            carousel = {
+                "type": "flex",
+                "altText": f"{meta.stock_id} {stock_name} 盤後分析",
+                "contents": {
+                    "type": "carousel",
+                    "contents": [
+                        short_flex["contents"],
+                        daytrade_flex["contents"],
+                    ],
+                },
+            }
+            return _reply_with_title(f"{stock_name} 盤後分析", carousel)
                 
         # -------------------------
         # 2. 即時 / K 線 / 法人
