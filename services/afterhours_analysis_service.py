@@ -11,11 +11,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import font_manager
+from matplotlib.patches import FancyBboxPatch
 
 from services.upload_service import publish_figure
 
 
-POST_MARKET_ANALYSIS_VERSION = "2026-07-24-v2-DUAL-MODE-SUPPORT-ZONES"
+POST_MARKET_ANALYSIS_VERSION = "2026-07-24-v2.1-DUAL-CARD-POLISHED-ZONES"
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 _FONT_PROP = None
@@ -330,31 +331,69 @@ def generate_post_market_analysis_chart(
             ("撐 2", _fmt_zone(levels["s2"]), "#008C3A", levels["s2_strength"]),
         ]
 
-    ax.text(
-        0.5, 0.945, title, fontsize=22, fontweight="bold",
-        color="#222222", va="top", ha="center", **font_kwargs,
+    header_color = "#FFF4F1" if mode == "daytrade" else "#F1F7FF"
+    ax.add_patch(
+        FancyBboxPatch(
+            (0.075, 0.875),
+            0.85,
+            0.085,
+            boxstyle="round,pad=0.012,rounding_size=0.025",
+            linewidth=0,
+            facecolor=header_color,
+            transform=ax.transAxes,
+        )
     )
     ax.text(
-        0.5, 0.895, f"資料日 {levels['date']}", fontsize=12,
-        color="#777777", va="top", ha="center", **font_kwargs,
+        0.5, 0.932, title, fontsize=22, fontweight="bold",
+        color="#222222", va="center", ha="center", **font_kwargs,
     )
 
-    y = 0.805
-    for label, value, color, badge in rows:
-        ax.text(
-            0.31, y, f"{label}：", fontsize=25, fontweight="bold",
-            color=color, va="top", ha="right", **font_kwargs,
+    row_backgrounds = ["#FFF3F3", "#FFF8F7", "#FFFBEA", "#F2FBF6", "#ECF8F1"]
+    y = 0.79
+    for row_index, (label, value, color, badge) in enumerate(rows):
+        ax.add_patch(
+            FancyBboxPatch(
+                (0.075, y - 0.068),
+                0.85,
+                0.096,
+                boxstyle="round,pad=0.008,rounding_size=0.018",
+                linewidth=0.8,
+                edgecolor="#E7E9ED",
+                facecolor=row_backgrounds[row_index],
+                transform=ax.transAxes,
+            )
+        )
+        ax.add_patch(
+            FancyBboxPatch(
+                (0.075, y - 0.068),
+                0.013,
+                0.096,
+                boxstyle="round,pad=0,rounding_size=0.006",
+                linewidth=0,
+                facecolor=color,
+                transform=ax.transAxes,
+            )
         )
         ax.text(
-            0.34, y, value, fontsize=25, fontweight="bold",
-            color="#111111", va="top", ha="left", **font_kwargs,
+            0.29, y - 0.018, label, fontsize=20, fontweight="bold",
+            color=color, va="center", ha="right", **font_kwargs,
+        )
+        ax.text(
+            0.34, y - 0.018, value, fontsize=23, fontweight="bold",
+            color="#111111", va="center", ha="left", **font_kwargs,
         )
         if badge:
             ax.text(
-                0.89, y + 0.004, badge, fontsize=11, fontweight="bold",
-                color=color, va="top", ha="center", **font_kwargs,
+                0.875, y - 0.018, badge, fontsize=11, fontweight="bold",
+                color=color, va="center", ha="center", **font_kwargs,
+                bbox={
+                    "boxstyle": "round,pad=0.28",
+                    "facecolor": "#FFFFFF",
+                    "edgecolor": color,
+                    "linewidth": 0.8,
+                },
             )
-        y -= 0.125
+        y -= 0.115
 
     if mode == "daytrade":
         if daytrade_ratio is not None:
@@ -365,20 +404,24 @@ def generate_post_market_analysis_chart(
         else:
             ratio_note = "當沖占比：最新官方資料尚未公布"
         ax.text(
-            0.5, 0.155, ratio_note, fontsize=12, color="#555555",
+            0.5, 0.16, ratio_note, fontsize=12, fontweight="bold", color="#555555",
             va="center", ha="center", **font_kwargs,
         )
         footnote = "Pivot 區間供隔日波動觀察，不代表買賣訊號。"
     else:
         ax.text(
-            0.5, 0.155, "強弱依近 60 日轉折、均價與量價密集度估算",
+            0.5, 0.16, "強弱依近 60 日轉折、均價與量價密集度估算",
             fontsize=12, color="#555555", va="center", ha="center", **font_kwargs,
         )
         footnote = "5日為觀察期間；支撐壓力為區間，非目標價。"
 
     ax.text(
-        0.5, 0.105, footnote, fontsize=11, color="#888888",
+        0.5, 0.11, footnote, fontsize=11, color="#888888",
         va="center", ha="center", **font_kwargs,
+    )
+    ax.text(
+        0.91, 0.055, f"資料日 {levels['date']}", fontsize=10.5,
+        color="#9A9A9A", va="center", ha="right", **font_kwargs,
     )
 
     print(
