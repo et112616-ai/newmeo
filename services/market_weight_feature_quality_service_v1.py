@@ -8,13 +8,13 @@ from zoneinfo import ZoneInfo
 from services.supabase_service import get_supabase_client
 
 
-QUALITY_VERSION = "2026-07-24-v1-WEIGHT-FEATURE-COVERAGE"
+QUALITY_VERSION = "2026-07-24-v1.1-WEIGHT-FEATURE-15M-QUOTA-SAFE"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-EXPECTED_ROWS_PER_DAY = 54
-MINIMUM_ROWS_PER_DAY = 48
-MINIMUM_CORE_COMPLETE_RATIO = 0.85
+EXPECTED_ROWS_PER_DAY = 18
+MINIMUM_ROWS_PER_DAY = 16
+MINIMUM_CORE_COMPLETE_RATIO = 0.90
 MINIMUM_AB_TEST_DAYS = 20
-MAX_ACCEPTABLE_GAP_MINUTES = 15.0
+MAX_ACCEPTABLE_GAP_MINUTES = 30.0
 SELECT_COLUMNS = (
     "ts,trade_date,weight_trade_date,top20_market_weight_pct,"
     "top20_contribution_points,top20_positive_weight_ratio_pct,"
@@ -28,9 +28,8 @@ CORE_FEATURE_COLUMNS = [
     "top20_positive_weight_ratio_pct",
     "top20_negative_weight_ratio_pct",
     "largest_contribution_points",
-    "otc_return_5m",
     "otc_return_15m",
-    "taiex_otc_divergence_5m",
+    "taiex_return_15m",
     "taiex_otc_divergence_15m",
 ]
 
@@ -169,10 +168,10 @@ def _day_report(
     )
     first_time = timestamps[0].strftime("%H:%M") if timestamps else None
     last_time = timestamps[-1].strftime("%H:%M") if timestamps else None
-    starts_on_time = bool(first_time and first_time <= "09:15")
-    ends_on_time = bool(last_time and last_time >= "13:20")
+    starts_on_time = bool(first_time and first_time <= "09:20")
+    ends_on_time = bool(last_time and last_time >= "13:25")
     max_gap = max(gaps) if gaps else None
-    cadence_gaps = sum(3.0 <= gap <= 7.0 for gap in gaps)
+    cadence_gaps = sum(12.0 <= gap <= 18.0 for gap in gaps)
     cadence_ratio = cadence_gaps / len(gaps) if gaps else 0.0
     complete = (
         row_count >= MINIMUM_ROWS_PER_DAY
@@ -199,7 +198,7 @@ def _day_report(
             3,
         ) if gaps else None,
         "max_gap_minutes": round(max_gap, 3) if max_gap is not None else None,
-        "five_minute_cadence_ratio": round(cadence_ratio, 6),
+        "fifteen_minute_cadence_ratio": round(cadence_ratio, 6),
         "complete": complete,
     }
 
@@ -278,7 +277,7 @@ def evaluate_market_weight_feature_quality(
             6,
         ),
         "quality_definition": {
-            "schedule": "每5分鐘一筆，09:05-13:30",
+            "schedule": "每15分鐘一筆，09:15-13:30",
             "expected_rows_per_day": EXPECTED_ROWS_PER_DAY,
             "minimum_rows_per_day": MINIMUM_ROWS_PER_DAY,
             "minimum_core_complete_ratio": MINIMUM_CORE_COMPLETE_RATIO,
