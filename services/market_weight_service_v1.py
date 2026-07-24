@@ -22,7 +22,7 @@ from services.supabase_service import (
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-24-v1.4-AUTO-DATE-SESSION-FRESHNESS"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.5-15M-QUOTA-SAFE"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -745,10 +745,7 @@ def build_market_contribution_snapshot(
         if otc_return_15m is not None
         else None
     )
-    otc_history_ready = all(
-        value is not None
-        for value in (otc_return_5m, otc_return_15m)
-    )
+    otc_history_ready = otc_return_15m is not None
     otc_1m_ready = otc_return_1m is not None
 
     row = {
@@ -824,10 +821,11 @@ def build_market_contribution_snapshot(
         "otc_history_rows": len(history_rows),
         "history_note": (
             "上櫃MIS僅提供最新值；第一次先保存價格，"
-            "以5分鐘頻率累積滿15分鐘後可取得5/15分鐘報酬；"
+            "定期累積滿15分鐘後可取得15分鐘報酬；"
+            "5分鐘報酬僅在約5分鐘前已有快照時提供；"
             "1分鐘報酬只有相隔約1分鐘的快照存在時才計算。"
             if not otc_history_ready
-            else "上櫃5/15分鐘報酬已可由已存快照安全回推。"
+            else "上櫃15分鐘報酬已可由已存快照安全回推。"
         ),
         "yahoo_error": yahoo_error,
         "persist": persist_result,
