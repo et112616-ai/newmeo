@@ -22,7 +22,7 @@ from services.supabase_service import (
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-24-v1.3-TPEX-MIS-5M-SAFE-LAG"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.4-AUTO-DATE-SESSION-FRESHNESS"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -42,6 +42,18 @@ HTTP_TIMEOUT_SECONDS = float(
 TOP_WEIGHT_LIMIT = max(
     5,
     min(int(os.getenv("MARKET_WEIGHT_TOP_LIMIT", "20")), 30),
+)
+MAX_STALE_MINUTES = max(
+    1.0,
+    min(
+        float(
+            os.getenv(
+                "MARKET_CONTRIBUTION_MAX_STALE_MINUTES",
+                "5",
+            )
+        ),
+        30.0,
+    ),
 )
 _HTTP = requests.Session()
 _HTTP.headers.update({
@@ -115,7 +127,38 @@ def build_daily_market_weights(
 ) -> dict[str, Any]:
     """用上市公司發行股數與最新盤後收盤價估算TAIEX市值權重。"""
     started = time.perf_counter()
-    resolved_date = _resolve_trade_date(trade_date)
+    requested_date = (
+        _resolve_trade_date(trade_date)
+        if trade_date
+        else ""
+    )
+    try:
+        latest_index_quote = _mis_index_quote("tse_t00.tw")
+    except Exception as exc:
+        latest_index_quote = {}
+        latest_index_error = repr(exc)
+    else:
+        latest_index_error = ""
+    latest_trade_date = str(
+        latest_index_quote.get("trade_date") or ""
+    )
+    if not latest_trade_date:
+        return {
+            "ok": False,
+            "message": "無法辨識證交所最新交易日，本次不寫入",
+            "requested_trade_date": requested_date,
+            "error": latest_index_error,
+            "version": MARKET_WEIGHT_VERSION,
+        }
+    if requested_date and requested_date != latest_trade_date:
+        return {
+            "ok": False,
+            "message": "指定日期與證交所最新交易日不一致，本次不寫入",
+            "requested_trade_date": requested_date,
+            "latest_trade_date": latest_trade_date,
+            "version": MARKET_WEIGHT_VERSION,
+        }
+    resolved_date = latest_trade_date
     try:
         company_rows = _request_rows(TWSE_COMPANY_URL)
         price_rows = _request_rows(TWSE_DAILY_PRICE_URL)
@@ -216,11 +259,14 @@ def build_daily_market_weights(
         "message": "ok",
         "version": MARKET_WEIGHT_VERSION,
         "trade_date": resolved_date,
+        "latest_trade_date": latest_trade_date,
+        "requested_trade_date": requested_date or None,
+        "trade_date_source": "TWSE_MIS_tse_t00.tw",
         "method": "close_price_x_issued_common_shares",
         "is_official_taiex_weight": False,
         "trade_date_note": (
-            "STOCK_DAY_ALL未附交易日；請只在盤後以實際交易日呼叫，"
-            "不可預填未來日期。"
+            "交易日由證交所MIS自動辨識；未指定trade_date時直接採用"
+            "最近交易日，指定日期不一致時拒絕寫入。"
         ),
         "weight_note": (
             "以證交所公開收盤價與已發行普通股數估算；"
@@ -373,13 +419,51 @@ def _mis_index_quote(ex_ch: str) -> dict[str, Any]:
     ts = pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").tz_convert(
         TAIPEI_TZ
     )
+    raw_trade_date = str(raw.get("d") or "").strip()
+    trade_date = ""
+    if re.fullmatch(r"\d{8}", raw_trade_date):
+        trade_date = pd.Timestamp(
+            datetime.strptime(raw_trade_date, "%Y%m%d")
+        ).strftime("%Y-%m-%d")
+    if not trade_date:
+        trade_date = ts.date().isoformat()
     return {
         "close": close,
         "previous_close": _safe_float(raw.get("y")),
         "ts": ts,
+        "trade_date": trade_date,
         "name": str(raw.get("n") or ""),
         "source": "TWSE_MIS",
     }
+
+
+def _session_status(now: datetime) -> dict[str, Any]:
+    minute_of_day = now.hour * 60 + now.minute
+    session_start = 9 * 60 + 5
+    session_end = 13 * 60 + 30
+    weekday_ok = now.weekday() < 5
+    in_session = (
+        weekday_ok
+        and session_start <= minute_of_day <= session_end
+    )
+    return {
+        "in_session": in_session,
+        "weekday": now.weekday(),
+        "session": "09:05-13:30 Asia/Taipei",
+        "checked_at": now.isoformat(),
+    }
+
+
+def _as_taipei_timestamp(value: Any) -> pd.Timestamp | None:
+    try:
+        ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(TAIPEI_TZ)
+        return ts.tz_convert(TAIPEI_TZ)
+    except Exception:
+        return None
 
 
 def _history_return_pct(
@@ -423,6 +507,15 @@ def build_market_contribution_snapshot(
     started = time.perf_counter()
     now = datetime.now(TAIPEI_TZ)
     trade_date = now.strftime("%Y-%m-%d")
+    session = _session_status(now)
+    if persist and not session["in_session"]:
+        return {
+            "ok": False,
+            "message": "目前不在盤中寫入時段，本次不寫入",
+            "write_blocked": True,
+            "session_status": session,
+            "version": MARKET_WEIGHT_VERSION,
+        }
     weights, weight_date = get_latest_market_weight_rows(
         before_date=trade_date,
         limit=TOP_WEIGHT_LIMIT,
@@ -571,6 +664,55 @@ def build_market_contribution_snapshot(
             "latest_feature_ts": feature_ts.isoformat(),
             "version": MARKET_WEIGHT_VERSION,
         }
+    taiex_latest_ts = _as_taipei_timestamp(twse_frame.index[-1])
+    otc_latest_ts = _as_taipei_timestamp(
+        otc_quote.get("ts")
+        if otc_quote.get("ts") is not None
+        else otc_frame.index[-1]
+    )
+    freshness_sources = {
+        "taiex": taiex_latest_ts,
+        "otc": otc_latest_ts,
+    }
+    stale_sources: list[str] = []
+    freshness: dict[str, Any] = {
+        "max_stale_minutes": MAX_STALE_MINUTES,
+        "status": "fresh",
+    }
+    for source_name, source_ts in freshness_sources.items():
+        if source_ts is None:
+            stale_sources.append(source_name)
+            freshness[f"{source_name}_ts"] = None
+            freshness[f"{source_name}_age_minutes"] = None
+            continue
+        age_minutes = max(
+            0.0,
+            (
+                pd.Timestamp(now) - source_ts
+            ).total_seconds() / 60.0,
+        )
+        freshness[f"{source_name}_ts"] = source_ts.isoformat()
+        freshness[f"{source_name}_age_minutes"] = round(
+            age_minutes,
+            3,
+        )
+        if (
+            source_ts.date().isoformat() != trade_date
+            or age_minutes > MAX_STALE_MINUTES
+        ):
+            stale_sources.append(source_name)
+    if stale_sources:
+        freshness["status"] = "stale"
+        freshness["stale_sources"] = stale_sources
+        if session["in_session"]:
+            return {
+                "ok": False,
+                "message": "上市或上櫃行情超過新鮮度門檻，本次不寫入",
+                "write_blocked": True,
+                "freshness": freshness,
+                "session_status": session,
+                "version": MARKET_WEIGHT_VERSION,
+            }
     history_rows = get_market_contribution_history(
         trade_date=trade_date,
         limit=120,
@@ -675,6 +817,8 @@ def build_market_contribution_snapshot(
         "feature": row,
         "component_rows": len(components),
         "otc_source": otc_source,
+        "freshness": freshness,
+        "session_status": session,
         "otc_history_ready": otc_history_ready,
         "otc_1m_ready": otc_1m_ready,
         "otc_history_rows": len(history_rows),
