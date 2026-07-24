@@ -9,6 +9,7 @@ INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
 MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
+STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -55,12 +56,18 @@ from services.stock_service import (
     normalize_stock_input,
 )
 from utils.formatter import normalize_time_frame
+from utils.flex_style import (
+    ACTIVE_COLOR,
+    DOWN_COLOR,
+    FLAT_COLOR,
+    INACTIVE_COLOR,
+    UP_COLOR,
+    build_chart_fallback,
+    build_chart_reload_hint,
+    build_postback_button,
+    card_context_badge,
+)
 from utils.parser import BotRequest
-UP_COLOR = "#FF2D2D"
-DOWN_COLOR = "#00B050"
-FLAT_COLOR = "#666666"
-ACTIVE_COLOR = "#16C957"
-INACTIVE_COLOR = "#D9DDE3"
 import traceback
 
 from datetime import datetime, time
@@ -2026,39 +2033,18 @@ def _postback_button(
     display_text: str | None = None,
     height: str = "52px",
     text_size: str = "md",
+    corner_radius: str = "10px",
 ) -> dict[str, Any]:
-    action = {
-        "type": "postback",
-        "label": label,
-        "data": data,
-    }
-
-    if display_text:
-        action["displayText"] = display_text
-
-    return {
-        "type": "box",
-        "layout": "vertical",
-        "flex": flex,
-        "height": height,
-        "cornerRadius": "10px",
-        "backgroundColor": ACTIVE_COLOR if active else INACTIVE_COLOR,
-        "justifyContent": "center",
-        "alignItems": "center",
-        "action": action,
-        "contents": [
-            {
-                "type": "text",
-                "text": label,
-                "align": "center",
-                "gravity": "center",
-                "size": text_size,
-                "color": "#FFFFFF" if active else "#111111",
-                "weight": "bold" if active else "regular",
-                "wrap": True,
-            }
-        ],
-    }
+    return build_postback_button(
+        label=label,
+        data=data,
+        active=active,
+        flex=flex,
+        display_text=display_text,
+        height=height,
+        text_size=text_size,
+        corner_radius=corner_radius,
+    )
 
 
 def _market_margin_scope_buttons(
@@ -2180,32 +2166,15 @@ def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str,
             target_action = "k_line"
 
         buttons.append(
-            {
-                "type": "box",
-                "layout": "vertical",
-                "height": "46px",
-                "cornerRadius": "12px",
-                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
-                "justifyContent": "center",
-                "alignItems": "center",
-                "action": {
-                    "type": "postback",
-                    "label": label,
-                    "data": f"{stock_id},{target_action},{target_action},{value}",
-                    "displayText": f"{stock_id} {label}",
-                },
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": label,
-                        "size": "md",
-                        "weight": "bold" if is_active else "regular",
-                        "align": "center",
-                        "gravity": "center",
-                        "color": "#FFFFFF" if is_active else "#111111",
-                    }
-                ],
-            }
+            _postback_button(
+                label=label,
+                data=f"{stock_id},{target_action},{target_action},{value}",
+                active=is_active,
+                display_text=f"{stock_id} {label}",
+                height="46px",
+                text_size="md",
+                corner_radius="12px",
+            )
         )
 
     return {
@@ -2257,32 +2226,19 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             target_tf = _target_tf_for(action_name)
 
             buttons.append(
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "height": "25px",
-                    "cornerRadius": "8px",
-                    "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
-                    "justifyContent": "center",
-                    "alignItems": "center",
-                    "action": {
-                        "type": "postback",
-                        "label": label,
-                        "data": f"{stock_id},{action_name},{action_name},{target_tf}",
-                        "displayText": f"{stock_id} {label}",
-                    },
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": label,
-                            "size": "xxs" if label in {"融資券", "盤後分析"} else "xs",
-                            "weight": "bold" if is_active else "regular",
-                            "align": "center",
-                            "gravity": "center",
-                            "color": "#FFFFFF" if is_active else "#111111",
-                        }
-                    ],
-                }
+                _postback_button(
+                    label=label,
+                    data=f"{stock_id},{action_name},{action_name},{target_tf}",
+                    active=is_active,
+                    display_text=f"{stock_id} {label}",
+                    height="25px",
+                    text_size=(
+                        "xxs"
+                        if label in {"融資券", "盤後分析"}
+                        else "xs"
+                    ),
+                    corner_radius="8px",
+                )
             )
 
         output.append(
@@ -3678,6 +3634,7 @@ def _build_chart_flex(
     }
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
+    context_badge = card_context_badge(active_mode_norm, tf_norm)
 
     update_text = str(update_time or "--").strip()
     update_short = _short_card_update_time(update_text)
@@ -3697,6 +3654,7 @@ def _build_chart_flex(
         "| source =", price_source,
         "| update_time =", update_text,
         "| status =", freshness_text,
+        "| flex_version =", STOCK_FLEX_RESILIENT_VERSION,
         flush=True,
     )
 
@@ -3719,7 +3677,7 @@ def _build_chart_flex(
                 },
                 {
                     "type": "text",
-                    "text": tf_norm,
+                    "text": context_badge,
                     "size": "sm",
                     "weight": "bold",
                     "color": "#666666",
@@ -3807,16 +3765,20 @@ def _build_chart_flex(
                 "backgroundColor": "#FFFFFF",
             }
         )
+        body_contents.append(
+            build_chart_reload_hint(
+                stock_id=stock_id,
+                active_mode=active_mode_norm,
+                current_tf=tf_norm,
+            )
+        )
     else:
         body_contents.append(
-            {
-                "type": "text",
-                "text": "圖表產生中或暫無圖表。",
-                "size": "sm",
-                "color": "#888888",
-                "margin": "md",
-                "wrap": True,
-            }
+            build_chart_fallback(
+                stock_id=stock_id,
+                active_mode=active_mode_norm,
+                current_tf=tf_norm,
+            )
         )
 
     body_contents.extend(_mode_buttons(stock_id, active_mode_norm, tf_norm))
