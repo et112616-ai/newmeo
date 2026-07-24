@@ -1,3 +1,5 @@
+# Deploy as: services/supabase_service.py
+# Version: 2026-07-24-v3-TPEX-HISTORY
 from __future__ import annotations
 
 from datetime import datetime
@@ -324,3 +326,32 @@ def upsert_market_contribution_row(
             "rows": 0,
             "message": repr(exc),
         }
+
+
+def get_market_contribution_history(
+    trade_date: str,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    """取得當日較早的聚合快照，用來回推上櫃1/5/15分鐘變化。"""
+    client = get_supabase_client()
+    if client is None or not trade_date:
+        return []
+    safe_limit = max(1, min(int(limit or 60), 500))
+    try:
+        response = (
+            client.table("market_contribution_1m")
+            .select("ts,trade_date,otc_close")
+            .eq("trade_date", str(trade_date))
+            .order("ts", desc=True)
+            .limit(safe_limit)
+            .execute()
+        )
+        rows = response.data or []
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(
+            "get_market_contribution_history failed:"
+            f" trade_date={trade_date}, error={exc}",
+            flush=True,
+        )
+        return []
