@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-23-v2.7-MARKET-WEIGHT-DATA-V8"
+APP_BUILD_VERSION = "2026-07-24-v2.8-MARKET-WEIGHT-QUALITY-V9"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1178,6 +1178,55 @@ def market_contribution_snapshot_route():
         return jsonify({
             "ok": False,
             "message": "market contribution snapshot failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route("/market_weight_feature_quality", methods=["GET", "POST"])
+def market_weight_feature_quality_route():
+    """檢查權值貢獻與上櫃強弱資料是否足以進行模型A/B測試。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    start_date = str(
+        request.args.get("start_date", "") or ""
+    ).strip() or None
+    end_date = str(
+        request.args.get("end_date", "") or ""
+    ).strip() or None
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_weight_feature_quality_service_v1"
+        )
+        evaluate_fn = getattr(
+            module,
+            "evaluate_market_weight_feature_quality",
+        )
+        result = evaluate_fn(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        print(
+            "MARKET_WEIGHT_FEATURE_QUALITY_ROUTE",
+            "| ok =", result.get("ok"),
+            "| status =", result.get("status"),
+            "| days =", result.get("trade_days"),
+            "| complete_days =", result.get("complete_trade_days"),
+            "| rows =", result.get("rows"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_WEIGHT_FEATURE_QUALITY_ROUTE failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market weight feature quality failed",
             "error": repr(exc),
         }), 500
 
