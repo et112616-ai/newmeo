@@ -30,6 +30,7 @@ from services.upload_service import publish_figure
 
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+PE_RIVER_CHART_VERSION = "2026-07-24-v2-MOBILE-READABLE"
 
 
 @dataclass
@@ -328,13 +329,14 @@ def _make_pe_river_chart(
 ) -> str:
     font_kwargs = _setup_font()
 
+    # LINE 圖卡會把圖片縮到約 300～360px 寬，因此保留原本長寬比，
+    # 但移除卡片上已經出現的重複標題與圖例，讓真正的繪圖區放大。
     fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=100, facecolor="white")
-    ax.set_facecolor("#F8F9FA")
+    ax.set_facecolor("#FAFBFC")
 
     x = weekly.index
     ttm = weekly["ttm_eps"].astype(float)
 
-    level_labels = ["10%", "25%", "40%", "60%", "75%", "90%"]
     level_series = []
 
     for level in levels:
@@ -355,7 +357,7 @@ def _make_pe_river_chart(
             level_series[i].values,
             level_series[i + 1].values,
             color=band_colors[i % len(band_colors)],
-            alpha=0.75,
+            alpha=0.88,
             linewidth=0,
         )
 
@@ -366,61 +368,77 @@ def _make_pe_river_chart(
         ax.plot(
             x,
             series.values,
-            linewidth=1.0,
+            linewidth=1.55,
             color=line_colors[idx % len(line_colors)],
-            alpha=0.85,
-            label=f"PE {level_labels[idx]}｜{levels[idx]:.1f}x",
+            alpha=0.9,
         )
 
     ax.plot(
         x,
         weekly["Close"].astype(float).values,
-        linewidth=2.3,
+        linewidth=3.1,
         color="#111111",
-        label="股價",
         zorder=5,
     )
 
     ax.scatter(
         [x[-1]],
         [latest_close],
-        s=36,
+        s=82,
         color="#111111",
+        edgecolor="white",
+        linewidth=1.5,
         zorder=6,
     )
 
-    title = f"{stock_id} {stock_name} 本益比河流圖"
-    subtitle = f"目前 PE {current_pe:.2f} 倍｜{zone_label}｜最新股價 {latest_close:,.2f}"
+    # 最新價直接標在最後一點，縮小後仍能辨識目前位置。
+    ax.annotate(
+        f"{latest_close:,.2f}",
+        xy=(x[-1], latest_close),
+        xytext=(-12, 14),
+        textcoords="offset points",
+        ha="right",
+        va="bottom",
+        fontsize=16,
+        fontweight="bold",
+        color="#111111",
+        bbox={
+            "boxstyle": "round,pad=0.25",
+            "facecolor": "white",
+            "edgecolor": "#9CA3AF",
+            "alpha": 0.96,
+        },
+        zorder=7,
+        **font_kwargs,
+    )
 
-    ax.set_title(title + "\n" + subtitle, fontsize=18, fontweight="bold", pad=16, **font_kwargs)
-    ax.set_ylabel("股價", fontsize=18, **font_kwargs)
-
-    ax.grid(True, linestyle=":", alpha=0.35)
-    ax.legend(
-        loc="upper left",
-        fontsize=12,
-        frameon=True,
-        borderpad=0.6,
-        labelspacing=0.45,
-        handlelength=2.0,
+    ax.set_ylabel("股價", fontsize=17, labelpad=10, **font_kwargs)
+    ax.grid(
+        True,
+        axis="y",
+        linestyle="--",
+        linewidth=0.9,
+        color="#9CA3AF",
+        alpha=0.48,
     )
 
     # 近一年顯示，X 軸用月份，比年份更直觀。
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y/%m"))
 
-    ax.set_xlabel("日期", fontsize=18, **font_kwargs)
-
-    ax.tick_params(axis="x", labelsize=12)
-    ax.tick_params(axis="y", labelsize=12)
+    ax.set_xlabel("日期", fontsize=17, labelpad=8, **font_kwargs)
+    ax.tick_params(axis="x", labelsize=15, pad=6)
+    ax.tick_params(axis="y", labelsize=15, pad=5)
+    ax.margins(x=0.025, y=0.075)
 
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
 
-    note = "河流區間＝歷史 PE 分位數 × 當期近四季 EPS；EPS 資料可能落後公告。"
-    fig.text(0.02, 0.02, note, fontsize=12, color="#666666", **font_kwargs)
+    for spine in ["left", "bottom"]:
+        ax.spines[spine].set_color("#6B7280")
+        ax.spines[spine].set_linewidth(1.1)
 
-    fig.tight_layout(rect=[0, 0.035, 1, 1])
+    fig.subplots_adjust(left=0.105, right=0.975, bottom=0.145, top=0.965)
 
     try:
         return publish_figure(fig, f"{stock_id}_pe_river")
@@ -573,6 +591,8 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
         levels,
         "| chart_url =",
         bool(chart_url),
+        "| chart_version =",
+        PE_RIVER_CHART_VERSION,
         flush=True,
     )
 
