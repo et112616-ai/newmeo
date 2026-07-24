@@ -8233,3 +8233,4 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
     except Exception as exc:
         print("controller.handle_request failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
+        return text_message(f"查詢失敗：{type(exc).__name__}: {exc}")
