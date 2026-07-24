@@ -227,17 +227,27 @@ def _normalize_action(action: str | None) -> str:
         "財務": "financial",
         "eps": "financial",
 
-        # 盤後分析
-        "post_market": "post_market",
-        "postmarket": "post_market",
-        "afterhours": "post_market",
-        "after_hours": "post_market",
-        "after_market": "post_market",
-        "盤後": "post_market",
-        "盤後分析": "post_market",
-        "支撐壓力": "post_market",
-        "支撐": "post_market",
-        "壓力": "post_market",
+        # 盤後分析：預設進入短線 5 日觀察；另提供隔日沖模式。
+        "post_market": "post_market_short",
+        "postmarket": "post_market_short",
+        "afterhours": "post_market_short",
+        "after_hours": "post_market_short",
+        "after_market": "post_market_short",
+        "盤後": "post_market_short",
+        "盤後分析": "post_market_short",
+        "支撐壓力": "post_market_short",
+        "支撐": "post_market_short",
+        "壓力": "post_market_short",
+        "post_market_short": "post_market_short",
+        "short_support": "post_market_short",
+        "短線": "post_market_short",
+        "短線支撐": "post_market_short",
+        "短線支撐壓力": "post_market_short",
+        "post_market_daytrade": "post_market_daytrade",
+        "daytrade": "post_market_daytrade",
+        "next_day_trade": "post_market_daytrade",
+        "隔日沖": "post_market_daytrade",
+        "當沖參考": "post_market_daytrade",
 
         # 本益比河流圖
         "pe_river": "pe_river",
@@ -2968,7 +2978,34 @@ def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str,
         "margin": "md",
         "contents": buttons,
     }
-        
+
+
+def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]:
+    mode = _normalize_action(active_mode)
+    items = [
+        ("短線（5日）", "post_market_short"),
+        ("隔日沖", "post_market_daytrade"),
+    ]
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "md",
+        "contents": [
+            _postback_button(
+                label=label,
+                data=f"{stock_id},{action_name},{action_name},D",
+                active=mode == action_name,
+                display_text=f"{stock_id} {label}",
+                height="46px",
+                text_size="sm",
+                corner_radius="12px",
+            )
+            for label, action_name in items
+        ],
+    }
+
+
 def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict[str, Any]]:
     mode = _normalize_action(active_mode)
     tf = normalize_time_frame(current_tf)
@@ -2984,7 +3021,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             ("融資券", "margin"),
             ("財務", "financial"),
             ("期貨", "futures"),
-            ("盤後分析", "post_market"),
+            ("盤後分析", "post_market_short"),
         ],
     ]
 
@@ -2995,7 +3032,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
         if action_name == "k_line":
             return tf if tf in {"D", "W", "M"} else "D"
 
-        if action_name == "post_market":
+        if action_name in {"post_market_short", "post_market_daytrade"}:
             return "D"
 
         return tf
@@ -3006,7 +3043,11 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
         buttons = []
 
         for label, action_name in row_items:
-            is_active = mode == action_name
+            is_active = (
+                mode in {"post_market_short", "post_market_daytrade"}
+                if action_name == "post_market_short"
+                else mode == action_name
+            )
             target_tf = _target_tf_for(action_name)
 
             buttons.append(
@@ -4431,11 +4472,18 @@ def _build_chart_flex(
         "large_holder": "大戶持股",
         "margin": "融資券",
         "futures": "個股期貨",
-        "post_market": "盤後分析",
+        "post_market": "盤後分析｜短線5日",
+        "post_market_short": "盤後分析｜短線5日",
+        "post_market_daytrade": "盤後分析｜隔日沖",
     }
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
-    context_badge = card_context_badge(active_mode_norm, tf_norm)
+    if active_mode_norm == "post_market_short":
+        context_badge = "短線"
+    elif active_mode_norm == "post_market_daytrade":
+        context_badge = "隔日"
+    else:
+        context_badge = card_context_badge(active_mode_norm, tf_norm)
 
     update_text = str(update_time or "--").strip()
     update_short = _short_card_update_time(update_text)
@@ -4551,7 +4599,11 @@ def _build_chart_flex(
             "type": "separator",
             "margin": "md",
         },
-        _time_buttons(stock_id, active_mode_norm, tf_norm),
+        (
+            _post_market_mode_buttons(stock_id, active_mode_norm)
+            if active_mode_norm in {"post_market_short", "post_market_daytrade"}
+            else _time_buttons(stock_id, active_mode_norm, tf_norm)
+        ),
     ]
 
     if image_url:
@@ -7576,8 +7628,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # -------------------------
         # 2.5 盤後分析
         # -------------------------
-        if action == "post_market":
+        if action in {"post_market", "post_market_short", "post_market_daytrade"}:
             t_post0 = time.perf_counter()
+            analysis_mode = (
+                "daytrade"
+                if action == "post_market_daytrade"
+                else "short"
+            )
+            active_post_mode = (
+                "post_market_daytrade"
+                if analysis_mode == "daytrade"
+                else "post_market_short"
+            )
 
             df, tf = _get_history_df_tf_safe(meta, "D")
 
@@ -7623,52 +7685,54 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     flush=True,
                 )
 
-            branch_buy_rows = []
-            branch_sell_rows = []
+            daytrade_ratio = None
+            daytrade_date = ""
+            daytrade_status = ""
+            if analysis_mode == "daytrade":
+                try:
+                    # 官方當沖資料為盤後資料；失敗時只隱藏欄位，不阻擋圖卡。
+                    from services.stock_daytrade_ratio_service_v1 import (
+                        get_stock_daytrade_ratio,
+                    )
 
-            try:
-                branch_snapshot = get_top_broker_branches(
-                    meta.stock_id,
-                    trade_days=3,
-                    lookback_days=20,
-                    top_n=3,
-                )
-
-                if getattr(branch_snapshot, "available", False):
-                    branch_buy_rows = list(getattr(branch_snapshot, "buy_rows", []) or [])
-                    branch_sell_rows = list(getattr(branch_snapshot, "sell_rows", []) or [])
-
-            except Exception as exc:
-                print(
-                    "DEBUG post_market broker branch failed",
-                    "| stock_id =", meta.stock_id,
-                    "| error =", repr(exc),
-                    flush=True,
-                )
-
-                branch_buy_rows = []
-                branch_sell_rows = []
+                    daytrade_snapshot = get_stock_daytrade_ratio(
+                        meta.stock_id,
+                        daily_df=df_for_post,
+                    )
+                    if getattr(daytrade_snapshot, "available", False):
+                        daytrade_ratio = float(
+                            getattr(daytrade_snapshot, "ratio_pct", 0.0) or 0.0
+                        )
+                        daytrade_date = str(
+                            getattr(daytrade_snapshot, "latest_date", "") or ""
+                        )
+                        daytrade_status = str(
+                            getattr(daytrade_snapshot, "publication_status", "") or ""
+                        )
+                except Exception as exc:
+                    print(
+                        "DEBUG post_market daytrade ratio failed",
+                        "| stock_id =", meta.stock_id,
+                        "| error =", repr(exc),
+                        flush=True,
+                    )
 
             image_url = generate_post_market_analysis_chart(
                 df_for_post,
                 meta.stock_id,
                 stock_name,
-                branch_buy_rows=branch_buy_rows,
-                branch_sell_rows=branch_sell_rows,
+                analysis_mode=analysis_mode,
+                daytrade_ratio=daytrade_ratio,
+                daytrade_date=daytrade_date,
+                daytrade_status=daytrade_status,
             )
 
             print(
                 "DEBUG stock timing post_market",
                 "| stock_id =", meta.stock_id,
                 "| rows =", 0 if df_for_post is None else len(df_for_post),
-                "| branch_buy_rows =", [
-                    (getattr(x, "display_name", "--"), getattr(x, "net_lots", 0))
-                    for x in branch_buy_rows
-                ],
-                "| branch_sell_rows =", [
-                    (getattr(x, "display_name", "--"), getattr(x, "net_lots", 0))
-                    for x in branch_sell_rows
-                ],
+                "| mode =", analysis_mode,
+                "| daytrade_ratio =", daytrade_ratio,
                 "| image_url =", image_url,
                 "| sec =", round(time.perf_counter() - t_post0, 3),
                 flush=True,
@@ -7682,13 +7746,18 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 change_info=change_info,
                 update_time=update_time,
                 price_change=price_change,
-                active_mode="post_market",
+                active_mode=active_post_mode,
                 current_tf="D",
                 image_aspect_ratio="1:1",
                 price_source="daily_history",
             )
 
-            return _reply_with_title(f"{stock_name} 盤後分析", flex)
+            reply_title = (
+                f"{stock_name} 隔日沖支撐壓力"
+                if analysis_mode == "daytrade"
+                else f"{stock_name} 短線支撐壓力"
+            )
+            return _reply_with_title(reply_title, flex)
                 
         # -------------------------
         # 2. 即時 / K 線 / 法人
