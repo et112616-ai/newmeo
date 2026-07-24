@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote as url_quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -21,7 +21,7 @@ from services.supabase_service import (
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-23-v1-TWSE-TOP20-CONTRIBUTION"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.1-YAHOO-QUOTE-NAME-FIX"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -302,7 +302,7 @@ def _batch_stock_snapshots(
 
 def _yahoo_index_frame(symbol: str) -> pd.DataFrame:
     response = _HTTP.get(
-        YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
+        YAHOO_CHART_URL.format(symbol=url_quote(symbol, safe="")),
         params={
             "range": "1d",
             "interval": "1m",
@@ -316,8 +316,10 @@ def _yahoo_index_frame(symbol: str) -> pd.DataFrame:
     if not isinstance(result, dict):
         return pd.DataFrame()
     timestamps = result.get("timestamp") or []
-    quote = (((result.get("indicators") or {}).get("quote") or [{}])[0])
-    closes = quote.get("close") or []
+    quote_data = (
+        ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    )
+    closes = quote_data.get("close") or []
     size = min(len(timestamps), len(closes))
     if size <= 0:
         return pd.DataFrame()
