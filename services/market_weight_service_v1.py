@@ -22,7 +22,7 @@ from services.supabase_service import (
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-24-v1.5-15M-QUOTA-SAFE"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.6-TAIEX-MIS-FRESH"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -471,8 +471,9 @@ def _history_return_pct(
     current_ts: pd.Timestamp,
     history_rows: list[dict[str, Any]],
     minutes: int,
+    value_key: str = "otc_close",
 ) -> float | None:
-    """以不晚於目標分鐘的最近一筆已存快照計算報酬。"""
+    """以目標分鐘前後2分鐘內、且早於目前時間的最近快照計算報酬。"""
     if current_close <= 0 or not history_rows:
         return None
     target_ts = current_ts - pd.Timedelta(minutes=minutes)
@@ -483,19 +484,21 @@ def _history_return_pct(
             if ts.tzinfo is None:
                 ts = ts.tz_localize("UTC")
             ts = ts.tz_convert(TAIPEI_TZ)
-            close = _safe_float(row.get("otc_close"))
-            if close > 0 and ts <= target_ts:
+            close = _safe_float(row.get(value_key))
+            if close > 0 and ts < current_ts:
                 candidates.append((ts, close))
         except Exception:
             continue
     if not candidates:
         return None
-    previous_ts, previous_close = max(
+    previous_ts, previous_close = min(
         candidates,
-        key=lambda item: item[0],
+        key=lambda item: abs((item[0] - target_ts).total_seconds()),
     )
-    lag_error_seconds = (target_ts - previous_ts).total_seconds()
-    if lag_error_seconds < 0 or lag_error_seconds > 2 * 60:
+    lag_error_seconds = abs(
+        (target_ts - previous_ts).total_seconds()
+    )
+    if lag_error_seconds > 2 * 60:
         return None
     return (current_close / previous_close - 1.0) * 100.0
 
@@ -545,6 +548,19 @@ def build_market_contribution_snapshot(
     taiex_reference = taiex_close - taiex_change
     if taiex_reference <= 0:
         taiex_reference = taiex_close
+    taiex_quote: dict[str, Any] = {}
+    try:
+        taiex_quote = _mis_index_quote("tse_t00.tw")
+    except Exception:
+        taiex_quote = {}
+    taiex_mis_close = _safe_float(taiex_quote.get("close"))
+    taiex_mis_reference = _safe_float(
+        taiex_quote.get("previous_close")
+    )
+    if taiex_mis_close > 0:
+        taiex_close = taiex_mis_close
+    if taiex_mis_reference > 0:
+        taiex_reference = taiex_mis_reference
 
     components: list[dict[str, Any]] = []
     for row in weights:
@@ -589,7 +605,7 @@ def build_market_contribution_snapshot(
         otc_frame = _yahoo_index_frame("^TWOII")
     except Exception as exc:
         yahoo_error = repr(exc)
-    if twse_frame.empty:
+    if twse_frame.empty and not taiex_quote:
         return {
             "ok": False,
             "message": "上市指數分鐘資料不足，本次不寫入",
@@ -599,8 +615,11 @@ def build_market_contribution_snapshot(
             "version": MARKET_WEIGHT_VERSION,
         }
 
-    taiex_return_5m = _return_pct(twse_frame, 5)
-    taiex_return_15m = _return_pct(twse_frame, 15)
+    taiex_source = (
+        "TWSE_MIS_tse_t00.tw"
+        if taiex_quote
+        else "YAHOO_^TWII"
+    )
     otc_source = "YAHOO_^TWOII"
     otc_quote: dict[str, Any] = {}
     if otc_frame.empty:
@@ -645,6 +664,8 @@ def build_market_contribution_snapshot(
         for frame in (twse_frame, otc_frame)
         if not frame.empty
     ]
+    if taiex_quote.get("ts") is not None:
+        latest_times.append(pd.Timestamp(taiex_quote["ts"]))
     if otc_quote.get("ts") is not None:
         latest_times.append(pd.Timestamp(otc_quote["ts"]))
     feature_ts = (
@@ -664,7 +685,11 @@ def build_market_contribution_snapshot(
             "latest_feature_ts": feature_ts.isoformat(),
             "version": MARKET_WEIGHT_VERSION,
         }
-    taiex_latest_ts = _as_taipei_timestamp(twse_frame.index[-1])
+    taiex_latest_ts = _as_taipei_timestamp(
+        taiex_quote.get("ts")
+        if taiex_quote.get("ts") is not None
+        else twse_frame.index[-1]
+    )
     otc_latest_ts = _as_taipei_timestamp(
         otc_quote.get("ts")
         if otc_quote.get("ts") is not None
@@ -717,6 +742,24 @@ def build_market_contribution_snapshot(
         trade_date=trade_date,
         limit=120,
     )
+    if taiex_quote:
+        taiex_return_5m = _history_return_pct(
+            taiex_close,
+            feature_ts,
+            history_rows,
+            5,
+            value_key="taiex_close",
+        )
+        taiex_return_15m = _history_return_pct(
+            taiex_close,
+            feature_ts,
+            history_rows,
+            15,
+            value_key="taiex_close",
+        )
+    else:
+        taiex_return_5m = _return_pct(twse_frame, 5)
+        taiex_return_15m = _return_pct(twse_frame, 15)
     if otc_frame.empty:
         otc_return_1m = _history_return_pct(
             otc_close, feature_ts, history_rows, 1
@@ -780,12 +823,12 @@ def build_market_contribution_snapshot(
         "otc_return_1m": rounded_or_none(otc_return_1m),
         "otc_return_5m": rounded_or_none(otc_return_5m),
         "otc_return_15m": rounded_or_none(otc_return_15m),
-        "taiex_return_5m": round(taiex_return_5m, 6),
-        "taiex_return_15m": round(taiex_return_15m, 6),
+        "taiex_return_5m": rounded_or_none(taiex_return_5m),
+        "taiex_return_15m": rounded_or_none(taiex_return_15m),
         "taiex_otc_divergence_5m": rounded_or_none(divergence_5m),
         "taiex_otc_divergence_15m": rounded_or_none(divergence_15m),
         "components": components,
-        "source": f"SHIOAJI+YAHOO+{otc_source}",
+        "source": f"SHIOAJI+{taiex_source}+{otc_source}",
     }
     persist_result = {
         "requested": persist,
