@@ -1,8 +1,3 @@
-檔案庫
-/
-controller_v3_market_prediction_shadow.py
-
-
 from __future__ import annotations
 
 # ============================================================
@@ -111,6 +106,14 @@ def _normalize_action(action: str | None) -> str:
         "大盤15分鐘預測": "market_prediction",
         "15分預測": "market_prediction",
         "15分鐘預測": "market_prediction",
+
+        "market_afterhours": "market_afterhours",
+        "market_after_hours": "market_afterhours",
+        "market_close_digest": "market_afterhours",
+        "大盤盤後": "market_afterhours",
+        "大盤盤後分析": "market_afterhours",
+        "大盤收盤": "market_afterhours",
+        "盤後總覽": "market_afterhours",
 
         "market_k": "market_k",
         "index_k": "market_k",
@@ -2162,7 +2165,24 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
         ],
     }
 
-    return [row]
+    afterhours_row = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "xs",
+        "contents": [
+            _postback_button(
+                label="盤後總覽",
+                data="TAIEX,market_afterhours,market_index,D",
+                active=active_action == "market_afterhours",
+                display_text="大盤 盤後總覽",
+                height="42px",
+                text_size="sm",
+            ),
+        ],
+    }
+
+    return [row, afterhours_row]
 
 
 def _build_market_prediction_shadow_flex(
@@ -2404,6 +2424,503 @@ def _build_market_prediction_shadow_flex(
                 "spacing": "sm",
                 "contents": contents,
             },
+        },
+    }
+
+
+def _build_market_afterhours_digest_flex(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """大盤盤後總覽＋明日觀察；資料日期分開標示，避免混淆。"""
+
+    def number(value: Any, decimals: int = 2) -> str:
+        try:
+            return f"{float(value):,.{decimals}f}"
+        except Exception:
+            return "--"
+
+    def signed(value: Any, decimals: int = 2, suffix: str = "") -> str:
+        try:
+            return f"{float(value):+,.{decimals}f}{suffix}"
+        except Exception:
+            return "--"
+
+    def value_color(value: Any) -> str:
+        try:
+            numeric = float(value)
+        except Exception:
+            return FLAT_COLOR
+        if numeric > 0:
+            return UP_COLOR
+        if numeric < 0:
+            return DOWN_COLOR
+        return FLAT_COLOR
+
+    def mmdd(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            return text[5:10].replace("-", "/")
+        return text or "--"
+
+    def info_row(
+        label: str,
+        value: str,
+        color: str = "#111827",
+        label_flex: int = 4,
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#6B7280",
+                    "flex": label_flex,
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": color,
+                    "align": "end",
+                    "flex": 6,
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def mini_cell(
+        label: str,
+        value: str,
+        color: str = "#111827",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F3F4F6",
+            "cornerRadius": "10px",
+            "paddingAll": "9px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "align": "center",
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": color,
+                    "align": "center",
+                    "margin": "xs",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    if not bool(result.get("ok")):
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "大盤盤後總覽",
+                "weight": "bold",
+                "size": "xl",
+                "color": "#111827",
+            },
+            {
+                "type": "text",
+                "text": str(result.get("message") or "目前無法取得盤後資料"),
+                "size": "sm",
+                "color": "#6B7280",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+        contents.extend(_market_index_buttons("market_afterhours"))
+        return {
+            "type": "flex",
+            "altText": "大盤盤後總覽暫時無法使用",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    market = result.get("market") or {}
+    future = result.get("future") or {}
+    chip = result.get("chip") or {}
+    margin = result.get("margin") or {}
+    margin_tse = margin.get("tse") or {}
+    margin_otc = margin.get("otc") or {}
+    weight = result.get("weight") or {}
+    largest = weight.get("largest") or {}
+    trade_date = str(result.get("trade_date") or "")
+    data_mode = str(result.get("data_mode") or "收盤資料")
+    change = market.get("change")
+    change_pct = market.get("change_pct")
+    close_color = value_color(change)
+
+    divergence = weight.get("taiex_otc_divergence_15m")
+    divergence_text = (
+        "尚未累積"
+        if divergence is None
+        else signed(divergence, 3, "%")
+    )
+    divergence_color = (
+        "#6B7280"
+        if divergence is None
+        else value_color(divergence)
+    )
+
+    summary_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "台股盤後總覽",
+                    "size": "xl",
+                    "weight": "bold",
+                    "color": "#111827",
+                    "flex": 1,
+                },
+                {
+                    "type": "text",
+                    "text": f"{mmdd(trade_date)}｜{data_mode}",
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": (
+                        "#E0A800"
+                        if data_mode == "盤中暫估"
+                        else "#6B7280"
+                    ),
+                    "align": "end",
+                    "flex": 0,
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": number(market.get("close")),
+            "size": "xxl",
+            "weight": "bold",
+            "color": close_color,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": (
+                f"{signed(change)}（{signed(change_pct, 2, '%')}）"
+            ),
+            "size": "md",
+            "weight": "bold",
+            "color": close_color,
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "xs",
+            "margin": "md",
+            "contents": [
+                mini_cell("開盤", number(market.get("open"))),
+                mini_cell("最高", number(market.get("high"))),
+                mini_cell("最低", number(market.get("low"))),
+            ],
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "xs",
+            "margin": "xs",
+            "contents": [
+                mini_cell(
+                    "日內振幅",
+                    f"{number(market.get('range_points'))}點",
+                ),
+                mini_cell(
+                    "收盤位置",
+                    f"{number(market.get('close_position_pct'), 1)}%",
+                ),
+                mini_cell(
+                    "成交金額",
+                    f"{number(market.get('turnover_yi'), 0)}億",
+                ),
+            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "收盤結構",
+            "size": "md",
+            "weight": "bold",
+            "color": "#374151",
+            "margin": "md",
+        },
+        info_row(
+            str(future.get("phase") or "台指期"),
+            (
+                f"{number(future.get('price'))}"
+                f"｜價差 {signed(future.get('basis_points'), 0)}點"
+            )
+            if future.get("available")
+            else "資料待更新",
+            value_color(future.get("basis_points")),
+        ),
+        info_row(
+            f"法人合計 {mmdd(chip.get('date'))}",
+            (
+                signed(chip.get("total_yi"), 1, "億")
+                if chip.get("available")
+                else "資料待更新"
+            ),
+            value_color(chip.get("total_yi")),
+        ),
+        info_row(
+            f"上市融資 {mmdd(margin_tse.get('date'))}",
+            (
+                signed(margin_tse.get("money_change_yi"), 1, "億")
+                if margin_tse.get("available")
+                else "資料待更新"
+            ),
+            value_color(margin_tse.get("money_change_yi")),
+        ),
+        info_row(
+            f"上櫃融資 {mmdd(margin_otc.get('date'))}",
+            (
+                signed(margin_otc.get("money_change_yi"), 1, "億")
+                if margin_otc.get("available")
+                else "資料待更新"
+            ),
+            value_color(margin_otc.get("money_change_yi")),
+        ),
+        info_row(
+            f"權值貢獻 {mmdd(weight.get('date'))}",
+            (
+                signed(
+                    weight.get("top20_contribution_points"),
+                    0,
+                    "點",
+                )
+                if weight.get("available")
+                else "資料待更新"
+            ),
+            value_color(weight.get("top20_contribution_points")),
+        ),
+        info_row(
+            "上市－上櫃 15分",
+            divergence_text,
+            divergence_color,
+        ),
+        {
+            "type": "text",
+            "text": str(result.get("note") or ""),
+            "size": "xs",
+            "color": "#9CA3AF",
+            "wrap": True,
+            "margin": "md",
+        },
+    ]
+    summary_contents.extend(_market_index_buttons("market_afterhours"))
+
+    status_contents: list[dict[str, Any]] = []
+    for item in list(result.get("data_status") or []):
+        if not isinstance(item, dict):
+            continue
+        available = bool(item.get("available"))
+        status_contents.append(
+            info_row(
+                str(item.get("label") or "資料"),
+                (
+                    f"已更新 {mmdd(item.get('date'))}"
+                    if available
+                    else "待更新"
+                ),
+                "#374151" if available else "#9CA3AF",
+            )
+        )
+
+    observation_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "明日觀察",
+            "size": "xl",
+            "weight": "bold",
+            "color": "#111827",
+        },
+        {
+            "type": "text",
+            "text": str(
+                market.get("close_position_label")
+                or "收盤區間資料不足"
+            ),
+            "size": "md",
+            "weight": "bold",
+            "color": close_color,
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": (
+                "以下為今日高低與 Pivot 區間參考，"
+                "不是明日漲跌預測。"
+            ),
+            "size": "xs",
+            "color": "#6B7280",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "xs",
+            "margin": "md",
+            "contents": [
+                mini_cell(
+                    "上方參考",
+                    number(market.get("resistance_1")),
+                    UP_COLOR,
+                ),
+                mini_cell(
+                    "中軸 Pivot",
+                    number(market.get("pivot")),
+                    "#E0A800",
+                ),
+                mini_cell(
+                    "下方參考",
+                    number(market.get("support_1")),
+                    DOWN_COLOR,
+                ),
+            ],
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "權值與籌碼",
+            "size": "md",
+            "weight": "bold",
+            "color": "#374151",
+            "margin": "md",
+        },
+        info_row(
+            "最大影響",
+            (
+                f"{largest.get('stock_name') or '--'} "
+                f"{signed(largest.get('contribution_points'), 0, '點')}"
+            ),
+            value_color(largest.get("contribution_points")),
+        ),
+        info_row(
+            "前20大權值",
+            (
+                f"漲 {number(weight.get('positive_ratio_pct'), 1)}%"
+                f"｜跌 {number(weight.get('negative_ratio_pct'), 1)}%"
+            ),
+        ),
+        info_row(
+            "外資",
+            (
+                signed(chip.get("foreign_yi"), 1, "億")
+                if chip.get("available")
+                else "待更新"
+            ),
+            value_color(chip.get("foreign_yi")),
+        ),
+        info_row(
+            "投信",
+            (
+                signed(chip.get("trust_yi"), 1, "億")
+                if chip.get("available")
+                else "待更新"
+            ),
+            value_color(chip.get("trust_yi")),
+        ),
+        info_row(
+            "上市融券增減",
+            (
+                signed(margin_tse.get("short_change"), 0, "張")
+                if margin_tse.get("available")
+                else "待更新"
+            ),
+            value_color(margin_tse.get("short_change")),
+        ),
+        info_row(
+            "上櫃融券增減",
+            (
+                signed(margin_otc.get("short_change"), 0, "張")
+                if margin_otc.get("available")
+                else "待更新"
+            ),
+            value_color(margin_otc.get("short_change")),
+        ),
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "資料完整度",
+            "size": "md",
+            "weight": "bold",
+            "color": "#374151",
+            "margin": "md",
+        },
+        *status_contents,
+        {
+            "type": "text",
+            "text": "各來源更新日不同，圖卡已分別標示日期。",
+            "size": "xs",
+            "color": "#9CA3AF",
+            "wrap": True,
+            "margin": "md",
+        },
+    ]
+
+    return {
+        "type": "flex",
+        "altText": f"大盤盤後總覽 {trade_date}",
+        "contents": {
+            "type": "carousel",
+            "contents": [
+                {
+                    "type": "bubble",
+                    "size": "mega",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": summary_contents,
+                    },
+                },
+                {
+                    "type": "bubble",
+                    "size": "mega",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": observation_contents,
+                    },
+                },
+            ],
         },
     }
 
@@ -2808,7 +3325,24 @@ def _market_future_nav_buttons(active_action: str = "market_future_all") -> list
         ],
     }
 
-    return [row]
+    afterhours_row = {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "xs",
+        "contents": [
+            _postback_button(
+                label="盤後總覽",
+                data="TAIEX,market_afterhours,market_index,D",
+                active=active_action == "market_afterhours",
+                display_text="大盤 盤後總覽",
+                height="42px",
+                text_size="sm",
+            ),
+        ],
+    }
+
+    return [row, afterhours_row]
 
 
 def _market_future_kline_tf_buttons(active_tf: str = "1m") -> list[dict[str, Any]]:
@@ -6116,6 +6650,7 @@ MARKET_INDEX_KEYWORDS = {
 MARKET_INDEX_ACTIONS = {
     "market_index",
     "market_prediction",
+    "market_afterhours",
     "market_chip",
     "market_margin",
     "market_margin_tse",
@@ -6688,6 +7223,15 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             if action not in MARKET_INDEX_ACTIONS:
                 request_text = f"{raw_stock} {raw_text}".strip()
                 if (
+                    "盤後" in request_text
+                    and (
+                        "大盤" in request_text
+                        or "加權" in request_text
+                        or "盤後總覽" in request_text
+                    )
+                ):
+                    action = "market_afterhours"
+                elif (
                     "預測" in request_text
                     and (
                         "大盤" in request_text
@@ -6701,6 +7245,28 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     action = "market_future_all"
                 else:
                     action = "market_index"
+
+            if action == "market_afterhours":
+                # 盤後服務延遲載入，避免增加一般圖卡冷啟動時間。
+                from services.market_afterhours_digest_service_v1 import (
+                    build_market_afterhours_digest,
+                )
+
+                digest = build_market_afterhours_digest()
+                print(
+                    "DEBUG market_afterhours controller",
+                    "| ok =", digest.get("ok"),
+                    "| date =", digest.get("trade_date"),
+                    "| close =", (digest.get("market") or {}).get("close"),
+                    "| contribution_date =",
+                    (digest.get("weight") or {}).get("date"),
+                    "| sec =", digest.get("seconds"),
+                    flush=True,
+                )
+                return _reply_with_title(
+                    "大盤盤後總覽",
+                    _build_market_afterhours_digest_flex(digest),
+                )
 
             if action == "market_prediction":
                 # 預測模組延遲載入，避免拖慢一般股票與大盤圖卡冷啟動。
@@ -7667,4 +8233,3 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
     except Exception as exc:
         print("controller.handle_request failed traceback:", flush=True)
         print(traceback.format_exc(), flush=True)
-        return text_message(f"查詢失敗：{type(exc).__name__}: {exc}")
