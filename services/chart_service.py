@@ -36,6 +36,12 @@ plt.rcParams["axes.unicode_minus"] = False
 
 INTRADAY_AXIS_FIX_VERSION = "2026-07-20-v3-ACTUAL-DAY-EXTREMA"
 INTRADAY_VOLUME_FIX_VERSION = "2026-07-16-v1-COMPACT-5M-VOLUME"
+KLINE_DISPLAY_FIX_VERSION = "2026-07-24-v5-WEEKLY-LOW0-LARGE-INFO"
+
+# LINE 會把 960px 圖表縮到 Flex 卡片寬度；15pt 在手機上仍過小。
+# 保持原本兩行配置與行距，只放大文字本身。
+KLINE_INFO_MA_FONTSIZE = 21
+KLINE_INFO_OHLC_FONTSIZE = 18
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
@@ -856,7 +862,33 @@ def _prepare_kline_work_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
 
         work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
 
-    work_df = work_df.dropna(subset=["Open", "High", "Low", "Close"])
+    ohlc_cols = ["Open", "High", "Low", "Close"]
+    before_sanitize_rows = len(work_df)
+
+    # 0 或負數不可能是有效台股 OHLC。也排除高低價關係顛倒的資料列，
+    # 避免週／月重採樣來源中的異常值被畫成「低 0」或扭曲 Y 軸。
+    # 不使用前值、開收盤價或漲跌幅補值，確保高低點仍只來自真實行情。
+    valid_ohlc_mask = work_df[ohlc_cols].notna().all(axis=1)
+    valid_ohlc_mask &= work_df[ohlc_cols].gt(0).all(axis=1)
+    valid_ohlc_mask &= work_df["High"].ge(
+        work_df[["Open", "Low", "Close"]].max(axis=1)
+    )
+    valid_ohlc_mask &= work_df["Low"].le(
+        work_df[["Open", "High", "Close"]].min(axis=1)
+    )
+    work_df = work_df.loc[valid_ohlc_mask].copy()
+
+    invalid_rows = before_sanitize_rows - len(work_df)
+    if invalid_rows:
+        print(
+            "DEBUG kline sanitize",
+            "| version =", KLINE_DISPLAY_FIX_VERSION,
+            "| tf =", normalized_tf,
+            "| before_rows =", before_sanitize_rows,
+            "| after_rows =", len(work_df),
+            "| invalid_rows =", invalid_rows,
+            flush=True,
+        )
 
     try:
         work_df.attrs.update(attrs_backup)
@@ -874,6 +906,17 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     tf = normalize_time_frame(tf)
     work_df = _prepare_kline_work_df(df, tf)
+
+    print(
+        "DEBUG kline display active",
+        "| version =", KLINE_DISPLAY_FIX_VERSION,
+        "| stock_id =", stock_id,
+        "| tf =", tf,
+        "| source_rows =", len(df),
+        "| valid_rows =", len(work_df),
+        "| info_font =", f"{KLINE_INFO_MA_FONTSIZE}/{KLINE_INFO_OHLC_FONTSIZE}",
+        flush=True,
+    )
 
     if work_df.empty:
         return ""
@@ -991,16 +1034,16 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     font_kwargs = _get_font_kwargs_safe()
 
-    ax_info.text(0.00, 0.52, f"5MA {_fmt_ma(ma5)}", fontsize=15, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.28, 0.52, f"20MA {_fmt_ma(ma20)}", fontsize=15, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.56, 0.52, f"60MA {_fmt_ma(ma60)}", fontsize=15, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.00, 0.20, f"120MA {_fmt_ma(ma120)}", fontsize=15, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.52, f"5MA {_fmt_ma(ma5)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.28, 0.52, f"20MA {_fmt_ma(ma20)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.56, 0.52, f"60MA {_fmt_ma(ma60)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ax_info.text(0.00, 0.20, f"120MA {_fmt_ma(ma120)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
 
     ax_info.text(
         0.35,
         0.20,
         f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
-        fontsize=13,
+        fontsize=KLINE_INFO_OHLC_FONTSIZE,
         color="#444444",
         ha="left",
         va="center",
