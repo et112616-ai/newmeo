@@ -1,3 +1,8 @@
+檔案庫
+/
+controller_v3_market_prediction_shadow.py
+
+
 from __future__ import annotations
 
 # ============================================================
@@ -96,6 +101,16 @@ def _normalize_action(action: str | None) -> str:
         "指數": "market_index",
         "加權": "market_index",
         "加權指數": "market_index",
+
+        "market_prediction": "market_prediction",
+        "market_predict": "market_prediction",
+        "index_prediction": "market_prediction",
+        "taiex_prediction": "market_prediction",
+        "大盤預測": "market_prediction",
+        "大盤15分預測": "market_prediction",
+        "大盤15分鐘預測": "market_prediction",
+        "15分預測": "market_prediction",
+        "15分鐘預測": "market_prediction",
 
         "market_k": "market_k",
         "index_k": "market_k",
@@ -2088,7 +2103,7 @@ def _market_margin_scope_buttons(
 def _market_index_buttons(active_action: str = "market_index") -> list[dict[str, Any]]:
     """
     大盤主功能列：
-    現貨｜法人｜融資券｜期貨
+    現貨｜法人｜融資券｜預測｜期貨
 
     大盤期貨一律導向全盤。
     """
@@ -2129,17 +2144,269 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
                 text_size="xxs",
             ),
             _postback_button(
+                label="預測",
+                data="TAIEX,market_prediction,market_index,D",
+                active=active_action == "market_prediction",
+                display_text="大盤 15分鐘預測",
+                height="50px",
+                text_size="xxs",
+            ),
+            _postback_button(
                 label="期貨",
                 data="TAIEX,market_future_all,market_index,D",
                 active=active_action in {"market_future_all", "market_future_k"},
                 display_text="大盤 期貨",
                 height="50px",
-                text_size="xs",
+                text_size="xxs",
             ),
         ],
     }
 
     return [row]
+
+
+def _build_market_prediction_shadow_flex(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """大盤未來15分鐘影子預測；只顯示測試結果，不宣稱交易訊號。"""
+
+    def probability_text(value: Any) -> str:
+        try:
+            return f"{float(value) * 100:.1f}%"
+        except Exception:
+            return "--"
+
+    if not bool(result.get("ok")):
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "大盤15分鐘預測",
+                "weight": "bold",
+                "size": "xl",
+                "color": "#111827",
+            },
+            {
+                "type": "text",
+                "text": str(result.get("message") or "目前無法產生預測"),
+                "size": "sm",
+                "color": "#6B7280",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": "模型測試中，非交易建議",
+                "size": "xs",
+                "color": "#9CA3AF",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+        contents.extend(_market_index_buttons("market_prediction"))
+        return {
+            "type": "flex",
+            "altText": "大盤15分鐘預測暫時無法使用",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    signal = str(result.get("signal") or "observe").strip().lower()
+    signal_meta = {
+        "up": ("偏多觀察", UP_COLOR, "突破 +100點"),
+        "down": ("偏空觀察", DOWN_COLOR, "跌破 -100點"),
+        "observe": ("暫時觀察", FLAT_COLOR, "訊號信心未達門檻"),
+    }
+    signal_label, signal_color, signal_note = signal_meta.get(
+        signal,
+        signal_meta["observe"],
+    )
+    close_value = result.get("taiex_close")
+    try:
+        close_text = f"{float(close_value):,.2f}"
+    except Exception:
+        close_text = "--"
+
+    display_time = str(result.get("display_time") or "").strip()
+    freshness = str(result.get("freshness_status") or "").strip()
+    update_text = "｜".join(
+        value
+        for value in (
+            f"更新 {display_time[-5:]}" if display_time else "",
+            freshness,
+        )
+        if value
+    )
+    event_probability = result.get("event_probability")
+    up_probability = result.get("up_probability")
+    down_probability = result.get("down_probability")
+    if down_probability is None:
+        try:
+            down_probability = 1.0 - float(up_probability)
+        except Exception:
+            down_probability = None
+
+    contents = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "alignItems": "center",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "大盤15分鐘預測",
+                    "weight": "bold",
+                    "size": "xl",
+                    "color": "#111827",
+                    "flex": 1,
+                },
+                {
+                    "type": "text",
+                    "text": "影子測試",
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": "#7C3AED",
+                    "align": "end",
+                    "flex": 0,
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": close_text,
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111827",
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": signal_label,
+            "size": "xl",
+            "weight": "bold",
+            "color": signal_color,
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": signal_note,
+            "size": "sm",
+            "color": signal_color,
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": update_text or "更新時間未提供",
+            "size": "xs",
+            "color": "#6B7280",
+            "margin": "sm",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F3F4F6",
+                    "cornerRadius": "10px",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "突破100點機率",
+                            "size": "xs",
+                            "color": "#6B7280",
+                            "align": "center",
+                        },
+                        {
+                            "type": "text",
+                            "text": probability_text(event_probability),
+                            "size": "lg",
+                            "weight": "bold",
+                            "color": "#111827",
+                            "align": "center",
+                            "margin": "sm",
+                        },
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F3F4F6",
+                    "cornerRadius": "10px",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "條件式方向",
+                            "size": "xs",
+                            "color": "#6B7280",
+                            "align": "center",
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                f"漲 {probability_text(up_probability)}"
+                                f"｜跌 {probability_text(down_probability)}"
+                            ),
+                            "size": "sm",
+                            "weight": "bold",
+                            "color": "#111827",
+                            "align": "center",
+                            "margin": "sm",
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": "上漲 > +100點｜盤整 -100～+100點｜下跌 < -100點",
+            "size": "xs",
+            "color": "#4B5563",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "模型測試中，非交易建議",
+            "size": "xs",
+            "color": "#9CA3AF",
+            "wrap": True,
+            "margin": "sm",
+        },
+    ]
+    contents.extend(_market_index_buttons("market_prediction"))
+
+    return {
+        "type": "flex",
+        "altText": f"大盤15分鐘預測：{signal_label}",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 
 def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str, Any]:
     mode = _normalize_action(active_mode)
@@ -2484,7 +2751,7 @@ def _build_market_index_realtime_flex(snapshot) -> dict[str, Any]:
 def _market_future_nav_buttons(active_action: str = "market_future_all") -> list[dict[str, Any]]:
     """
     台指期頁面第一排：
-    現貨｜法人｜融資券｜期貨｜全盤
+    現貨｜法人｜融資券｜預測｜全盤
     """
     active_action = _normalize_action(active_action or "market_future_all")
 
@@ -2523,10 +2790,10 @@ def _market_future_nav_buttons(active_action: str = "market_future_all") -> list
                 text_size="xxs",
             ),
             _postback_button(
-                label="期貨",
-                data="TAIEX,market_future_all,market_index,D",
-                active=active_action in {"market_future_all", "market_future_k"},
-                display_text="大盤 期貨",
+                label="預測",
+                data="TAIEX,market_prediction,market_index,D",
+                active=active_action == "market_prediction",
+                display_text="大盤 15分鐘預測",
                 height="50px",
                 text_size="xxs",
             ),
@@ -5848,6 +6115,7 @@ MARKET_INDEX_KEYWORDS = {
 
 MARKET_INDEX_ACTIONS = {
     "market_index",
+    "market_prediction",
     "market_chip",
     "market_margin",
     "market_margin_tse",
@@ -5885,6 +6153,9 @@ def _is_market_index_request(*values) -> bool:
             return True
 
         if "TWII" in upper_text:
+            return True
+
+        if "15分預測" in text or "15分鐘預測" in text:
             return True
     
     return False
@@ -6415,10 +6686,42 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             or _is_market_index_request(raw_stock, raw_text)
         ):
             if action not in MARKET_INDEX_ACTIONS:
-                if _is_market_future_request(raw_stock, raw_text):
+                request_text = f"{raw_stock} {raw_text}".strip()
+                if (
+                    "預測" in request_text
+                    and (
+                        "大盤" in request_text
+                        or "加權" in request_text
+                        or "15分" in request_text
+                        or "15分鐘" in request_text
+                    )
+                ):
+                    action = "market_prediction"
+                elif _is_market_future_request(raw_stock, raw_text):
                     action = "market_future_all"
                 else:
                     action = "market_index"
+
+            if action == "market_prediction":
+                # 預測模組延遲載入，避免拖慢一般股票與大盤圖卡冷啟動。
+                from services.market_prediction_shadow_service_v1 import (
+                    predict_market_shadow,
+                )
+
+                result = predict_market_shadow(persist=False)
+                print(
+                    "DEBUG market_prediction shadow controller",
+                    "| ok =", result.get("ok"),
+                    "| signal =", result.get("signal"),
+                    "| time =", result.get("display_time"),
+                    "| freshness =", result.get("freshness_status"),
+                    "| sec =", result.get("seconds"),
+                    flush=True,
+                )
+                return _reply_with_title(
+                    "大盤15分鐘預測（影子測試）",
+                    _build_market_prediction_shadow_flex(result),
+                )
 
             if action == "market_index":
                 snapshot = ()
