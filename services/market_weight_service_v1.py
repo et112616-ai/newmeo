@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -22,7 +24,7 @@ from services.supabase_service import (
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-24-v1.6-TAIEX-MIS-FRESH"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.7-MAKE-40S-SAFE"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -38,6 +40,30 @@ TWSE_MIS_QUOTE_URL = (
 )
 HTTP_TIMEOUT_SECONDS = float(
     os.getenv("MARKET_WEIGHT_HTTP_TIMEOUT_SECONDS", "8")
+)
+SNAPSHOT_SOFT_DEADLINE_SECONDS = max(
+    15.0,
+    min(
+        float(
+            os.getenv(
+                "MARKET_CONTRIBUTION_SOFT_DEADLINE_SECONDS",
+                "30",
+            )
+        ),
+        34.0,
+    ),
+)
+PROVIDER_CALL_TIMEOUT_SECONDS = max(
+    3.0,
+    min(
+        float(
+            os.getenv(
+                "MARKET_CONTRIBUTION_PROVIDER_TIMEOUT_SECONDS",
+                "10",
+            )
+        ),
+        15.0,
+    ),
 )
 TOP_WEIGHT_LIMIT = max(
     5,
@@ -64,6 +90,81 @@ _HTTP.headers.update({
 
 def _debug(*args: Any) -> None:
     print("DEBUG market_weight |", *args, flush=True)
+
+
+class SnapshotDeadlineExceeded(TimeoutError):
+    """盤中快照無法在 Make 40 秒限制前安全完成。"""
+
+
+def _remaining_seconds(
+    deadline: float,
+    stage: str,
+    cap: float | None = None,
+) -> float:
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0.25:
+        raise SnapshotDeadlineExceeded(
+            f"snapshot soft deadline exceeded before {stage}"
+        )
+    if cap is not None:
+        remaining = min(remaining, cap)
+    return max(0.25, remaining)
+
+
+def _call_with_timeout(
+    function,
+    timeout_seconds: float,
+    stage: str,
+):
+    """
+    為沒有 timeout 參數的 Shioaji／Supabase 呼叫加上路由級截止時間。
+
+    背景執行緒設為 daemon；主請求會在截止時間內回覆 Make，
+    不會因單一供應商卡住而超過 40 秒。
+    """
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def runner() -> None:
+        try:
+            result_queue.put((True, function()))
+        except Exception as exc:
+            result_queue.put((False, exc))
+
+    worker = threading.Thread(
+        target=runner,
+        name=f"market-weight-{stage}",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        success, value = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise SnapshotDeadlineExceeded(
+            f"{stage} timed out after {timeout_seconds:.1f}s"
+        ) from exc
+    if success:
+        return value
+    raise value
+
+
+def _safe_skip(
+    message: str,
+    reason: str,
+    *,
+    started: float,
+    **extra: Any,
+) -> dict[str, Any]:
+    """合理略過仍以成功 HTTP 回覆，避免 Make 把它視為 DataError。"""
+    return {
+        "ok": True,
+        "skipped": True,
+        "skip_reason": reason,
+        "message": message,
+        "write_blocked": True,
+        "version": MARKET_WEIGHT_VERSION,
+        "seconds": round(time.perf_counter() - started, 3),
+        **extra,
+    }
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -350,7 +451,17 @@ def _batch_stock_snapshots(
     return result
 
 
-def _yahoo_index_frame(symbol: str) -> pd.DataFrame:
+def _yahoo_index_frame(
+    symbol: str,
+    timeout_seconds: float | None = None,
+) -> pd.DataFrame:
+    request_timeout = max(
+        0.5,
+        min(
+            HTTP_TIMEOUT_SECONDS,
+            float(timeout_seconds or HTTP_TIMEOUT_SECONDS),
+        ),
+    )
     response = _HTTP.get(
         YAHOO_CHART_URL.format(symbol=url_quote(symbol, safe="")),
         params={
@@ -358,7 +469,7 @@ def _yahoo_index_frame(symbol: str) -> pd.DataFrame:
             "interval": "1m",
             "includePrePost": "false",
         },
-        timeout=HTTP_TIMEOUT_SECONDS,
+        timeout=request_timeout,
     )
     response.raise_for_status()
     payload = response.json()
@@ -393,8 +504,18 @@ def _return_pct(frame: pd.DataFrame, minutes: int) -> float:
     return (latest / previous - 1.0) * 100.0
 
 
-def _mis_index_quote(ex_ch: str) -> dict[str, Any]:
+def _mis_index_quote(
+    ex_ch: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
     """取得交易所MIS最新指數報價；上櫃加權指數為 otc_o00.tw。"""
+    request_timeout = max(
+        0.5,
+        min(
+            HTTP_TIMEOUT_SECONDS,
+            float(timeout_seconds or HTTP_TIMEOUT_SECONDS),
+        ),
+    )
     response = _HTTP.get(
         TWSE_MIS_QUOTE_URL,
         params={
@@ -402,7 +523,7 @@ def _mis_index_quote(ex_ch: str) -> dict[str, Any]:
             "json": "1",
             "delay": "0",
         },
-        timeout=HTTP_TIMEOUT_SECONDS,
+        timeout=request_timeout,
     )
     response.raise_for_status()
     payload = response.json()
@@ -503,25 +624,34 @@ def _history_return_pct(
     return (current_close / previous_close - 1.0) * 100.0
 
 
-def build_market_contribution_snapshot(
+def _build_market_contribution_snapshot(
     persist: bool = False,
+    *,
+    started: float,
+    deadline: float,
 ) -> dict[str, Any]:
     """用前一交易日權重計算前20大即時貢獻，並加入櫃買強弱差。"""
-    started = time.perf_counter()
     now = datetime.now(TAIPEI_TZ)
     trade_date = now.strftime("%Y-%m-%d")
     session = _session_status(now)
     if persist and not session["in_session"]:
-        return {
-            "ok": False,
-            "message": "目前不在盤中寫入時段，本次不寫入",
-            "write_blocked": True,
-            "session_status": session,
-            "version": MARKET_WEIGHT_VERSION,
-        }
-    weights, weight_date = get_latest_market_weight_rows(
-        before_date=trade_date,
-        limit=TOP_WEIGHT_LIMIT,
+        return _safe_skip(
+            "目前不在盤中寫入時段，本次略過",
+            "outside_session",
+            started=started,
+            session_status=session,
+        )
+    weights, weight_date = _call_with_timeout(
+        lambda: get_latest_market_weight_rows(
+            before_date=trade_date,
+            limit=TOP_WEIGHT_LIMIT,
+        ),
+        _remaining_seconds(
+            deadline,
+            "market weights",
+            PROVIDER_CALL_TIMEOUT_SECONDS,
+        ),
+        "market-weights",
     )
     if not weights:
         return {
@@ -530,9 +660,46 @@ def build_market_contribution_snapshot(
             "version": MARKET_WEIGHT_VERSION,
         }
 
+    history_rows = _call_with_timeout(
+        lambda: get_market_contribution_history(
+            trade_date=trade_date,
+            limit=120,
+        ),
+        _remaining_seconds(
+            deadline,
+            "contribution history",
+            PROVIDER_CALL_TIMEOUT_SECONDS,
+        ),
+        "contribution-history",
+    )
+    if persist:
+        current_minute = pd.Timestamp(now).floor("min")
+        for history_row in history_rows:
+            previous_ts = _as_taipei_timestamp(history_row.get("ts"))
+            if previous_ts is None:
+                continue
+            if previous_ts.floor("min") == current_minute:
+                return _safe_skip(
+                    "本分鐘已有盤中特徵資料，本次略過重複寫入",
+                    "duplicate_minute",
+                    started=started,
+                    session_status=session,
+                    existing_ts=previous_ts.isoformat(),
+                )
+
     stock_ids = [str(row.get("stock_id") or "") for row in weights]
     try:
-        snapshots = _batch_stock_snapshots(stock_ids)
+        snapshots = _call_with_timeout(
+            lambda: _batch_stock_snapshots(stock_ids),
+            _remaining_seconds(
+                deadline,
+                "Shioaji stock snapshots",
+                PROVIDER_CALL_TIMEOUT_SECONDS,
+            ),
+            "stock-snapshots",
+        )
+    except SnapshotDeadlineExceeded:
+        raise
     except Exception as exc:
         return {
             "ok": False,
@@ -540,7 +707,15 @@ def build_market_contribution_snapshot(
             "error": repr(exc),
             "version": MARKET_WEIGHT_VERSION,
         }
-    index_snapshot = get_market_index_snapshot(with_chart=False)
+    index_snapshot = _call_with_timeout(
+        lambda: get_market_index_snapshot(with_chart=False),
+        _remaining_seconds(
+            deadline,
+            "market index snapshot",
+            PROVIDER_CALL_TIMEOUT_SECONDS,
+        ),
+        "market-index",
+    )
     taiex_close = _safe_float(
         getattr(index_snapshot, "close_price", 0.0)
     )
@@ -550,7 +725,16 @@ def build_market_contribution_snapshot(
         taiex_reference = taiex_close
     taiex_quote: dict[str, Any] = {}
     try:
-        taiex_quote = _mis_index_quote("tse_t00.tw")
+        taiex_quote = _mis_index_quote(
+            "tse_t00.tw",
+            timeout_seconds=_remaining_seconds(
+                deadline,
+                "TAIEX MIS",
+                HTTP_TIMEOUT_SECONDS,
+            ),
+        )
+    except SnapshotDeadlineExceeded:
+        raise
     except Exception:
         taiex_quote = {}
     taiex_mis_close = _safe_float(taiex_quote.get("close"))
@@ -601,8 +785,24 @@ def build_market_contribution_snapshot(
     otc_frame = pd.DataFrame()
     yahoo_error = ""
     try:
-        twse_frame = _yahoo_index_frame("^TWII")
-        otc_frame = _yahoo_index_frame("^TWOII")
+        twse_frame = _yahoo_index_frame(
+            "^TWII",
+            timeout_seconds=_remaining_seconds(
+                deadline,
+                "Yahoo TAIEX",
+                HTTP_TIMEOUT_SECONDS,
+            ),
+        )
+        otc_frame = _yahoo_index_frame(
+            "^TWOII",
+            timeout_seconds=_remaining_seconds(
+                deadline,
+                "Yahoo OTC",
+                HTTP_TIMEOUT_SECONDS,
+            ),
+        )
+    except SnapshotDeadlineExceeded:
+        raise
     except Exception as exc:
         yahoo_error = repr(exc)
     if twse_frame.empty and not taiex_quote:
@@ -624,7 +824,16 @@ def build_market_contribution_snapshot(
     otc_quote: dict[str, Any] = {}
     if otc_frame.empty:
         try:
-            otc_quote = _mis_index_quote("otc_o00.tw")
+            otc_quote = _mis_index_quote(
+                "otc_o00.tw",
+                timeout_seconds=_remaining_seconds(
+                    deadline,
+                    "OTC MIS",
+                    HTTP_TIMEOUT_SECONDS,
+                ),
+            )
+        except SnapshotDeadlineExceeded:
+            raise
         except Exception as exc:
             yahoo_error = " | ".join(
                 value
@@ -675,6 +884,20 @@ def build_market_contribution_snapshot(
     )
     if feature_ts.tzinfo is None:
         feature_ts = feature_ts.tz_localize(TAIPEI_TZ)
+    if persist:
+        for history_row in history_rows:
+            previous_ts = _as_taipei_timestamp(history_row.get("ts"))
+            if previous_ts is None:
+                continue
+            if previous_ts.floor("min") == feature_ts.floor("min"):
+                return _safe_skip(
+                    "相同行情分鐘已有盤中特徵資料，本次略過重複寫入",
+                    "duplicate_feature_timestamp",
+                    started=started,
+                    session_status=session,
+                    existing_ts=previous_ts.isoformat(),
+                    feature_ts=feature_ts.isoformat(),
+                )
     feature_trade_date = feature_ts.tz_convert(TAIPEI_TZ).date().isoformat()
     if feature_trade_date != trade_date:
         return {
@@ -730,18 +953,13 @@ def build_market_contribution_snapshot(
         freshness["status"] = "stale"
         freshness["stale_sources"] = stale_sources
         if session["in_session"]:
-            return {
-                "ok": False,
-                "message": "上市或上櫃行情超過新鮮度門檻，本次不寫入",
-                "write_blocked": True,
-                "freshness": freshness,
-                "session_status": session,
-                "version": MARKET_WEIGHT_VERSION,
-            }
-    history_rows = get_market_contribution_history(
-        trade_date=trade_date,
-        limit=120,
-    )
+            return _safe_skip(
+                "上市或上櫃行情超過新鮮度門檻，本次略過",
+                "stale_market_data",
+                started=started,
+                freshness=freshness,
+                session_status=session,
+            )
     if taiex_quote:
         taiex_return_5m = _history_return_pct(
             taiex_close,
@@ -836,9 +1054,18 @@ def build_market_contribution_snapshot(
         "rows": 0,
     }
     if persist:
+        write_result = _call_with_timeout(
+            lambda: upsert_market_contribution_row(row),
+            _remaining_seconds(
+                deadline,
+                "Supabase contribution write",
+                PROVIDER_CALL_TIMEOUT_SECONDS,
+            ),
+            "contribution-write",
+        )
         persist_result = {
             "requested": True,
-            **upsert_market_contribution_row(row),
+            **write_result,
         }
     _debug(
         "contribution",
@@ -874,3 +1101,35 @@ def build_market_contribution_snapshot(
         "persist": persist_result,
         "seconds": round(time.perf_counter() - started, 3),
     }
+
+
+def build_market_contribution_snapshot(
+    persist: bool = False,
+) -> dict[str, Any]:
+    """
+    Make 盤中收集入口。
+
+    以 30 秒軟性截止保留 JSON 回覆時間；預期性略過一律回傳
+    ok=true/skipped=true，真正未處理例外仍交由 app 回傳 500。
+    """
+    started = time.perf_counter()
+    deadline = started + SNAPSHOT_SOFT_DEADLINE_SECONDS
+    try:
+        return _build_market_contribution_snapshot(
+            persist=persist,
+            started=started,
+            deadline=deadline,
+        )
+    except SnapshotDeadlineExceeded as exc:
+        _debug(
+            "snapshot skipped by deadline",
+            "| error =", repr(exc),
+            "| sec =", round(time.perf_counter() - started, 3),
+        )
+        return _safe_skip(
+            "行情來源處理接近 Make 40 秒上限，本次安全略過",
+            "soft_deadline",
+            started=started,
+            error=str(exc),
+            deadline_seconds=SNAPSHOT_SOFT_DEADLINE_SECONDS,
+        )
