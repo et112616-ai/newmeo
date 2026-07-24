@@ -15,13 +15,14 @@ import requests
 from services.market_index_service import get_market_index_snapshot
 from services.sinopac_quote_service import get_api
 from services.supabase_service import (
+    get_market_contribution_history,
     get_latest_market_weight_rows,
     upsert_market_contribution_row,
     upsert_market_weight_rows,
 )
 
 
-MARKET_WEIGHT_VERSION = "2026-07-24-v1.1-YAHOO-QUOTE-NAME-FIX"
+MARKET_WEIGHT_VERSION = "2026-07-24-v1.3-TPEX-MIS-5M-SAFE-LAG"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TWSE_COMPANY_URL = (
     "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -31,6 +32,9 @@ TWSE_DAILY_PRICE_URL = (
 )
 YAHOO_CHART_URL = (
     "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+)
+TWSE_MIS_QUOTE_URL = (
+    "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 )
 HTTP_TIMEOUT_SECONDS = float(
     os.getenv("MARKET_WEIGHT_HTTP_TIMEOUT_SECONDS", "8")
@@ -343,6 +347,75 @@ def _return_pct(frame: pd.DataFrame, minutes: int) -> float:
     return (latest / previous - 1.0) * 100.0
 
 
+def _mis_index_quote(ex_ch: str) -> dict[str, Any]:
+    """取得交易所MIS最新指數報價；上櫃加權指數為 otc_o00.tw。"""
+    response = _HTTP.get(
+        TWSE_MIS_QUOTE_URL,
+        params={
+            "ex_ch": ex_ch,
+            "json": "1",
+            "delay": "0",
+        },
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("msgArray") or []
+    if not isinstance(rows, list) or not rows:
+        return {}
+    raw = rows[0] if isinstance(rows[0], dict) else {}
+    close = _safe_float(raw.get("z"))
+    if close <= 0:
+        close = _safe_float(raw.get("y"))
+    timestamp_ms = int(_safe_float(raw.get("tlong")))
+    if close <= 0 or timestamp_ms <= 0:
+        return {}
+    ts = pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").tz_convert(
+        TAIPEI_TZ
+    )
+    return {
+        "close": close,
+        "previous_close": _safe_float(raw.get("y")),
+        "ts": ts,
+        "name": str(raw.get("n") or ""),
+        "source": "TWSE_MIS",
+    }
+
+
+def _history_return_pct(
+    current_close: float,
+    current_ts: pd.Timestamp,
+    history_rows: list[dict[str, Any]],
+    minutes: int,
+) -> float | None:
+    """以不晚於目標分鐘的最近一筆已存快照計算報酬。"""
+    if current_close <= 0 or not history_rows:
+        return None
+    target_ts = current_ts - pd.Timedelta(minutes=minutes)
+    candidates: list[tuple[pd.Timestamp, float]] = []
+    for row in history_rows:
+        try:
+            ts = pd.Timestamp(row.get("ts"))
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            ts = ts.tz_convert(TAIPEI_TZ)
+            close = _safe_float(row.get("otc_close"))
+            if close > 0 and ts <= target_ts:
+                candidates.append((ts, close))
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    previous_ts, previous_close = max(
+        candidates,
+        key=lambda item: item[0],
+    )
+    lag_error_seconds = (target_ts - previous_ts).total_seconds()
+    if lag_error_seconds < 0 or lag_error_seconds > 2 * 60:
+        return None
+    return (current_close / previous_close - 1.0) * 100.0
+
+
 def build_market_contribution_snapshot(
     persist: bool = False,
 ) -> dict[str, Any]:
@@ -423,10 +496,10 @@ def build_market_contribution_snapshot(
         otc_frame = _yahoo_index_frame("^TWOII")
     except Exception as exc:
         yahoo_error = repr(exc)
-    if twse_frame.empty or otc_frame.empty:
+    if twse_frame.empty:
         return {
             "ok": False,
-            "message": "上市或上櫃指數分鐘資料不足，本次不寫入",
+            "message": "上市指數分鐘資料不足，本次不寫入",
             "taiex_rows": len(twse_frame),
             "otc_rows": len(otc_frame),
             "error": yahoo_error,
@@ -435,14 +508,30 @@ def build_market_contribution_snapshot(
 
     taiex_return_5m = _return_pct(twse_frame, 5)
     taiex_return_15m = _return_pct(twse_frame, 15)
-    otc_return_1m = _return_pct(otc_frame, 1)
-    otc_return_5m = _return_pct(otc_frame, 5)
-    otc_return_15m = _return_pct(otc_frame, 15)
-    otc_close = (
-        _safe_float(otc_frame["close"].iloc[-1])
-        if not otc_frame.empty
-        else 0.0
-    )
+    otc_source = "YAHOO_^TWOII"
+    otc_quote: dict[str, Any] = {}
+    if otc_frame.empty:
+        try:
+            otc_quote = _mis_index_quote("otc_o00.tw")
+        except Exception as exc:
+            yahoo_error = " | ".join(
+                value
+                for value in (yahoo_error, f"MIS={repr(exc)}")
+                if value
+            )
+        if not otc_quote:
+            return {
+                "ok": False,
+                "message": "上櫃指數即時資料不足，本次不寫入",
+                "taiex_rows": len(twse_frame),
+                "otc_rows": 0,
+                "error": yahoo_error,
+                "version": MARKET_WEIGHT_VERSION,
+            }
+        otc_source = "TWSE_MIS_otc_o00.tw"
+        otc_close = _safe_float(otc_quote.get("close"))
+    else:
+        otc_close = _safe_float(otc_frame["close"].iloc[-1])
     total_weight = sum(float(item["weight_pct"]) for item in components)
     positive_weight = sum(
         float(item["weight_pct"])
@@ -463,6 +552,8 @@ def build_market_contribution_snapshot(
         for frame in (twse_frame, otc_frame)
         if not frame.empty
     ]
+    if otc_quote.get("ts") is not None:
+        latest_times.append(pd.Timestamp(otc_quote["ts"]))
     feature_ts = (
         max(latest_times).floor("min")
         if latest_times
@@ -480,6 +571,43 @@ def build_market_contribution_snapshot(
             "latest_feature_ts": feature_ts.isoformat(),
             "version": MARKET_WEIGHT_VERSION,
         }
+    history_rows = get_market_contribution_history(
+        trade_date=trade_date,
+        limit=120,
+    )
+    if otc_frame.empty:
+        otc_return_1m = _history_return_pct(
+            otc_close, feature_ts, history_rows, 1
+        )
+        otc_return_5m = _history_return_pct(
+            otc_close, feature_ts, history_rows, 5
+        )
+        otc_return_15m = _history_return_pct(
+            otc_close, feature_ts, history_rows, 15
+        )
+    else:
+        otc_return_1m = _return_pct(otc_frame, 1)
+        otc_return_5m = _return_pct(otc_frame, 5)
+        otc_return_15m = _return_pct(otc_frame, 15)
+
+    def rounded_or_none(value: float | None) -> float | None:
+        return round(float(value), 6) if value is not None else None
+
+    divergence_5m = (
+        taiex_return_5m - otc_return_5m
+        if otc_return_5m is not None
+        else None
+    )
+    divergence_15m = (
+        taiex_return_15m - otc_return_15m
+        if otc_return_15m is not None
+        else None
+    )
+    otc_history_ready = all(
+        value is not None
+        for value in (otc_return_5m, otc_return_15m)
+    )
+    otc_1m_ready = otc_return_1m is not None
 
     row = {
         "ts": feature_ts.isoformat(),
@@ -510,21 +638,15 @@ def build_market_contribution_snapshot(
             4,
         ),
         "otc_close": round(otc_close, 4),
-        "otc_return_1m": round(otc_return_1m, 6),
-        "otc_return_5m": round(otc_return_5m, 6),
-        "otc_return_15m": round(otc_return_15m, 6),
+        "otc_return_1m": rounded_or_none(otc_return_1m),
+        "otc_return_5m": rounded_or_none(otc_return_5m),
+        "otc_return_15m": rounded_or_none(otc_return_15m),
         "taiex_return_5m": round(taiex_return_5m, 6),
         "taiex_return_15m": round(taiex_return_15m, 6),
-        "taiex_otc_divergence_5m": round(
-            taiex_return_5m - otc_return_5m,
-            6,
-        ),
-        "taiex_otc_divergence_15m": round(
-            taiex_return_15m - otc_return_15m,
-            6,
-        ),
+        "taiex_otc_divergence_5m": rounded_or_none(divergence_5m),
+        "taiex_otc_divergence_15m": rounded_or_none(divergence_15m),
         "components": components,
-        "source": "SHIOAJI+YAHOO",
+        "source": f"SHIOAJI+YAHOO+{otc_source}",
     }
     persist_result = {
         "requested": persist,
@@ -542,6 +664,8 @@ def build_market_contribution_snapshot(
         "| components =", len(components),
         "| contribution =", row["top20_contribution_points"],
         "| otc_15m =", row["otc_return_15m"],
+        "| otc_source =", otc_source,
+        "| otc_history_ready =", otc_history_ready,
         "| sec =", round(time.perf_counter() - started, 3),
     )
     return {
@@ -550,6 +674,17 @@ def build_market_contribution_snapshot(
         "version": MARKET_WEIGHT_VERSION,
         "feature": row,
         "component_rows": len(components),
+        "otc_source": otc_source,
+        "otc_history_ready": otc_history_ready,
+        "otc_1m_ready": otc_1m_ready,
+        "otc_history_rows": len(history_rows),
+        "history_note": (
+            "上櫃MIS僅提供最新值；第一次先保存價格，"
+            "以5分鐘頻率累積滿15分鐘後可取得5/15分鐘報酬；"
+            "1分鐘報酬只有相隔約1分鐘的快照存在時才計算。"
+            if not otc_history_ready
+            else "上櫃5/15分鐘報酬已可由已存快照安全回推。"
+        ),
         "yahoo_error": yahoo_error,
         "persist": persist_result,
         "seconds": round(time.perf_counter() - started, 3),
