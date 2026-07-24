@@ -1,5 +1,5 @@
 # Deploy as: services/supabase_service.py
-# Version: 2026-07-24-v3.1-TAIEX-TPEX-HISTORY
+# Version: 2026-07-24-v4-SHADOW-PREDICTION
 from __future__ import annotations
 
 from datetime import datetime
@@ -352,6 +352,239 @@ def get_market_contribution_history(
         print(
             "get_market_contribution_history failed:"
             f" trade_date={trade_date}, error={exc}",
+            flush=True,
+        )
+        return []
+
+
+def upsert_market_prediction_model_artifact(
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    """保存可由 LINE 快速載入的序列化模型成品。"""
+    client = get_supabase_client()
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+    if not isinstance(artifact, dict) or not artifact.get("artifact_key"):
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "invalid artifact",
+        }
+    try:
+        payload = dict(artifact)
+        payload["updated_at"] = datetime.utcnow().isoformat()
+        client.table("market_prediction_model_artifacts").upsert(
+            payload,
+            on_conflict="artifact_key",
+        ).execute()
+        return {"success": True, "rows": 1, "message": "ok"}
+    except Exception as exc:
+        print(
+            "upsert_market_prediction_model_artifact failed:",
+            repr(exc),
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": 0,
+            "message": repr(exc),
+        }
+
+
+def get_latest_market_prediction_model_artifact(
+    artifact_key: str,
+) -> dict[str, Any] | None:
+    """依固定鍵讀取目前正式供影子推論使用的模型成品。"""
+    client = get_supabase_client()
+    if client is None or not str(artifact_key or "").strip():
+        return None
+    try:
+        response = (
+            client.table("market_prediction_model_artifacts")
+            .select("*")
+            .eq("artifact_key", str(artifact_key).strip())
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return rows[0]
+        return None
+    except Exception as exc:
+        print(
+            "get_latest_market_prediction_model_artifact failed:",
+            repr(exc),
+            flush=True,
+        )
+        return None
+
+
+def upsert_market_prediction_shadow_prediction(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """保存一筆盤中影子訊號；同一分鐘重跑會覆蓋，不會重複計量。"""
+    client = get_supabase_client()
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+    if not isinstance(row, dict) or not row.get("prediction_ts"):
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "invalid prediction row",
+        }
+    try:
+        payload = dict(row)
+        payload["updated_at"] = datetime.utcnow().isoformat()
+        client.table("market_prediction_shadow_predictions").upsert(
+            payload,
+            on_conflict="prediction_ts",
+        ).execute()
+        return {"success": True, "rows": 1, "message": "ok"}
+    except Exception as exc:
+        print(
+            "upsert_market_prediction_shadow_prediction failed:",
+            repr(exc),
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": 0,
+            "message": repr(exc),
+        }
+
+
+def get_latest_market_prediction_shadow_prediction() -> dict[str, Any] | None:
+    """取得最近一次影子訊號，供非盤中 LINE 查詢顯示。"""
+    client = get_supabase_client()
+    if client is None:
+        return None
+    try:
+        response = (
+            client.table("market_prediction_shadow_predictions")
+            .select("*")
+            .order("prediction_ts", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return rows[0]
+        return None
+    except Exception as exc:
+        print(
+            "get_latest_market_prediction_shadow_prediction failed:",
+            repr(exc),
+            flush=True,
+        )
+        return None
+
+
+def get_unsettled_market_prediction_shadow_predictions(
+    trade_date: str,
+    horizon_before: str,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """取得已到期但尚未驗證的預測，交由最新盤中快照結算。"""
+    client = get_supabase_client()
+    if client is None or not trade_date or not horizon_before:
+        return []
+    safe_limit = max(1, min(int(limit or 100), 500))
+    try:
+        response = (
+            client.table("market_prediction_shadow_predictions")
+            .select(
+                "prediction_ts,horizon_ts,trade_date,base_taiex_close,"
+                "signal,status"
+            )
+            .eq("trade_date", str(trade_date))
+            .eq("status", "pending")
+            .lte("horizon_ts", str(horizon_before))
+            .order("horizon_ts", desc=False)
+            .limit(safe_limit)
+            .execute()
+        )
+        rows = response.data or []
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(
+            "get_unsettled_market_prediction_shadow_predictions failed:",
+            repr(exc),
+            flush=True,
+        )
+        return []
+
+
+def update_market_prediction_shadow_result(
+    prediction_ts: str,
+    values: dict[str, Any],
+) -> bool:
+    """回填15分鐘後實際點數與影子訊號是否命中。"""
+    client = get_supabase_client()
+    if (
+        client is None
+        or not str(prediction_ts or "").strip()
+        or not isinstance(values, dict)
+    ):
+        return False
+    try:
+        payload = dict(values)
+        payload["updated_at"] = datetime.utcnow().isoformat()
+        (
+            client.table("market_prediction_shadow_predictions")
+            .update(payload)
+            .eq("prediction_ts", str(prediction_ts).strip())
+            .execute()
+        )
+        return True
+    except Exception as exc:
+        print(
+            "update_market_prediction_shadow_result failed:",
+            repr(exc),
+            flush=True,
+        )
+        return False
+
+
+def get_market_prediction_shadow_history(
+    start_date: str,
+    end_date: str,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """讀取影子預測與實際結果，供滿20個交易日後評估。"""
+    client = get_supabase_client()
+    if client is None:
+        return []
+    safe_limit = max(1, min(int(limit or 5000), 10000))
+    try:
+        response = (
+            client.table("market_prediction_shadow_predictions")
+            .select(
+                "prediction_ts,horizon_ts,trade_date,base_taiex_close,"
+                "signal,event_probability,up_probability,"
+                "direction_confidence,status,actual_close,"
+                "actual_change_points,actual_direction,is_correct,"
+                "model_version,artifact_key"
+            )
+            .gte("trade_date", str(start_date))
+            .lte("trade_date", str(end_date))
+            .order("prediction_ts", desc=False)
+            .limit(safe_limit)
+            .execute()
+        )
+        rows = response.data or []
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(
+            "get_market_prediction_shadow_history failed:",
+            repr(exc),
             flush=True,
         )
         return []
