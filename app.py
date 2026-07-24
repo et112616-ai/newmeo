@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-24-v2.8-MARKET-WEIGHT-QUALITY-V9"
+APP_BUILD_VERSION = "2026-07-24-v2.9-MAKE-40S-SAFE-SKIP"
 APP_STARTED_TS = time.time()
 
 print(
@@ -41,6 +41,7 @@ from services.market_future_service import get_market_future_snapshot
 
 _MARKET_INDEX_FN = None
 _MARKET_INDEX_IMPORT_LOCK = threading.Lock()
+_MARKET_CONTRIBUTION_ROUTE_LOCK = threading.Lock()
 
 
 def get_market_index_snapshot(*args, **kwargs):
@@ -1147,6 +1148,19 @@ def market_contribution_snapshot_route():
         request.args.get("persist", "0") or "0"
     ).strip().lower() in {"1", "true", "yes", "y", "on"}
     started = time.perf_counter()
+    lock_acquired = _MARKET_CONTRIBUTION_ROUTE_LOCK.acquire(
+        blocking=False
+    )
+    if not lock_acquired:
+        return jsonify({
+            "ok": True,
+            "skipped": True,
+            "skip_reason": "snapshot_already_running",
+            "message": "已有盤中特徵快照正在執行，本次略過重複請求",
+            "write_blocked": True,
+            "version": APP_BUILD_VERSION,
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
     try:
         module = importlib.import_module(
             "services.market_weight_service_v1"
@@ -1160,6 +1174,8 @@ def market_contribution_snapshot_route():
         print(
             "MARKET_CONTRIBUTION_ROUTE",
             "| ok =", result.get("ok"),
+            "| skipped =", result.get("skipped"),
+            "| skip_reason =", result.get("skip_reason"),
             "| weight_date =", feature.get("weight_trade_date"),
             "| components =", result.get("component_rows"),
             "| contribution =", feature.get("top20_contribution_points"),
@@ -1167,7 +1183,9 @@ def market_contribution_snapshot_route():
             "| sec =", round(time.perf_counter() - started, 3),
             flush=True,
         )
-        return jsonify(result), 200 if result.get("ok") else 422
+        safe_skip = bool(result.get("skipped"))
+        status_code = 200 if result.get("ok") or safe_skip else 422
+        return jsonify(result), status_code
     except Exception as exc:
         print(
             "MARKET_CONTRIBUTION_ROUTE failed",
@@ -1180,6 +1198,9 @@ def market_contribution_snapshot_route():
             "message": "market contribution snapshot failed",
             "error": repr(exc),
         }), 500
+    finally:
+        if lock_acquired:
+            _MARKET_CONTRIBUTION_ROUTE_LOCK.release()
 
 
 @app.route("/market_weight_feature_quality", methods=["GET", "POST"])
