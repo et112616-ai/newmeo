@@ -1,5 +1,5 @@
 # Deploy as: services/supabase_service.py
-# Version: 2026-07-24-v3-TPEX-HISTORY
+# Version: 2026-07-24-v3.1-TAIEX-TPEX-HISTORY
 from __future__ import annotations
 
 from datetime import datetime
@@ -340,7 +340,7 @@ def get_market_contribution_history(
     try:
         response = (
             client.table("market_contribution_1m")
-            .select("ts,trade_date,otc_close")
+            .select("ts,trade_date,taiex_close,otc_close")
             .eq("trade_date", str(trade_date))
             .order("ts", desc=True)
             .limit(safe_limit)
