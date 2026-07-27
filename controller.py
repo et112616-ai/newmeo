@@ -13,7 +13,7 @@ ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
 POST_MARKET_COMPARISON_VERSION = (
-    "2026-07-27-v2.2-COMPARABLE-CURRENT-PRICE-ANCHOR"
+    "2026-07-27-v2.3-GAP-ZONES-METHOD-DISCLOSURE"
 )
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
     "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
@@ -36,7 +36,7 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
-from services.afterhours_analysis_service_v2_2_comparable_cards import (
+from services.afterhours_analysis_service_v2_3_gap_method_card import (
     generate_post_market_analysis_chart,
 )
 from services.broker_branch_service import get_top_broker_branches
@@ -4622,6 +4622,158 @@ def _fresh_update_display(
     )
     return f"{short_text}｜{freshness_text}", freshness_color
 
+
+def _build_post_market_method_bubble(
+    stock_id: str,
+    stock_name: str,
+) -> dict[str, Any]:
+    """盤後分析第三張說明卡：公開算法、缺口規則與限制。"""
+
+    def section(
+        title: str,
+        lines: list[str],
+        background: str,
+        title_color: str,
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": background,
+            "cornerRadius": "12px",
+            "paddingAll": "12px",
+            "margin": "md",
+            "spacing": "xs",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": title,
+                    "size": "md",
+                    "weight": "bold",
+                    "color": title_color,
+                    "wrap": True,
+                },
+                *[
+                    {
+                        "type": "text",
+                        "text": f"• {line}",
+                        "size": "xs",
+                        "color": "#374151",
+                        "wrap": True,
+                    }
+                    for line in lines
+                ],
+            ],
+        }
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "alignItems": "center",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{stock_id} {stock_name}",
+                    "size": "xxl",
+                    "weight": "bold",
+                    "color": "#111111",
+                    "wrap": True,
+                    "flex": 7,
+                },
+                {
+                    "type": "text",
+                    "text": "說明",
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": "#666666",
+                    "align": "end",
+                    "flex": 2,
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": "盤後分析｜計算方式",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#444444",
+            "margin": "xs",
+        },
+        {
+            "type": "text",
+            "text": "支撐壓力沒有唯一算法；以下為本機器人的固定規則。",
+            "size": "xs",
+            "color": "#6B7280",
+            "wrap": True,
+            "margin": "sm",
+        },
+        section(
+            "短線5日｜混合支撐壓力",
+            [
+                "近60日轉折＋5／10／20／40日高低與均價",
+                "高量日典型價＋近20日未回補缺口",
+                "ATR14決定一般區間寬度",
+            ],
+            "#F1F7FF",
+            "#2563EB",
+        ),
+        section(
+            "隔日沖｜Classic Pivot",
+            [
+                "P＝（高＋低＋收）÷3",
+                "R1＝2P－低｜S1＝2P－高",
+                "R2＝P＋（高－低）",
+                "S2＝P－（高－低）",
+                "ATR5決定區間寬度",
+            ],
+            "#FFF4F1",
+            "#DC2626",
+        ),
+        section(
+            "跳空缺口規則",
+            [
+                "向上跳空列支撐；向下跳空列壓力",
+                "部分回補縮小；完全回補自動移除",
+                "只取距離現價較近的前兩區",
+            ],
+            "#F2FBF6",
+            "#009B4D",
+        ),
+        {
+            "type": "text",
+            "text": (
+                "圖中「來源・強弱」為主要形成依據；強弱不代表一定守住或突破。"
+                "除權息價格重置仍可能造成缺口誤判。"
+            ),
+            "size": "xs",
+            "color": "#4B5563",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "盤後技術觀察，非目標價與交易建議。",
+            "size": "xs",
+            "color": "#9CA3AF",
+            "wrap": True,
+            "margin": "sm",
+        },
+    ]
+    body_contents.extend(_mode_buttons(stock_id, "post_market_short", "D"))
+
+    return {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "spacing": "sm",
+            "contents": body_contents,
+        },
+    }
+
+
 def _build_chart_flex(
     stock_id: str,
     stock_name: str,
@@ -7974,6 +8126,10 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     "contents": [
                         short_flex["contents"],
                         daytrade_flex["contents"],
+                        _build_post_market_method_bubble(
+                            meta.stock_id,
+                            stock_name,
+                        ),
                     ],
                 },
             }
