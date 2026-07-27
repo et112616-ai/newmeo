@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-27-v3.2-SHADOW-ASYNC-TRIGGER"
+APP_BUILD_VERSION = "2026-07-27-v3.3-SHADOW-RELEASE-GATE"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1417,7 +1417,7 @@ def prepare_market_prediction_shadow_model_route():
     started = time.perf_counter()
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_2_async_ready"
+            "services.market_prediction_shadow_service_v1_3_release_gate"
         )
         prepare_fn = getattr(module, "prepare_shadow_model")
         result = prepare_fn(
@@ -1488,7 +1488,7 @@ def market_prediction_shadow_snapshot_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_2_async_ready"
+            "services.market_prediction_shadow_service_v1_3_release_gate"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1586,7 +1586,7 @@ def _run_market_prediction_shadow_async(
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_2_async_ready"
+            "services.market_prediction_shadow_service_v1_3_release_gate"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1804,7 +1804,7 @@ def market_prediction_shadow_quality_route():
     ).strip() or None
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_2_async_ready"
+            "services.market_prediction_shadow_service_v1_3_release_gate"
         )
         evaluate_fn = getattr(module, "evaluate_shadow_history")
         result = evaluate_fn(
