@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-24-v3.0-MARKET-PREDICTION-SHADOW"
+APP_BUILD_VERSION = "2026-07-27-v3.1-SHADOW-HEAD-GUARD"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1404,7 +1404,7 @@ def prepare_market_prediction_shadow_model_route():
     started = time.perf_counter()
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1"
+            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
         )
         prepare_fn = getattr(module, "prepare_shadow_model")
         result = prepare_fn(
@@ -1438,10 +1438,20 @@ def prepare_market_prediction_shadow_model_route():
 
 @app.route(
     "/market_prediction_shadow_snapshot",
-    methods=["GET", "POST"],
+    methods=["GET", "POST", "HEAD"],
 )
 def market_prediction_shadow_snapshot_route():
     """每15分鐘保存一次影子預測；重疊請求安全略過並固定回 HTTP 200。"""
+    # Flask 會讓 GET 路由自動接受 HEAD。瀏覽器、監控或連結預覽可能先送
+    # HEAD；若未提前返回，就會誤跑行情、模型、結算與資料庫寫入。
+    if request.method == "HEAD":
+        print(
+            "MARKET_PREDICTION_SHADOW_HEAD_NOOP",
+            "| version =", APP_BUILD_VERSION,
+            flush=True,
+        )
+        return "", 200
+
     if not _check_internal_token():
         return jsonify({"ok": False, "message": "invalid token"}), 403
 
@@ -1465,7 +1475,7 @@ def market_prediction_shadow_snapshot_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1"
+            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1518,7 +1528,7 @@ def market_prediction_shadow_quality_route():
     ).strip() or None
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1"
+            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
         )
         evaluate_fn = getattr(module, "evaluate_shadow_history")
         result = evaluate_fn(
