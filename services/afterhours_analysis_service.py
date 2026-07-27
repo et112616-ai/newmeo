@@ -16,7 +16,9 @@ from matplotlib.patches import FancyBboxPatch
 from services.upload_service import publish_figure
 
 
-POST_MARKET_ANALYSIS_VERSION = "2026-07-24-v2.1-DUAL-CARD-POLISHED-ZONES"
+POST_MARKET_ANALYSIS_VERSION = (
+    "2026-07-27-v2.2-COMPARABLE-CURRENT-PRICE-ANCHOR"
+)
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
 _FONT_PROP = None
@@ -157,12 +159,87 @@ def _make_zone(center: float, half_width: float, close: float) -> tuple[float, f
     return low, max(high, low)
 
 
+def _make_resistance_zone(
+    center: float,
+    half_width: float,
+    close: float,
+) -> tuple[float, float]:
+    low, high = _make_zone(center, half_width, close)
+    minimum = _round_up_to_tick(close + _tick_size(close), close)
+    low = max(low, minimum)
+    high = max(high, low)
+    return low, high
+
+
+def _make_support_zone(
+    center: float,
+    half_width: float,
+    close: float,
+) -> tuple[float, float]:
+    low, high = _make_zone(center, half_width, close)
+    maximum = _round_down_to_tick(close - _tick_size(close), close)
+    high = min(high, maximum)
+    low = min(low, high)
+    return low, high
+
+
 def _strength(score: float) -> str:
     if score >= 3.6:
         return "強"
     if score >= 2.1:
         return "中"
     return "弱"
+
+
+def _bias_style(label: str) -> tuple[str, str]:
+    styles = {
+        "偏強": ("#D32F2F", "#FFF2F2"),
+        "中性": ("#B77900", "#FFF9E6"),
+        "偏弱": ("#009B4D", "#EFFAF4"),
+    }
+    return styles.get(label, styles["中性"])
+
+
+def _short_term_bias(work: pd.DataFrame) -> dict[str, Any]:
+    recent = work.tail(20).copy()
+    close = float(recent["Close"].iloc[-1])
+    ma5 = float(recent["Close"].tail(5).mean())
+    ma20 = float(recent["Close"].mean())
+
+    score = 0
+    score += 1 if close >= ma5 else -1
+    score += 1 if ma5 >= ma20 else -1
+    if len(recent) >= 6:
+        base = float(recent["Close"].iloc[-6])
+        return_5d = ((close / base) - 1.0) * 100.0 if base > 0 else 0.0
+        score += 1 if return_5d >= 0 else -1
+    else:
+        return_5d = 0.0
+
+    if score >= 2:
+        label = "偏強"
+    elif score <= -2:
+        label = "偏弱"
+    else:
+        label = "中性"
+
+    color, background = _bias_style(label)
+    relation = (
+        "現價高於5日與20日均線"
+        if close >= ma5 and close >= ma20
+        else "現價低於5日與20日均線"
+        if close < ma5 and close < ma20
+        else "現價位於5日與20日均線之間"
+    )
+    return {
+        "label": label,
+        "color": color,
+        "background": background,
+        "ma5": _round_to_tick(ma5, close),
+        "ma20": _round_to_tick(ma20, close),
+        "return_5d": return_5d,
+        "note": relation,
+    }
 
 
 def _cluster_candidates(
@@ -247,19 +324,25 @@ def _short_term_levels(work: pd.DataFrame) -> dict[str, Any]:
     supports = sorted(supports[:2], key=lambda item: item["center"], reverse=True)
     resistances = sorted(resistances[:2], key=lambda item: item["center"])
     zone_half = max(atr14 * 0.16, tick * 2)
+    bias = _short_term_bias(recent)
 
     return {
         "date": _latest_date(work),
         "close": _round_to_tick(close, close),
         "atr": atr14,
-        "r1": _make_zone(resistances[0]["center"], zone_half, close),
+        "r1": _make_resistance_zone(
+            resistances[0]["center"], zone_half, close
+        ),
         "r1_strength": _strength(resistances[0]["score"]),
-        "r2": _make_zone(resistances[1]["center"], zone_half, close),
+        "r2": _make_resistance_zone(
+            resistances[1]["center"], zone_half, close
+        ),
         "r2_strength": _strength(resistances[1]["score"]),
-        "s1": _make_zone(supports[0]["center"], zone_half, close),
+        "s1": _make_support_zone(supports[0]["center"], zone_half, close),
         "s1_strength": _strength(supports[0]["score"]),
-        "s2": _make_zone(supports[1]["center"], zone_half, close),
+        "s2": _make_support_zone(supports[1]["center"], zone_half, close),
         "s2_strength": _strength(supports[1]["score"]),
+        "bias": bias,
     }
 
 
@@ -275,15 +358,34 @@ def _next_day_levels(work: pd.DataFrame) -> dict[str, Any]:
     s2 = pivot - (high - low)
     atr5 = _atr(work, 5)
     zone_half = max(atr5 * 0.09, _tick_size(close) * 2)
+    pivot_gap = close - pivot
+    bias_tolerance = max(atr5 * 0.08, _tick_size(close) * 2)
+    if pivot_gap > bias_tolerance:
+        bias_label = "偏強"
+        bias_note = "現價位於 Pivot 上方"
+    elif pivot_gap < -bias_tolerance:
+        bias_label = "偏弱"
+        bias_note = "現價位於 Pivot 下方"
+    else:
+        bias_label = "中性"
+        bias_note = "現價貼近 Pivot"
+    bias_color, bias_background = _bias_style(bias_label)
 
     return {
         "date": _latest_date(work),
         "close": _round_to_tick(close, close),
         "pivot": _round_to_tick(pivot, close),
-        "r1": _make_zone(r1, zone_half, close),
-        "r2": _make_zone(r2, zone_half, close),
-        "s1": _make_zone(s1, zone_half, close),
-        "s2": _make_zone(s2, zone_half, close),
+        "r1": _make_resistance_zone(r1, zone_half, close),
+        "r2": _make_resistance_zone(r2, zone_half, close),
+        "s1": _make_support_zone(s1, zone_half, close),
+        "s2": _make_support_zone(s2, zone_half, close),
+        "bias": {
+            "label": bias_label,
+            "color": bias_color,
+            "background": bias_background,
+            "pivot_gap": _round_to_tick(pivot_gap, close),
+            "note": bias_note,
+        },
     }
 
 
@@ -317,7 +419,12 @@ def generate_post_market_analysis_chart(
         rows = [
             ("壓 2", _fmt_zone(levels["r2"]), "#C62828", ""),
             ("壓 1", _fmt_zone(levels["r1"]), "#E53935", ""),
-            ("中 軸", _fmt_price(levels["pivot"]), "#C69200", "P"),
+            (
+                "現 價",
+                _fmt_price(levels["close"]),
+                "#C69200",
+                levels["bias"]["label"],
+            ),
             ("撐 1", _fmt_zone(levels["s1"]), "#00A84F", ""),
             ("撐 2", _fmt_zone(levels["s2"]), "#008C3A", ""),
         ]
@@ -326,7 +433,12 @@ def generate_post_market_analysis_chart(
         rows = [
             ("壓 2", _fmt_zone(levels["r2"]), "#C62828", levels["r2_strength"]),
             ("壓 1", _fmt_zone(levels["r1"]), "#E53935", levels["r1_strength"]),
-            ("現 價", _fmt_price(levels["close"]), "#C69200", ""),
+            (
+                "現 價",
+                _fmt_price(levels["close"]),
+                "#C69200",
+                levels["bias"]["label"],
+            ),
             ("撐 1", _fmt_zone(levels["s1"]), "#00A84F", levels["s1_strength"]),
             ("撐 2", _fmt_zone(levels["s2"]), "#008C3A", levels["s2_strength"]),
         ]
@@ -383,13 +495,18 @@ def generate_post_market_analysis_chart(
             color="#111111", va="center", ha="left", **font_kwargs,
         )
         if badge:
+            badge_color = (
+                levels["bias"]["color"]
+                if row_index == 2 and badge in {"偏強", "中性", "偏弱"}
+                else color
+            )
             ax.text(
                 0.875, y - 0.018, badge, fontsize=11, fontweight="bold",
-                color=color, va="center", ha="center", **font_kwargs,
+                color=badge_color, va="center", ha="center", **font_kwargs,
                 bbox={
                     "boxstyle": "round,pad=0.28",
                     "facecolor": "#FFFFFF",
-                    "edgecolor": color,
+                    "edgecolor": badge_color,
                     "linewidth": 0.8,
                 },
             )
@@ -404,23 +521,34 @@ def generate_post_market_analysis_chart(
         else:
             ratio_note = "當沖占比：最新官方資料尚未公布"
         ax.text(
-            0.5, 0.16, ratio_note, fontsize=12, fontweight="bold", color="#555555",
+            0.5, 0.175, ratio_note, fontsize=11.5, fontweight="bold", color="#555555",
             va="center", ha="center", **font_kwargs,
         )
-        footnote = "Pivot 區間供隔日波動觀察，不代表買賣訊號。"
-    else:
-        ax.text(
-            0.5, 0.16, "強弱依近 60 日轉折、均價與量價密集度估算",
-            fontsize=12, color="#555555", va="center", ha="center", **font_kwargs,
+        pivot_gap = float(levels["bias"]["pivot_gap"])
+        gap_text = f"{pivot_gap:+,.2f}"
+        comparison_note = (
+            f"隔日判讀 {levels['bias']['label']}｜"
+            f"Pivot {_fmt_price(levels['pivot'])}｜現價差 {gap_text}"
         )
-        footnote = "5日為觀察期間；支撐壓力為區間，非目標價。"
+        footnote = "支撐壓力依 Pivot 推估；中間列統一顯示現價。"
+    else:
+        comparison_note = (
+            f"短線判讀 {levels['bias']['label']}｜"
+            f"MA5 {_fmt_price(levels['bias']['ma5'])}｜"
+            f"MA20 {_fmt_price(levels['bias']['ma20'])}"
+        )
+        footnote = "強弱綜合均線、5日動能與近60日價量區估算。"
 
     ax.text(
-        0.5, 0.11, footnote, fontsize=11, color="#888888",
+        0.5, 0.13, comparison_note, fontsize=11.5, fontweight="bold",
+        color=levels["bias"]["color"], va="center", ha="center", **font_kwargs,
+    )
+    ax.text(
+        0.5, 0.085, footnote, fontsize=10.5, color="#888888",
         va="center", ha="center", **font_kwargs,
     )
     ax.text(
-        0.91, 0.055, f"資料日 {levels['date']}", fontsize=10.5,
+        0.91, 0.04, f"資料日 {levels['date']}", fontsize=10.5,
         color="#9A9A9A", va="center", ha="right", **font_kwargs,
     )
 
@@ -433,6 +561,9 @@ def generate_post_market_analysis_chart(
         "| date =", levels["date"],
         "| r1 =", levels["r1"],
         "| s1 =", levels["s1"],
+        "| anchor = current_close",
+        "| bias =", levels["bias"]["label"],
+        "| pivot =", levels.get("pivot"),
         "| daytrade_ratio =", daytrade_ratio,
         flush=True,
     )
