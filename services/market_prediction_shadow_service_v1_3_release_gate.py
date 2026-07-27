@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import datetime, time as clock_time, timedelta
 from typing import Any
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-SHADOW_SERVICE_VERSION = "2026-07-27-v1.2-ASYNC-TRIGGER-READY"
+SHADOW_SERVICE_VERSION = "2026-07-27-v1.3-AUTOMATIC-RELEASE-GATE"
 ARTIFACT_KEY = "taiex_15m_selective_v7_fixed_100pt"
 TAIPEI_TZ = "Asia/Taipei"
 NEUTRAL_THRESHOLD_POINTS = 100.0
@@ -20,6 +21,28 @@ SESSION_FETCH_START = clock_time(9, 0)
 SESSION_FETCH_END = clock_time(13, 32)
 PREDICTION_START = clock_time(9, 15)
 PREDICTION_END = clock_time(13, 15)
+RELEASE_MODES = {"shadow", "beta", "public"}
+
+# 測試版門檻：只提供內部觀察，不宣稱正式公開訊號。
+BETA_MIN_TRADE_DAYS = 10
+BETA_MIN_SETTLED_ROWS = 150
+BETA_MIN_SIGNAL_ROWS = 25
+BETA_MIN_DIRECTIONAL_PRECISION = 0.50
+BETA_MIN_SETTLEMENT_RATIO = 0.90
+
+# 正式公開門檻：全部通過才允許 public，不因單一整體正確率誤放行。
+PUBLIC_MIN_TRADE_DAYS = 20
+PUBLIC_MIN_SETTLED_ROWS = 300
+PUBLIC_MIN_SIGNAL_ROWS = 50
+PUBLIC_MIN_UP_SIGNAL_ROWS = 20
+PUBLIC_MIN_DOWN_SIGNAL_ROWS = 20
+PUBLIC_MIN_DIRECTIONAL_PRECISION = 0.55
+PUBLIC_MIN_SIDE_PRECISION = 0.50
+PUBLIC_MIN_SIGNAL_COVERAGE = 0.10
+PUBLIC_MAX_SIGNAL_COVERAGE = 0.40
+PUBLIC_MIN_RECENT_SIGNAL_ROWS = 10
+PUBLIC_MIN_RECENT_DIRECTIONAL_PRECISION = 0.50
+PUBLIC_MIN_SETTLEMENT_RATIO = 0.95
 
 FEATURE_COLUMNS = [
     "taiex_return_1m",
@@ -62,6 +85,48 @@ def _as_bool(value: Any) -> bool:
         "yes",
         "y",
         "on",
+    }
+
+
+def get_market_prediction_release_mode() -> str:
+    """取得LINE顯示模式；未知值一律安全退回 shadow。"""
+    mode = str(
+        os.getenv("MARKET_PREDICTION_RELEASE_MODE", "shadow")
+        or "shadow"
+    ).strip().lower()
+    return mode if mode in RELEASE_MODES else "shadow"
+
+
+def resolve_market_prediction_release(
+    quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Render環境變數只代表「申請模式」；品質未達標時不能直接公開。
+
+    因此即使誤設 public，仍會自動鎖回 shadow。
+    """
+    requested = get_market_prediction_release_mode()
+    quality = quality if isinstance(quality, dict) else {}
+    if requested == "public":
+        allowed = bool(quality.get("ready_for_public_signal"))
+    elif requested == "beta":
+        allowed = bool(quality.get("ready_for_beta"))
+    else:
+        allowed = True
+
+    effective = requested if allowed else "shadow"
+    return {
+        "requested_mode": requested,
+        "effective_mode": effective,
+        "unlocked": allowed,
+        "blocked": not allowed,
+        "reason": (
+            "quality_gate_passed"
+            if allowed and requested != "shadow"
+            else "shadow_mode_requested"
+            if requested == "shadow"
+            else "quality_gate_not_passed"
+        ),
     }
 
 
@@ -902,10 +967,30 @@ def evaluate_shadow_history(
             for row in settled
             if str(row.get("signal") or "") in {"up", "down"}
         ]
+        up_signal_rows = [
+            row
+            for row in signal_rows
+            if str(row.get("signal") or "") == "up"
+        ]
+        down_signal_rows = [
+            row
+            for row in signal_rows
+            if str(row.get("signal") or "") == "down"
+        ]
         correct_rows = [
             row
             for row in signal_rows
-            if bool(row.get("is_correct"))
+            if _as_bool(row.get("is_correct"))
+        ]
+        correct_up_rows = [
+            row
+            for row in up_signal_rows
+            if _as_bool(row.get("is_correct"))
+        ]
+        correct_down_rows = [
+            row
+            for row in down_signal_rows
+            if _as_bool(row.get("is_correct"))
         ]
         actual_move_signals = [
             row
@@ -931,7 +1016,9 @@ def evaluate_shadow_history(
                 if str(row.get("signal") or "") in {"up", "down"}
             ]
             day_correct = [
-                row for row in day_signals if bool(row.get("is_correct"))
+                row
+                for row in day_signals
+                if _as_bool(row.get("is_correct"))
             ]
             by_day.append({
                 "trade_date": trade_date,
@@ -946,14 +1033,172 @@ def evaluate_shadow_history(
 
         directional_precision = ratio(len(correct_rows), len(signal_rows))
         signal_coverage = ratio(len(signal_rows), len(settled))
-        ready = bool(
-            len(trade_days) >= 20
-            and directional_precision is not None
-            and directional_precision >= 0.50
-            and signal_coverage is not None
-            and signal_coverage >= 0.05
+        up_precision = ratio(len(correct_up_rows), len(up_signal_rows))
+        down_precision = ratio(
+            len(correct_down_rows),
+            len(down_signal_rows),
         )
-        return {
+        settlement_ratio = ratio(len(settled), len(rows))
+
+        recent_dates = trade_days[-5:]
+        recent_rows = [
+            row
+            for row in settled
+            if str(row.get("trade_date") or "") in recent_dates
+        ]
+        recent_signal_rows = [
+            row
+            for row in recent_rows
+            if str(row.get("signal") or "") in {"up", "down"}
+        ]
+        recent_correct_rows = [
+            row
+            for row in recent_signal_rows
+            if _as_bool(row.get("is_correct"))
+        ]
+        recent_directional_precision = ratio(
+            len(recent_correct_rows),
+            len(recent_signal_rows),
+        )
+
+        def minimum_check(
+            value: int | float | None,
+            minimum: int | float,
+        ) -> bool:
+            return value is not None and value >= minimum
+
+        beta_checks = {
+            "trade_days": {
+                "value": len(trade_days),
+                "minimum": BETA_MIN_TRADE_DAYS,
+                "passed": len(trade_days) >= BETA_MIN_TRADE_DAYS,
+            },
+            "settled_rows": {
+                "value": len(settled),
+                "minimum": BETA_MIN_SETTLED_ROWS,
+                "passed": len(settled) >= BETA_MIN_SETTLED_ROWS,
+            },
+            "signal_rows": {
+                "value": len(signal_rows),
+                "minimum": BETA_MIN_SIGNAL_ROWS,
+                "passed": len(signal_rows) >= BETA_MIN_SIGNAL_ROWS,
+            },
+            "directional_precision": {
+                "value": directional_precision,
+                "minimum": BETA_MIN_DIRECTIONAL_PRECISION,
+                "passed": minimum_check(
+                    directional_precision,
+                    BETA_MIN_DIRECTIONAL_PRECISION,
+                ),
+            },
+            "settlement_ratio": {
+                "value": settlement_ratio,
+                "minimum": BETA_MIN_SETTLEMENT_RATIO,
+                "passed": minimum_check(
+                    settlement_ratio,
+                    BETA_MIN_SETTLEMENT_RATIO,
+                ),
+            },
+        }
+        public_checks = {
+            "trade_days": {
+                "value": len(trade_days),
+                "minimum": PUBLIC_MIN_TRADE_DAYS,
+                "passed": len(trade_days) >= PUBLIC_MIN_TRADE_DAYS,
+            },
+            "settled_rows": {
+                "value": len(settled),
+                "minimum": PUBLIC_MIN_SETTLED_ROWS,
+                "passed": len(settled) >= PUBLIC_MIN_SETTLED_ROWS,
+            },
+            "signal_rows": {
+                "value": len(signal_rows),
+                "minimum": PUBLIC_MIN_SIGNAL_ROWS,
+                "passed": len(signal_rows) >= PUBLIC_MIN_SIGNAL_ROWS,
+            },
+            "up_signal_rows": {
+                "value": len(up_signal_rows),
+                "minimum": PUBLIC_MIN_UP_SIGNAL_ROWS,
+                "passed": len(up_signal_rows) >= PUBLIC_MIN_UP_SIGNAL_ROWS,
+            },
+            "down_signal_rows": {
+                "value": len(down_signal_rows),
+                "minimum": PUBLIC_MIN_DOWN_SIGNAL_ROWS,
+                "passed": len(down_signal_rows)
+                >= PUBLIC_MIN_DOWN_SIGNAL_ROWS,
+            },
+            "directional_precision": {
+                "value": directional_precision,
+                "minimum": PUBLIC_MIN_DIRECTIONAL_PRECISION,
+                "passed": minimum_check(
+                    directional_precision,
+                    PUBLIC_MIN_DIRECTIONAL_PRECISION,
+                ),
+            },
+            "up_precision": {
+                "value": up_precision,
+                "minimum": PUBLIC_MIN_SIDE_PRECISION,
+                "passed": minimum_check(
+                    up_precision,
+                    PUBLIC_MIN_SIDE_PRECISION,
+                ),
+            },
+            "down_precision": {
+                "value": down_precision,
+                "minimum": PUBLIC_MIN_SIDE_PRECISION,
+                "passed": minimum_check(
+                    down_precision,
+                    PUBLIC_MIN_SIDE_PRECISION,
+                ),
+            },
+            "signal_coverage": {
+                "value": signal_coverage,
+                "minimum": PUBLIC_MIN_SIGNAL_COVERAGE,
+                "maximum": PUBLIC_MAX_SIGNAL_COVERAGE,
+                "passed": bool(
+                    signal_coverage is not None
+                    and PUBLIC_MIN_SIGNAL_COVERAGE
+                    <= signal_coverage
+                    <= PUBLIC_MAX_SIGNAL_COVERAGE
+                ),
+            },
+            "recent_5d_signal_rows": {
+                "value": len(recent_signal_rows),
+                "minimum": PUBLIC_MIN_RECENT_SIGNAL_ROWS,
+                "passed": len(recent_signal_rows)
+                >= PUBLIC_MIN_RECENT_SIGNAL_ROWS,
+            },
+            "recent_5d_directional_precision": {
+                "value": recent_directional_precision,
+                "minimum": PUBLIC_MIN_RECENT_DIRECTIONAL_PRECISION,
+                "passed": minimum_check(
+                    recent_directional_precision,
+                    PUBLIC_MIN_RECENT_DIRECTIONAL_PRECISION,
+                ),
+            },
+            "settlement_ratio": {
+                "value": settlement_ratio,
+                "minimum": PUBLIC_MIN_SETTLEMENT_RATIO,
+                "passed": minimum_check(
+                    settlement_ratio,
+                    PUBLIC_MIN_SETTLEMENT_RATIO,
+                ),
+            },
+        }
+        beta_failed_checks = [
+            key
+            for key, item in beta_checks.items()
+            if not bool(item.get("passed"))
+        ]
+        public_failed_checks = [
+            key
+            for key, item in public_checks.items()
+            if not bool(item.get("passed"))
+        ]
+        ready_for_beta = not beta_failed_checks
+        ready_for_public = not public_failed_checks
+
+        result = {
             "ok": True,
             "message": "ok",
             "version": SHADOW_SERVICE_VERSION,
@@ -964,25 +1209,51 @@ def evaluate_shadow_history(
             "pending_rows": len(rows) - len(settled),
             "trade_days": len(trade_days),
             "signal_rows": len(signal_rows),
+            "up_signal_rows": len(up_signal_rows),
+            "down_signal_rows": len(down_signal_rows),
             "observe_rows": len(settled) - len(signal_rows),
             "correct_direction_rows": len(correct_rows),
             "directional_precision": directional_precision,
+            "up_precision": up_precision,
+            "down_precision": down_precision,
             "signal_coverage": signal_coverage,
+            "settlement_ratio": settlement_ratio,
             "move_detection_precision": ratio(
                 len(actual_move_signals),
                 len(signal_rows),
             ),
-            "minimum_shadow_days": 20,
-            "remaining_shadow_days": max(0, 20 - len(trade_days)),
-            "ready_for_public_signal": ready,
+            "recent_5d": {
+                "trade_dates": recent_dates,
+                "rows": len(recent_rows),
+                "signal_rows": len(recent_signal_rows),
+                "correct_direction_rows": len(recent_correct_rows),
+                "directional_precision": recent_directional_precision,
+            },
+            "minimum_shadow_days": PUBLIC_MIN_TRADE_DAYS,
+            "remaining_shadow_days": max(
+                0,
+                PUBLIC_MIN_TRADE_DAYS - len(trade_days),
+            ),
+            "ready_for_beta": ready_for_beta,
+            "ready_for_public_signal": ready_for_public,
+            "quality_gates": {
+                "beta": beta_checks,
+                "public": public_checks,
+            },
+            "failed_checks": {
+                "beta": beta_failed_checks,
+                "public": public_failed_checks,
+            },
             "readiness_note": (
-                "達到20個交易日與最低精準度/覆蓋率門檻"
-                if ready
-                else "維持影子測試，不對外宣稱正式訊號"
+                "正式公開門檻全部通過"
+                if ready_for_public
+                else "維持影子測試；依 failed_checks 補足樣本或改善模型"
             ),
             "by_day": by_day,
             "seconds": round(time.perf_counter() - started, 3),
         }
+        result["release"] = resolve_market_prediction_release(result)
+        return result
     except Exception as exc:
         return {
             "ok": False,
