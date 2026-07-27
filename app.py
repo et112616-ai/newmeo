@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-27-v3.3-SHADOW-RELEASE-GATE"
+APP_BUILD_VERSION = "2026-07-27-v3.4-V8-LITE-OFFLINE-COMPARE"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1390,6 +1390,125 @@ def evaluate_market_prediction_forward_route():
         return jsonify({
             "ok": False,
             "message": "market prediction forward evaluation failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route(
+    "/train_market_prediction_v8_lite",
+    methods=["GET", "POST"],
+)
+def train_market_prediction_v8_lite_route():
+    """離線比較 V8 Lite；不覆蓋 V7 artifact 或影子預測。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(
+        request.args.get("start_date", "") or ""
+    ).strip() or None
+    end_date = str(
+        request.args.get("end_date", "") or ""
+    ).strip() or None
+    force = str(
+        request.args.get("force", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_selective_service_v8_lite"
+        )
+        train_fn = getattr(module, "train_market_prediction_model")
+        result = train_fn(
+            start_date=start_date,
+            end_date=end_date,
+            force=force,
+        )
+        print(
+            "MARKET_PREDICTION_V8_LITE_TRAIN",
+            "| ok =", result.get("ok"),
+            "| rows =", result.get("training_rows"),
+            "| days =", result.get("trade_days"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_V8_LITE_TRAIN failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction v8 lite training failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route(
+    "/evaluate_market_prediction_v8_lite",
+    methods=["GET", "POST"],
+)
+def evaluate_market_prediction_v8_lite_route():
+    """凍結 cutoff 比較 V8 Lite 分類及15分鐘點數誤差。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    names = (
+        "training_start_date",
+        "training_cutoff",
+        "evaluation_start_date",
+        "evaluation_end_date",
+    )
+    values = {
+        name: str(request.args.get(name, "") or "").strip()
+        for name in names
+    }
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        return jsonify({
+            "ok": False,
+            "message": "缺少必要日期參數",
+            "missing": missing,
+        }), 400
+
+    force = str(
+        request.args.get("force", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_selective_service_v8_lite"
+        )
+        evaluate_fn = getattr(
+            module,
+            "evaluate_market_prediction_forward",
+        )
+        result = evaluate_fn(force=force, **values)
+        evaluation = result.get("evaluation") or {}
+        selective = evaluation.get("selective") or {}
+        regression = evaluation.get("regression") or {}
+        print(
+            "MARKET_PREDICTION_V8_LITE_FORWARD",
+            "| ok =", result.get("ok"),
+            "| rows =", evaluation.get("rows"),
+            "| precision =", selective.get("directional_precision"),
+            "| mae =", regression.get("mae_points"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_V8_LITE_FORWARD failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction v8 lite forward failed",
             "error": repr(exc),
         }), 500
 
