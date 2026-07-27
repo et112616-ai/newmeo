@@ -7,6 +7,7 @@ import os
 # W / M charts use daily history for card price, change and date.
 # ============================================================
 DWM_CARD_PRICE_FIX_VERSION = "2026-07-16-v6-YAHOO-LIVE-CARD-PRICE"
+LIVE_DAILY_CANDLE_VERSION = "2026-07-27-v6.5-LIVE-DAILY-CANDLE"
 INTRADAY_UNIFIED_FIX_VERSION = "2026-07-16-v2-UNIFIED-1M-ALL-INTRADAY-TF"
 MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
@@ -1707,7 +1708,8 @@ def _apply_yahoo_intraday_price_meta(price_meta, meta, chart_tf: str):
     注意：
     - 漲跌採市場標準：最新價 - 前一日收盤價。
     - 不是用最新價 - 今日開盤價。
-    - K 線圖片本身仍維持原本的 D / W / M 資料。
+    - 日K圖片會在上游合併今日未完成K棒；此函式只負責圖卡文字備援。
+    - 週K、月K圖片維持原本歷史週期。
     """
     normalized_tf = normalize_time_frame(chart_tf)
 
@@ -2058,6 +2060,380 @@ def _apply_shioaji_stock_realtime(df, stock_id: str):
             flush=True,
         )
         return df
+
+
+def _upsert_live_daily_candle(history_df, meta):
+    """
+    將今天盤中的 1 分資料聚合為一根未完成日 K，覆蓋日線最後一根。
+
+    資料優先序：
+    1. Yahoo 多日 1 分底稿提供今日完整 Open / High / Low / Volume。
+    2. Shioaji snapshot 補上較新的 Close、當日 High / Low 與時間。
+    3. Yahoo 暫時無資料時，才使用 Shioaji snapshot 單獨建立今日 K。
+
+    同一天永遠只保留一列，避免 MA、成交量與高低點被重複計算。
+    """
+    import time as time_module
+
+    import pandas as pd
+
+    t0 = time_module.perf_counter()
+
+    if history_df is None or getattr(history_df, "empty", True):
+        return history_df
+
+    stock_id = str(getattr(meta, "stock_id", "") or "").strip()
+    yf_symbol = str(getattr(meta, "yf_symbol", "") or "").strip()
+
+    if not stock_id:
+        return history_df
+
+    try:
+        now_tpe = pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None)
+    except Exception:
+        now_tpe = pd.Timestamp.now()
+
+    today = now_tpe.normalize()
+    live_row = None
+    live_time = None
+    live_source = ""
+    live_attrs: dict[str, Any] = {}
+
+    # 先使用既有 Yahoo 1 分底稿，不增加新的行情供應商。
+    try:
+        intraday_df = get_stock_intraday_yahoo_direct(
+            stock_id=stock_id,
+            yf_symbol=yf_symbol,
+            time_frame="1m",
+            timeout=int(os.getenv("YAHOO_CARD_TIMEOUT_SECONDS", "4")),
+        )
+
+        if intraday_df is not None and not intraday_df.empty:
+            intraday_attrs = dict(getattr(intraday_df, "attrs", {}) or {})
+            work_1m = intraday_df.copy()
+
+            if not isinstance(work_1m.index, pd.DatetimeIndex):
+                work_1m.index = pd.to_datetime(work_1m.index, errors="coerce")
+                work_1m = work_1m.loc[~work_1m.index.isna()].copy()
+
+            if getattr(work_1m.index, "tz", None) is not None:
+                work_1m.index = (
+                    work_1m.index.tz_convert("Asia/Taipei").tz_localize(None)
+                )
+
+            work_1m = work_1m.sort_index()
+            work_1m = work_1m.loc[work_1m.index.normalize() == today].copy()
+
+            try:
+                work_1m.attrs.update(intraday_attrs)
+            except Exception:
+                pass
+
+            if not work_1m.empty:
+                # 永豐 snapshot 已有快取時此步幾乎不增加耗時，並可補上
+                # Yahoo 延遲區間至目前價。
+                work_1m = _apply_shioaji_stock_realtime(work_1m, stock_id)
+                live_attrs = dict(getattr(work_1m, "attrs", {}) or {})
+
+                for col in ["Open", "High", "Low", "Close", "Volume"]:
+                    if col not in work_1m.columns:
+                        work_1m[col] = 0.0
+                    work_1m[col] = pd.to_numeric(
+                        work_1m[col],
+                        errors="coerce",
+                    )
+
+                valid_close = work_1m["Close"].gt(0) & work_1m["Close"].notna()
+                work_1m = work_1m.loc[valid_close].copy()
+
+                if not work_1m.empty:
+                    for col in ["Open", "High", "Low"]:
+                        invalid = work_1m[col].isna() | work_1m[col].le(0)
+                        work_1m.loc[invalid, col] = work_1m.loc[invalid, "Close"]
+
+                    day_open = float(work_1m["Open"].iloc[0])
+                    day_high = float(
+                        work_1m[["Open", "High", "Close"]]
+                        .max(axis=1)
+                        .max()
+                    )
+                    day_low = float(
+                        work_1m[["Open", "Low", "Close"]]
+                        .min(axis=1)
+                        .min()
+                    )
+                    day_close = float(work_1m["Close"].iloc[-1])
+                    day_volume = float(
+                        work_1m["Volume"].fillna(0).clip(lower=0).sum()
+                    )
+
+                    live_row = {
+                        "Open": day_open,
+                        "High": max(day_high, day_open, day_close),
+                        "Low": min(day_low, day_open, day_close),
+                        "Close": day_close,
+                        "Volume": day_volume,
+                    }
+                    live_time = work_1m.index[-1]
+                    live_source = (
+                        "shioaji+yahoo_1m"
+                        if str(
+                            live_attrs.get("realtime_snapshot_source") or ""
+                        ).lower()
+                        == "shioaji"
+                        else "yahoo_1m"
+                    )
+
+    except Exception as exc:
+        print(
+            "DEBUG live daily candle yahoo failed",
+            "| version =", LIVE_DAILY_CANDLE_VERSION,
+            "| stock_id =", stock_id,
+            "| error =", repr(exc),
+            flush=True,
+        )
+
+    # Yahoo 暫時無法建立今日 K 時，以永豐 snapshot 的當日 OHLC 備援。
+    if live_row is None:
+        snapshot = None
+
+        try:
+            allow_cold_login = (
+                str(os.getenv("ALLOW_COLD_SHIOAJI_STOCK_APPEND", "0")).strip()
+                == "1"
+            )
+            api_ready = bool(is_shioaji_api_ready())
+
+            if api_ready or allow_cold_login:
+                snapshot = get_shioaji_stock_snapshot(stock_id)
+        except Exception:
+            snapshot = None
+
+        if isinstance(snapshot, dict):
+            close_price = _snap_float(
+                snapshot,
+                "close",
+                "price",
+                "last_price",
+                "last",
+                "Close",
+                default=0.0,
+            )
+            snap_time = _snap_timestamp(snapshot)
+
+            try:
+                if getattr(snap_time, "tzinfo", None) is not None:
+                    snap_time = (
+                        snap_time.tz_convert("Asia/Taipei").tz_localize(None)
+                    )
+            except Exception:
+                pass
+
+            if (
+                close_price > 0
+                and pd.Timestamp(snap_time).normalize() == today
+            ):
+                open_price = _snap_float(
+                    snapshot,
+                    "open",
+                    "Open",
+                    default=close_price,
+                ) or close_price
+                high_price = _snap_float(
+                    snapshot,
+                    "high",
+                    "High",
+                    default=close_price,
+                ) or close_price
+                low_price = _snap_float(
+                    snapshot,
+                    "low",
+                    "Low",
+                    default=close_price,
+                ) or close_price
+                total_volume = _snap_float(
+                    snapshot,
+                    "total_volume",
+                    "volume",
+                    default=0.0,
+                )
+
+                live_row = {
+                    "Open": open_price,
+                    "High": max(high_price, open_price, close_price),
+                    "Low": min(low_price, open_price, close_price),
+                    "Close": close_price,
+                    "Volume": max(total_volume, 0.0),
+                }
+                live_time = pd.Timestamp(snap_time)
+                live_source = "shioaji_snapshot"
+                live_attrs = {
+                    "realtime_snapshot_source": "shioaji",
+                    "realtime_snapshot_price": close_price,
+                    "realtime_snapshot_change": _snap_float(
+                        snapshot,
+                        "change",
+                        "change_price",
+                        "price_change",
+                        default=0.0,
+                    ),
+                    "realtime_snapshot_change_pct": _snap_float(
+                        snapshot,
+                        "change_pct",
+                        "change_rate",
+                        "price_change_pct",
+                        default=0.0,
+                    ),
+                    "realtime_snapshot_has_change": _snap_get(
+                        snapshot,
+                        "change",
+                        "change_price",
+                        "price_change",
+                        default=None,
+                    )
+                    is not None,
+                    "realtime_snapshot_has_change_pct": _snap_get(
+                        snapshot,
+                        "change_pct",
+                        "change_rate",
+                        "price_change_pct",
+                        default=None,
+                    )
+                    is not None,
+                    "realtime_snapshot_time": str(live_time),
+                }
+
+    if live_row is None or live_time is None:
+        print(
+            "DEBUG live daily candle skipped",
+            "| version =", LIVE_DAILY_CANDLE_VERSION,
+            "| stock_id =", stock_id,
+            "| reason = no_today_intraday_or_snapshot",
+            "| sec =", round(time_module.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return history_df
+
+    try:
+        attrs_backup = dict(getattr(history_df, "attrs", {}) or {})
+        result = history_df.copy()
+
+        if not isinstance(result.index, pd.DatetimeIndex):
+            result.index = pd.to_datetime(result.index, errors="coerce")
+            result = result.loc[~result.index.isna()].copy()
+
+        if getattr(result.index, "tz", None) is not None:
+            result.index = (
+                result.index.tz_convert("Asia/Taipei").tz_localize(None)
+            )
+
+        result = result.sort_index()
+        original_rows = len(result)
+
+        # 若 FinMind 已經有今天的部分資料，保留更完整的高低價與成交量，
+        # 但 Close 一律採用較新的盤中價。
+        same_day = result.index.normalize() == today
+        existing_today = result.loc[same_day].copy()
+
+        if not existing_today.empty:
+            existing_high = pd.to_numeric(
+                existing_today.get("High"),
+                errors="coerce",
+            ).dropna()
+            existing_low = pd.to_numeric(
+                existing_today.get("Low"),
+                errors="coerce",
+            ).dropna()
+            existing_volume = pd.to_numeric(
+                existing_today.get("Volume"),
+                errors="coerce",
+            ).dropna()
+
+            if not existing_high.empty:
+                live_row["High"] = max(
+                    float(live_row["High"]),
+                    float(existing_high.max()),
+                )
+            if not existing_low.empty:
+                positive_low = existing_low.loc[existing_low > 0]
+                if not positive_low.empty:
+                    live_row["Low"] = min(
+                        float(live_row["Low"]),
+                        float(positive_low.min()),
+                    )
+            if not existing_volume.empty:
+                live_row["Volume"] = max(
+                    float(live_row["Volume"]),
+                    float(existing_volume.max()),
+                )
+
+        # 先刪除今天所有舊列，再以 00:00 的單一日K列寫回。
+        result = result.loc[~same_day].copy()
+
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col not in result.columns:
+                result[col] = 0.0
+
+        result.loc[
+            today,
+            ["Open", "High", "Low", "Close", "Volume"],
+        ] = [
+            float(live_row["Open"]),
+            float(live_row["High"]),
+            float(live_row["Low"]),
+            float(live_row["Close"]),
+            float(live_row["Volume"]),
+        ]
+
+        if "_display_timestamp" in result.columns:
+            result.loc[today, "_display_timestamp"] = today.strftime("%Y-%m-%d")
+
+        result = result.sort_index()
+        keep_rows = max(original_rows, 180)
+        result = result.tail(keep_rows).copy()
+
+        try:
+            result.attrs.update(attrs_backup)
+            result.attrs.update(live_attrs)
+        except Exception:
+            pass
+
+        result.attrs["live_daily_candle_version"] = LIVE_DAILY_CANDLE_VERSION
+        result.attrs["live_daily_candle_source"] = live_source
+        result.attrs["live_daily_candle_time"] = str(live_time)
+        result.attrs["display_timestamp"] = today.strftime("%Y-%m-%d")
+
+        print(
+            "DEBUG live daily candle upserted",
+            "| version =", LIVE_DAILY_CANDLE_VERSION,
+            "| stock_id =", stock_id,
+            "| source =", live_source,
+            "| time =", live_time,
+            "| open =", live_row["Open"],
+            "| high =", live_row["High"],
+            "| low =", live_row["Low"],
+            "| close =", live_row["Close"],
+            "| volume =", live_row["Volume"],
+            "| rows =", len(result),
+            "| today_rows =",
+            int((result.index.normalize() == today).sum()),
+            "| sec =", round(time_module.perf_counter() - t0, 3),
+            flush=True,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "DEBUG live daily candle upsert failed",
+            "| version =", LIVE_DAILY_CANDLE_VERSION,
+            "| stock_id =", stock_id,
+            "| error =", repr(exc),
+            "| sec =", round(time_module.perf_counter() - t0, 3),
+            flush=True,
+        )
+        return history_df
+
 
 def _price_color(change: float) -> str:
     if change > 0:
@@ -8211,6 +8587,12 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 )
 
             t_append0 = time.perf_counter()
+
+            # 日K盤中不能停在昨日收盤：
+            # 將既有的 Yahoo 1分底稿 + Shioaji snapshot 聚合成今天一根
+            # 未完成日K，覆蓋同日舊列後同時提供圖表與圖卡使用。
+            if action == "k_line" and tf == "D":
+                df = _upsert_live_daily_candle(df, meta)
 
             if tf in INTRADAY_TIME_FRAMES:
                 import os
