@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-27-v3.4-V8-LITE-OFFLINE-COMPARE"
+APP_BUILD_VERSION = "2026-07-27-v3.5-V8.1-FAIR-ABLATION"
 APP_STARTED_TS = time.time()
 
 print(
@@ -1509,6 +1509,81 @@ def evaluate_market_prediction_v8_lite_route():
         return jsonify({
             "ok": False,
             "message": "market prediction v8 lite forward failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.route(
+    "/evaluate_market_prediction_v8_1",
+    methods=["GET", "POST"],
+)
+def evaluate_market_prediction_v8_1_route():
+    """一次測一組V8.1特徵；修正盤初15分鐘並避免Render長時間批次逾時。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    names = (
+        "training_start_date",
+        "training_cutoff",
+        "evaluation_start_date",
+        "evaluation_end_date",
+    )
+    values = {
+        name: str(request.args.get(name, "") or "").strip()
+        for name in names
+    }
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        return jsonify({
+            "ok": False,
+            "message": "缺少必要日期參數",
+            "missing": missing,
+        }), 400
+
+    feature_group = str(
+        request.args.get("feature_group", "base") or "base"
+    ).strip()
+    force = str(
+        request.args.get("force", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_ablation_service_v8_1"
+        )
+        evaluate_fn = getattr(
+            module,
+            "evaluate_market_prediction_v8_1",
+        )
+        result = evaluate_fn(
+            feature_group=feature_group,
+            force=force,
+            **values,
+        )
+        evaluation = result.get("evaluation") or {}
+        selective = evaluation.get("selective") or {}
+        regression = evaluation.get("regression") or {}
+        print(
+            "MARKET_PREDICTION_V8_1_FORWARD",
+            "| ok =", result.get("ok"),
+            "| group =", result.get("feature_group"),
+            "| rows =", evaluation.get("rows"),
+            "| precision =", selective.get("directional_precision"),
+            "| mae =", regression.get("mae_points"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        return jsonify(result), 200 if result.get("ok") else 422
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_V8_1_FORWARD failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction v8.1 forward failed",
             "error": repr(exc),
         }), 500
 
