@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-SHADOW_SERVICE_VERSION = "2026-07-24-v1-FAST-SERIALIZED-SHADOW"
+SHADOW_SERVICE_VERSION = "2026-07-27-v1.2-ASYNC-TRIGGER-READY"
 ARTIFACT_KEY = "taiex_15m_selective_v7_fixed_100pt"
 TAIPEI_TZ = "Asia/Taipei"
 NEUTRAL_THRESHOLD_POINTS = 100.0
@@ -385,6 +385,69 @@ def _build_live_feature_frame(
     return frame.replace([np.inf, -np.inf], np.nan)
 
 
+def _completed_minute_cutoff(now: datetime) -> pd.Timestamp:
+    """回傳目前已結束之分鐘 K 的最晚時間標籤（台北時間、無時區）。
+
+    Shioaji 盤中 Kbars 使用分鐘結束時間標示，例如 11:05:33 可能已出現
+    11:06 這根正在形成中的 K。此時 11:05 才是可安全採用的最後標籤。
+    """
+    local_now = pd.Timestamp(now)
+    if local_now.tzinfo is not None:
+        local_now = local_now.tz_convert(TAIPEI_TZ).tz_localize(None)
+    return local_now.floor("min")
+
+
+def _timestamp_text(value: Any) -> str:
+    try:
+        stamp = pd.Timestamp(value)
+        if pd.isna(stamp):
+            return ""
+        return stamp.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _filter_completed_minute_rows(
+    frame: pd.DataFrame,
+    cutoff: pd.Timestamp,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """排除截止分鐘之後的未完成或時間超前 K 棒，並保留 DataFrame attrs。"""
+    if frame is None or frame.empty:
+        return pd.DataFrame(), {
+            "raw_rows": 0,
+            "used_rows": 0,
+            "dropped_incomplete_rows": 0,
+            "raw_last": "",
+            "used_last": "",
+        }
+
+    attrs = dict(getattr(frame, "attrs", {}) or {})
+    work = frame.copy()
+    parsed_index = pd.to_datetime(work.index, errors="coerce")
+    valid_mask = ~pd.isna(parsed_index)
+    work = work.loc[valid_mask].copy()
+    parsed_index = pd.DatetimeIndex(parsed_index[valid_mask])
+
+    if parsed_index.tz is not None:
+        parsed_index = parsed_index.tz_convert(TAIPEI_TZ).tz_localize(None)
+    work.index = parsed_index.floor("min")
+    work = work.sort_index()
+
+    raw_rows = int(len(work))
+    raw_last = work.index[-1] if raw_rows else None
+    work = work.loc[work.index <= cutoff].copy()
+    work.attrs.update(attrs)
+    used_rows = int(len(work))
+    used_last = work.index[-1] if used_rows else None
+    return work, {
+        "raw_rows": raw_rows,
+        "used_rows": used_rows,
+        "dropped_incomplete_rows": max(0, raw_rows - used_rows),
+        "raw_last": _timestamp_text(raw_last),
+        "used_last": _timestamp_text(used_last),
+    }
+
+
 def _fetch_live_frame(now: datetime) -> tuple[pd.DataFrame, dict[str, Any]]:
     from services.market_future_kline_service import (
         get_market_future_1m_history,
@@ -394,8 +457,18 @@ def _fetch_live_frame(now: datetime) -> tuple[pd.DataFrame, dict[str, Any]]:
     trade_date = now.strftime("%Y-%m-%d")
     taiex_df = get_market_index_1m_history(trade_date, trade_date)
     txf_df = get_market_future_1m_history(trade_date, trade_date)
+    cutoff = _completed_minute_cutoff(now)
+    taiex_df, taiex_guard = _filter_completed_minute_rows(
+        taiex_df,
+        cutoff,
+    )
+    txf_df, txf_guard = _filter_completed_minute_rows(
+        txf_df,
+        cutoff,
+    )
     frame = _build_live_feature_frame(taiex_df, txf_df)
-    return frame, {
+
+    source_status = {
         "taiex_rows": int(len(taiex_df)) if taiex_df is not None else 0,
         "txf_rows": int(len(txf_df)) if txf_df is not None else 0,
         "aligned_rows": int(len(frame)),
@@ -405,7 +478,35 @@ def _fetch_live_frame(now: datetime) -> tuple[pd.DataFrame, dict[str, Any]]:
         "txf_source": str(
             getattr(txf_df, "attrs", {}).get("source") or "unknown"
         ),
+        "server_time": now.isoformat(timespec="seconds"),
+        "completed_minute_cutoff": _timestamp_text(cutoff),
+        "taiex_raw_rows": taiex_guard["raw_rows"],
+        "taiex_raw_last": taiex_guard["raw_last"],
+        "taiex_used_last": taiex_guard["used_last"],
+        "taiex_dropped_incomplete_rows": taiex_guard[
+            "dropped_incomplete_rows"
+        ],
+        "txf_raw_rows": txf_guard["raw_rows"],
+        "txf_raw_last": txf_guard["raw_last"],
+        "txf_used_last": txf_guard["used_last"],
+        "txf_dropped_incomplete_rows": txf_guard[
+            "dropped_incomplete_rows"
+        ],
     }
+    _debug(
+        "completed minute guard",
+        "| server_now =", source_status["server_time"],
+        "| cutoff =", source_status["completed_minute_cutoff"],
+        "| taiex_raw_last =", source_status["taiex_raw_last"],
+        "| taiex_used_last =", source_status["taiex_used_last"],
+        "| taiex_dropped =",
+        source_status["taiex_dropped_incomplete_rows"],
+        "| txf_raw_last =", source_status["txf_raw_last"],
+        "| txf_used_last =", source_status["txf_used_last"],
+        "| txf_dropped =",
+        source_status["txf_dropped_incomplete_rows"],
+    )
+    return frame, source_status
 
 
 def _direction_from_points(change_points: float) -> str:
