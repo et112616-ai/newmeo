@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 # ============================================================
 # VERIFIED DWM CARD PRICE FIX — open this file and check line 4
 # W / M charts use daily history for card price, change and date.
@@ -10,6 +12,9 @@ MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
+MARKET_PREDICTION_RELEASE_GATE_VERSION = (
+    "2026-07-27-v1-LINE-SAFE-RELEASE-GATE"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -2248,16 +2253,50 @@ def _build_market_prediction_shadow_flex(
             },
         }
 
+    release = result.get("release") or {}
+    quality = result.get("release_quality") or {}
+    effective_mode = str(
+        release.get("effective_mode")
+        or result.get("release_mode_effective")
+        or "shadow"
+    ).strip().lower()
+    if effective_mode not in {"shadow", "beta", "public"}:
+        effective_mode = "shadow"
+
     signal = str(result.get("signal") or "observe").strip().lower()
-    signal_meta = {
-        "up": ("偏多觀察", UP_COLOR, "突破 +100點"),
-        "down": ("偏空觀察", DOWN_COLOR, "跌破 -100點"),
-        "observe": ("暫時觀察", FLAT_COLOR, "訊號信心未達門檻"),
-    }
-    signal_label, signal_color, signal_note = signal_meta.get(
-        signal,
-        signal_meta["observe"],
-    )
+    if effective_mode == "shadow":
+        trade_days = int(quality.get("trade_days") or 0)
+        minimum_days = int(quality.get("minimum_shadow_days") or 20)
+        signal_label = "資料收集中"
+        signal_color = "#7C3AED"
+        signal_note = (
+            f"影子驗證 {trade_days}/{minimum_days}個交易日，"
+            "方向預測暫不公開"
+        )
+        mode_badge = "影子測試"
+    else:
+        mode_badge = "內部測試" if effective_mode == "beta" else "模型觀測"
+        signal_meta = {
+            "up": (
+                "偏多測試" if effective_mode == "beta" else "偏多觀察",
+                UP_COLOR,
+                "預測15分鐘後可能高於 +100點",
+            ),
+            "down": (
+                "偏空測試" if effective_mode == "beta" else "偏空觀察",
+                DOWN_COLOR,
+                "預測15分鐘後可能低於 -100點",
+            ),
+            "observe": (
+                "暫時觀察",
+                FLAT_COLOR,
+                "方向信心未達訊號門檻",
+            ),
+        }
+        signal_label, signal_color, signal_note = signal_meta.get(
+            signal,
+            signal_meta["observe"],
+        )
     close_value = result.get("taiex_close")
     try:
         close_text = f"{float(close_value):,.2f}"
@@ -2283,6 +2322,36 @@ def _build_market_prediction_shadow_flex(
         except Exception:
             down_probability = None
 
+    if effective_mode == "shadow":
+        left_metric_label = "影子交易日"
+        left_metric_value = (
+            f"{int(quality.get('trade_days') or 0)}"
+            f"/{int(quality.get('minimum_shadow_days') or 20)}"
+        )
+        right_metric_label = "已結算｜明確訊號"
+        right_metric_value = (
+            f"{int(quality.get('settled_rows') or 0)}"
+            f"｜{int(quality.get('signal_rows') or 0)}"
+        )
+        definition_text = "尚未通過上架門檻｜目前僅累積與驗證，不公開方向"
+        footer_note = "自動品質門檻保護中，非交易建議"
+    else:
+        left_metric_label = "突破100點機率"
+        left_metric_value = probability_text(event_probability)
+        right_metric_label = "條件式方向"
+        right_metric_value = (
+            f"漲 {probability_text(up_probability)}"
+            f"｜跌 {probability_text(down_probability)}"
+        )
+        definition_text = (
+            "上漲 > +100點｜盤整 -100～+100點｜下跌 < -100點"
+        )
+        footer_note = (
+            "內部測試中，非交易建議"
+            if effective_mode == "beta"
+            else "模型觀測，非交易建議"
+        )
+
     contents = [
         {
             "type": "box",
@@ -2299,7 +2368,7 @@ def _build_market_prediction_shadow_flex(
                 },
                 {
                     "type": "text",
-                    "text": "影子測試",
+                    "text": mode_badge,
                     "size": "xs",
                     "weight": "bold",
                     "color": "#7C3AED",
@@ -2357,14 +2426,14 @@ def _build_market_prediction_shadow_flex(
                     "contents": [
                         {
                             "type": "text",
-                            "text": "突破100點機率",
+                            "text": left_metric_label,
                             "size": "xs",
                             "color": "#6B7280",
                             "align": "center",
                         },
                         {
                             "type": "text",
-                            "text": probability_text(event_probability),
+                            "text": left_metric_value,
                             "size": "lg",
                             "weight": "bold",
                             "color": "#111827",
@@ -2382,17 +2451,14 @@ def _build_market_prediction_shadow_flex(
                     "contents": [
                         {
                             "type": "text",
-                            "text": "條件式方向",
+                            "text": right_metric_label,
                             "size": "xs",
                             "color": "#6B7280",
                             "align": "center",
                         },
                         {
                             "type": "text",
-                            "text": (
-                                f"漲 {probability_text(up_probability)}"
-                                f"｜跌 {probability_text(down_probability)}"
-                            ),
+                            "text": right_metric_value,
                             "size": "sm",
                             "weight": "bold",
                             "color": "#111827",
@@ -2405,7 +2471,7 @@ def _build_market_prediction_shadow_flex(
         },
         {
             "type": "text",
-            "text": "上漲 > +100點｜盤整 -100～+100點｜下跌 < -100點",
+            "text": definition_text,
             "size": "xs",
             "color": "#4B5563",
             "wrap": True,
@@ -2413,7 +2479,7 @@ def _build_market_prediction_shadow_flex(
         },
         {
             "type": "text",
-            "text": "模型測試中，非交易建議",
+            "text": footer_note,
             "size": "xs",
             "color": "#9CA3AF",
             "wrap": True,
@@ -7329,22 +7395,44 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             if action == "market_prediction":
                 # 預測模組延遲載入，避免拖慢一般股票與大盤圖卡冷啟動。
-                from services.market_prediction_shadow_service_v1 import (
+                from services.market_prediction_shadow_service_v1_3_release_gate import (
+                    evaluate_shadow_history,
                     predict_market_shadow,
+                    resolve_market_prediction_release,
                 )
 
                 result = predict_market_shadow(persist=False)
+                quality = evaluate_shadow_history()
+                release = resolve_market_prediction_release(quality)
+                result["release_quality"] = quality
+                result["release"] = release
+                result["release_mode_requested"] = release.get(
+                    "requested_mode"
+                )
+                result["release_mode_effective"] = release.get(
+                    "effective_mode"
+                )
                 print(
                     "DEBUG market_prediction shadow controller",
                     "| ok =", result.get("ok"),
                     "| signal =", result.get("signal"),
                     "| time =", result.get("display_time"),
                     "| freshness =", result.get("freshness_status"),
+                    "| release_requested =",
+                    release.get("requested_mode"),
+                    "| release_effective =",
+                    release.get("effective_mode"),
+                    "| public_ready =",
+                    quality.get("ready_for_public_signal"),
                     "| sec =", result.get("seconds"),
                     flush=True,
                 )
                 return _reply_with_title(
-                    "大盤15分鐘預測（影子測試）",
+                    (
+                        "大盤15分鐘預測"
+                        if release.get("effective_mode") == "public"
+                        else "大盤15分鐘預測（測試中）"
+                    ),
                     _build_market_prediction_shadow_flex(result),
                 )
 
