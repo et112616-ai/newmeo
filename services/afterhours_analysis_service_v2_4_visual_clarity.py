@@ -17,7 +17,7 @@ from services.upload_service import publish_figure
 
 
 POST_MARKET_ANALYSIS_VERSION = (
-    "2026-07-27-v2.3-GAP-ZONES-SOURCE-DISCLOSURE"
+    "2026-07-27-v2.4-LINE-VISUAL-CLARITY"
 )
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
@@ -735,7 +735,7 @@ def generate_post_market_analysis_chart(
                 0.875,
                 y - 0.018,
                 badge,
-                fontsize=9.2 if len(str(badge)) >= 4 else 11,
+                fontsize=10.2 if len(str(badge)) >= 4 else 11.5,
                 fontweight="bold",
                 color=badge_color, va="center", ha="center", **font_kwargs,
                 bbox={
@@ -756,7 +756,12 @@ def generate_post_market_analysis_chart(
         else:
             ratio_note = "當沖占比：最新官方資料尚未公布"
         ax.text(
-            0.5, 0.175, ratio_note, fontsize=11.5, fontweight="bold", color="#555555",
+            0.5,
+            0.175,
+            ratio_note,
+            fontsize=12.2,
+            fontweight="bold",
+            color="#4B5563",
             va="center", ha="center", **font_kwargs,
         )
         pivot_gap = float(levels["bias"]["pivot_gap"])
@@ -778,16 +783,16 @@ def generate_post_market_analysis_chart(
         )
 
     ax.text(
-        0.5, 0.13, comparison_note, fontsize=11.5, fontweight="bold",
+        0.5, 0.13, comparison_note, fontsize=12.2, fontweight="bold",
         color=levels["bias"]["color"], va="center", ha="center", **font_kwargs,
     )
     ax.text(
-        0.5, 0.085, footnote, fontsize=10.5, color="#888888",
+        0.5, 0.085, footnote, fontsize=10.8, color="#5F6368",
         va="center", ha="center", **font_kwargs,
     )
     ax.text(
-        0.91, 0.04, f"資料日 {levels['date']}", fontsize=10.5,
-        color="#9A9A9A", va="center", ha="right", **font_kwargs,
+        0.91, 0.04, f"資料日 {levels['date']}", fontsize=10.8,
+        color="#737373", va="center", ha="right", **font_kwargs,
     )
 
     print(
