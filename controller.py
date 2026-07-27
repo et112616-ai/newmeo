@@ -13,7 +13,7 @@ ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
 POST_MARKET_COMPARISON_VERSION = (
-    "2026-07-27-v2.3-GAP-ZONES-METHOD-DISCLOSURE"
+    "2026-07-27-v2.4-LINE-VISUAL-CLARITY"
 )
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
     "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
@@ -36,7 +36,7 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
-from services.afterhours_analysis_service_v2_3_gap_method_card import (
+from services.afterhours_analysis_service_v2_4_visual_clarity import (
     generate_post_market_analysis_chart,
 )
 from services.broker_branch_service import get_top_broker_branches
@@ -258,6 +258,10 @@ def _normalize_action(action: str | None) -> str:
         "next_day_trade": "post_market_daytrade",
         "隔日沖": "post_market_daytrade",
         "當沖參考": "post_market_daytrade",
+        "post_market_method": "post_market_method",
+        "post_market_formula": "post_market_method",
+        "盤後算法": "post_market_method",
+        "計算方式": "post_market_method",
 
         # 本益比河流圖
         "pe_river": "pe_river",
@@ -3180,6 +3184,28 @@ def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]
     }
 
 
+def _post_market_method_button(stock_id: str) -> dict[str, Any]:
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "margin": "sm",
+        "contents": [
+            _postback_button(
+                label="查看計算方式",
+                data=(
+                    f"{stock_id},post_market_method,"
+                    "post_market_method,D"
+                ),
+                active=False,
+                display_text=f"{stock_id} 盤後分析計算方式",
+                height="36px",
+                text_size="sm",
+                corner_radius="10px",
+            )
+        ],
+    }
+
+
 def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict[str, Any]]:
     mode = _normalize_action(active_mode)
     tf = normalize_time_frame(current_tf)
@@ -4958,6 +4984,13 @@ def _build_chart_flex(
                 current_tf=tf_norm,
             )
         )
+        if active_mode_norm in {
+            "post_market_short",
+            "post_market_daytrade",
+        }:
+            body_contents.append(
+                _post_market_method_button(stock_id)
+            )
     else:
         body_contents.append(
             build_chart_fallback(
@@ -7980,6 +8013,24 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 f"{stock_name} 本益比河流圖",
                 flex,
             )
+
+        # -------------------------
+        # 2.5 盤後分析計算方式
+        # -------------------------
+        if action == "post_market_method":
+            method_flex = {
+                "type": "flex",
+                "altText": f"{meta.stock_id} {stock_name} 盤後分析計算方式",
+                "contents": _build_post_market_method_bubble(
+                    meta.stock_id,
+                    stock_name,
+                ),
+            }
+            return _reply_with_title(
+                f"{stock_name} 盤後分析計算方式",
+                method_flex,
+            )
+
         # -------------------------
         # 2.5 盤後分析
         # -------------------------
@@ -8126,10 +8177,6 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     "contents": [
                         short_flex["contents"],
                         daytrade_flex["contents"],
-                        _build_post_market_method_bubble(
-                            meta.stock_id,
-                            stock_name,
-                        ),
                     ],
                 },
             }
