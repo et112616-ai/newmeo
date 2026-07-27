@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-27-v3.1-SHADOW-HEAD-GUARD"
+APP_BUILD_VERSION = "2026-07-27-v3.2-SHADOW-ASYNC-TRIGGER"
 APP_STARTED_TS = time.time()
 
 print(
@@ -43,6 +43,19 @@ _MARKET_INDEX_FN = None
 _MARKET_INDEX_IMPORT_LOCK = threading.Lock()
 _MARKET_CONTRIBUTION_ROUTE_LOCK = threading.Lock()
 _MARKET_PREDICTION_SHADOW_LOCK = threading.Lock()
+_MARKET_PREDICTION_SHADOW_JOB_STATE_LOCK = threading.Lock()
+_MARKET_PREDICTION_SHADOW_JOB_STATE: dict[str, Any] = {
+    "status": "idle",
+    "job_id": "",
+    "accepted_at": "",
+    "started_at": "",
+    "completed_at": "",
+    "last_success_at": "",
+    "last_failure_at": "",
+    "seconds": 0.0,
+    "message": "尚未觸發影子預測",
+    "result": {},
+}
 
 
 def get_market_index_snapshot(*args, **kwargs):
@@ -1404,7 +1417,7 @@ def prepare_market_prediction_shadow_model_route():
     started = time.perf_counter()
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
+            "services.market_prediction_shadow_service_v1_2_async_ready"
         )
         prepare_fn = getattr(module, "prepare_shadow_model")
         result = prepare_fn(
@@ -1475,7 +1488,7 @@ def market_prediction_shadow_snapshot_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
+            "services.market_prediction_shadow_service_v1_2_async_ready"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1512,6 +1525,269 @@ def market_prediction_shadow_snapshot_route():
             _MARKET_PREDICTION_SHADOW_LOCK.release()
 
 
+def _shadow_job_state_update(**changes: Any) -> dict[str, Any]:
+    """更新背景影子工作的記憶體狀態；不保存 token 或完整模型資料。"""
+    with _MARKET_PREDICTION_SHADOW_JOB_STATE_LOCK:
+        _MARKET_PREDICTION_SHADOW_JOB_STATE.update(changes)
+        return dict(_MARKET_PREDICTION_SHADOW_JOB_STATE)
+
+
+def _shadow_job_state_snapshot() -> dict[str, Any]:
+    with _MARKET_PREDICTION_SHADOW_JOB_STATE_LOCK:
+        state = dict(_MARKET_PREDICTION_SHADOW_JOB_STATE)
+
+    state["worker_pid"] = os.getpid()
+    state["running"] = bool(_MARKET_PREDICTION_SHADOW_LOCK.locked())
+    return state
+
+
+def _shadow_result_summary(result: Any) -> dict[str, Any]:
+    """狀態端點僅保留排程判讀需要的欄位，避免常駐大型回傳內容。"""
+    if not isinstance(result, dict):
+        return {
+            "ok": False,
+            "message": "影子預測未回傳 JSON object",
+        }
+
+    return {
+        key: result.get(key)
+        for key in (
+            "ok",
+            "message",
+            "version",
+            "signal",
+            "prediction_ts",
+            "horizon_ts",
+            "prediction_allowed",
+            "freshness_status",
+            "persist",
+            "settlement",
+            "seconds",
+        )
+        if key in result
+    }
+
+
+def _run_market_prediction_shadow_async(
+    job_id: str,
+    force_live: bool = False,
+) -> None:
+    """背景執行完整影子流程；完成、失敗皆釋放與手動端點共用的鎖。"""
+    started = time.perf_counter()
+    _shadow_job_state_update(
+        status="running",
+        job_id=job_id,
+        started_at=_server_time_text(),
+        completed_at="",
+        seconds=0.0,
+        message="影子預測背景執行中",
+        result={},
+    )
+
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_shadow_service_v1_2_async_ready"
+        )
+        predict_fn = getattr(module, "predict_market_shadow")
+        result = predict_fn(
+            persist=True,
+            force_live=force_live,
+        )
+        summary = _shadow_result_summary(result)
+        succeeded = bool(summary.get("ok"))
+        completed_at = _server_time_text()
+        elapsed = round(time.perf_counter() - started, 3)
+        _shadow_job_state_update(
+            status="completed" if succeeded else "failed",
+            completed_at=completed_at,
+            last_success_at=(
+                completed_at
+                if succeeded
+                else _MARKET_PREDICTION_SHADOW_JOB_STATE.get(
+                    "last_success_at",
+                    "",
+                )
+            ),
+            last_failure_at=(
+                completed_at
+                if not succeeded
+                else _MARKET_PREDICTION_SHADOW_JOB_STATE.get(
+                    "last_failure_at",
+                    "",
+                )
+            ),
+            seconds=elapsed,
+            message=str(
+                summary.get("message")
+                or (
+                    "影子預測背景執行完成"
+                    if succeeded
+                    else "影子預測背景執行失敗"
+                )
+            ),
+            result=summary,
+        )
+        print(
+            "MARKET_PREDICTION_SHADOW_ASYNC_COMPLETE",
+            "| job_id =", job_id,
+            "| ok =", succeeded,
+            "| signal =", summary.get("signal"),
+            "| prediction_ts =", summary.get("prediction_ts"),
+            "| persisted =", (summary.get("persist") or {}).get("success"),
+            "| settled =", (summary.get("settlement") or {}).get(
+                "settled_rows"
+            ),
+            "| sec =", elapsed,
+            flush=True,
+        )
+    except Exception as exc:
+        completed_at = _server_time_text()
+        _shadow_job_state_update(
+            status="failed",
+            completed_at=completed_at,
+            last_failure_at=completed_at,
+            seconds=round(time.perf_counter() - started, 3),
+            message="影子預測背景執行例外",
+            result={
+                "ok": False,
+                "message": "market prediction shadow async failed",
+                "error": repr(exc),
+            },
+        )
+        print(
+            "MARKET_PREDICTION_SHADOW_ASYNC failed",
+            "| job_id =", job_id,
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+    finally:
+        try:
+            _MARKET_PREDICTION_SHADOW_LOCK.release()
+        except RuntimeError:
+            print(
+                "MARKET_PREDICTION_SHADOW_ASYNC lock already released",
+                "| job_id =", job_id,
+                flush=True,
+            )
+
+
+@app.route(
+    "/market_prediction_shadow_trigger",
+    methods=["GET", "POST", "HEAD"],
+)
+def market_prediction_shadow_trigger_route():
+    """
+    Make 專用快速觸發器。
+
+    只負責驗證、取得鎖與啟動背景 thread，固定快速回 HTTP 200；
+    真正的行情、預測、結算及 Supabase 寫入由背景工作完成。
+    """
+    if request.method == "HEAD":
+        return "", 200
+
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    started = time.perf_counter()
+    force_live = str(
+        request.args.get("force_live", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    acquired = _MARKET_PREDICTION_SHADOW_LOCK.acquire(blocking=False)
+
+    if not acquired:
+        return jsonify({
+            "ok": True,
+            "accepted": False,
+            "skipped": True,
+            "skip_reason": "shadow_prediction_already_running",
+            "message": "已有影子預測正在執行，本次安全略過",
+            "version": APP_BUILD_VERSION,
+            "job": _shadow_job_state_snapshot(),
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+
+    job_id = (
+        f"shadow-{int(time.time())}-{os.getpid()}-"
+        f"{threading.get_ident()}"
+    )
+    accepted_at = _server_time_text()
+    _shadow_job_state_update(
+        status="accepted",
+        job_id=job_id,
+        accepted_at=accepted_at,
+        started_at="",
+        completed_at="",
+        seconds=0.0,
+        message="影子預測已接受，將在背景執行",
+        result={},
+    )
+
+    try:
+        worker = threading.Thread(
+            target=_run_market_prediction_shadow_async,
+            args=(job_id, force_live),
+            name=f"market-shadow-{job_id}",
+            daemon=True,
+        )
+        worker.start()
+    except Exception as exc:
+        _MARKET_PREDICTION_SHADOW_LOCK.release()
+        failed_at = _server_time_text()
+        _shadow_job_state_update(
+            status="failed",
+            completed_at=failed_at,
+            last_failure_at=failed_at,
+            seconds=round(time.perf_counter() - started, 3),
+            message="影子預測背景工作無法啟動",
+            result={
+                "ok": False,
+                "message": "shadow async worker start failed",
+                "error": repr(exc),
+            },
+        )
+        return jsonify({
+            "ok": False,
+            "accepted": False,
+            "message": "影子預測背景工作無法啟動",
+            "version": APP_BUILD_VERSION,
+            "error": repr(exc),
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "skipped": False,
+        "job_id": job_id,
+        "message": "影子預測已接受，正在背景執行",
+        "version": APP_BUILD_VERSION,
+        "accepted_at": accepted_at,
+        "status_url": "/market_prediction_shadow_status",
+        "seconds": round(time.perf_counter() - started, 3),
+    }), 200
+
+
+@app.route(
+    "/market_prediction_shadow_status",
+    methods=["GET", "HEAD"],
+)
+def market_prediction_shadow_status_route():
+    """查看目前程序最近一次背景影子工作的狀態與精簡結果。"""
+    if request.method == "HEAD":
+        return "", 200
+
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    return jsonify({
+        "ok": True,
+        "message": "ok",
+        "version": APP_BUILD_VERSION,
+        "job": _shadow_job_state_snapshot(),
+    }), 200
+
+
 @app.route(
     "/market_prediction_shadow_quality",
     methods=["GET", "POST"],
@@ -1528,7 +1804,7 @@ def market_prediction_shadow_quality_route():
     ).strip() or None
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_1_completed_minute_guard"
+            "services.market_prediction_shadow_service_v1_2_async_ready"
         )
         evaluate_fn = getattr(module, "evaluate_shadow_history")
         result = evaluate_fn(
