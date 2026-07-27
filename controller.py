@@ -13,7 +13,7 @@ ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
-    "2026-07-27-v1-LINE-SAFE-RELEASE-GATE"
+    "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -2211,6 +2211,18 @@ def _build_market_prediction_shadow_flex(
         except Exception:
             return "--"
 
+    def taipei_hm(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(ZoneInfo("Asia/Taipei"))
+            return parsed.strftime("%H:%M")
+        except Exception:
+            return text[-5:] if len(text) >= 5 else text
+
     if not bool(result.get("ok")):
         contents: list[dict[str, Any]] = [
             {
@@ -2269,10 +2281,7 @@ def _build_market_prediction_shadow_flex(
         minimum_days = int(quality.get("minimum_shadow_days") or 20)
         signal_label = "資料收集中"
         signal_color = "#7C3AED"
-        signal_note = (
-            f"影子驗證 {trade_days}/{minimum_days}個交易日，"
-            "方向預測暫不公開"
-        )
+        signal_note = "正在累積前瞻樣本，方向預測暫不公開"
         mode_badge = "影子測試"
     else:
         mode_badge = "內部測試" if effective_mode == "beta" else "模型觀測"
@@ -2305,10 +2314,21 @@ def _build_market_prediction_shadow_flex(
 
     display_time = str(result.get("display_time") or "").strip()
     freshness = str(result.get("freshness_status") or "").strip()
+    prediction_start = taipei_hm(result.get("prediction_ts"))
+    if not prediction_start and display_time:
+        prediction_start = display_time[-5:]
+    prediction_end = taipei_hm(result.get("horizon_ts"))
+    interval_text = (
+        f"預測 {prediction_start} → {prediction_end}"
+        if prediction_start and prediction_end
+        else f"更新 {display_time[-5:]}"
+        if display_time
+        else ""
+    )
     update_text = "｜".join(
         value
         for value in (
-            f"更新 {display_time[-5:]}" if display_time else "",
+            interval_text,
             freshness,
         )
         if value
@@ -2322,27 +2342,70 @@ def _build_market_prediction_shadow_flex(
         except Exception:
             down_probability = None
 
+    thresholds = result.get("thresholds") or {}
+    try:
+        event_threshold = float(
+            thresholds.get("event_probability_threshold", 0.45)
+        )
+    except Exception:
+        event_threshold = 0.45
+    try:
+        direction_threshold = float(
+            thresholds.get("direction_confidence_threshold", 0.60)
+        )
+    except Exception:
+        direction_threshold = 0.60
+    direction_confidence = result.get("direction_confidence")
+
     if effective_mode == "shadow":
-        left_metric_label = "影子交易日"
-        left_metric_value = (
-            f"{int(quality.get('trade_days') or 0)}"
-            f"/{int(quality.get('minimum_shadow_days') or 20)}"
+        shadow_metrics = [
+            (
+                "交易日",
+                f"{int(quality.get('trade_days') or 0)}"
+                f"/{int(quality.get('minimum_shadow_days') or 20)}",
+            ),
+            ("已結算", f"{int(quality.get('settled_rows') or 0)}"),
+            ("明確訊號", f"{int(quality.get('signal_rows') or 0)}"),
+        ]
+        remaining_days = max(minimum_days - trade_days, 0)
+        definition_text = (
+            f"至少還需 {remaining_days} 個交易日｜"
+            "通過品質門檻前不公開方向"
+            if remaining_days > 0
+            else "交易日門檻已達｜仍須通過命中率與樣本品質檢查"
         )
-        right_metric_label = "已結算｜明確訊號"
-        right_metric_value = (
-            f"{int(quality.get('settled_rows') or 0)}"
-            f"｜{int(quality.get('signal_rows') or 0)}"
-        )
-        definition_text = "尚未通過上架門檻｜目前僅累積與驗證，不公開方向"
         footer_note = "自動品質門檻保護中，非交易建議"
     else:
-        left_metric_label = "突破100點機率"
+        left_metric_label = "波動逾100點機率"
         left_metric_value = probability_text(event_probability)
-        right_metric_label = "條件式方向"
+        right_metric_label = "若出現大波動"
         right_metric_value = (
             f"漲 {probability_text(up_probability)}"
             f"｜跌 {probability_text(down_probability)}"
         )
+        if signal == "observe":
+            observe_reasons: list[str] = []
+            try:
+                if float(event_probability) < event_threshold:
+                    observe_reasons.append(
+                        f"波動機率 {probability_text(event_probability)}"
+                        f" 未達 {event_threshold * 100:.0f}%"
+                    )
+            except Exception:
+                pass
+            try:
+                if float(direction_confidence) < direction_threshold:
+                    observe_reasons.append(
+                        f"方向信心 {probability_text(direction_confidence)}"
+                        f" 未達 {direction_threshold * 100:.0f}%"
+                    )
+            except Exception:
+                pass
+            signal_note = (
+                "暫不顯示方向｜" + "；".join(observe_reasons)
+                if observe_reasons
+                else "暫不顯示方向｜目前未通過訊號門檻"
+            )
         definition_text = (
             "上漲 > +100點｜盤整 -100～+100點｜下跌 < -100點"
         )
@@ -2411,64 +2474,104 @@ def _build_market_prediction_shadow_flex(
             "type": "separator",
             "margin": "md",
         },
-        {
-            "type": "box",
-            "layout": "horizontal",
-            "spacing": "sm",
-            "margin": "md",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "backgroundColor": "#F3F4F6",
-                    "cornerRadius": "10px",
-                    "paddingAll": "10px",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": left_metric_label,
-                            "size": "xs",
-                            "color": "#6B7280",
-                            "align": "center",
-                        },
-                        {
-                            "type": "text",
-                            "text": left_metric_value,
-                            "size": "lg",
-                            "weight": "bold",
-                            "color": "#111827",
-                            "align": "center",
-                            "margin": "sm",
-                        },
-                    ],
-                },
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "backgroundColor": "#F3F4F6",
-                    "cornerRadius": "10px",
-                    "paddingAll": "10px",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": right_metric_label,
-                            "size": "xs",
-                            "color": "#6B7280",
-                            "align": "center",
-                        },
-                        {
-                            "type": "text",
-                            "text": right_metric_value,
-                            "size": "sm",
-                            "weight": "bold",
-                            "color": "#111827",
-                            "align": "center",
-                            "margin": "sm",
-                        },
-                    ],
-                },
-            ],
-        },
+        (
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "xs",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "backgroundColor": "#F3F4F6",
+                        "cornerRadius": "10px",
+                        "paddingAll": "8px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": metric_label,
+                                "size": "xs",
+                                "color": "#6B7280",
+                                "align": "center",
+                            },
+                            {
+                                "type": "text",
+                                "text": metric_value,
+                                "size": "lg",
+                                "weight": "bold",
+                                "color": "#111827",
+                                "align": "center",
+                                "margin": "sm",
+                            },
+                        ],
+                    }
+                    for metric_label, metric_value in shadow_metrics
+                ],
+            }
+            if effective_mode == "shadow"
+            else {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "backgroundColor": "#F3F4F6",
+                        "cornerRadius": "10px",
+                        "paddingAll": "10px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": left_metric_label,
+                                "size": "xs",
+                                "color": "#6B7280",
+                                "align": "center",
+                            },
+                            {
+                                "type": "text",
+                                "text": left_metric_value,
+                                "size": "lg",
+                                "weight": "bold",
+                                "color": "#111827",
+                                "align": "center",
+                                "margin": "sm",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "backgroundColor": "#F3F4F6",
+                        "cornerRadius": "10px",
+                        "paddingAll": "10px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": right_metric_label,
+                                "size": "xs",
+                                "color": "#6B7280",
+                                "align": "center",
+                            },
+                            {
+                                "type": "text",
+                                "text": right_metric_value,
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#111827",
+                                "align": "center",
+                                "margin": "sm",
+                            },
+                        ],
+                    },
+                ],
+            }
+        ),
         {
             "type": "text",
             "text": definition_text,
