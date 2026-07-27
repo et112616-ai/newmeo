@@ -60,6 +60,15 @@ except Exception:
 MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v2-IX0001-YAHOO-SNAPSHOT-FALLBACK"
 MARKET_INDEX_SNAPSHOT_FIX_VERSION = "2026-07-16-v2-IND-ZERO-SNAPSHOT-FALLBACK"
 MARKET_INDEX_1M_HISTORY_VERSION = "2026-07-21-v2-SHIOAJI-FINMIND-MERGE"
+MARKET_INDEX_MA_VERSION = "2026-07-27-v2.2-MA-CENTERED-3-2"
+MARKET_INDEX_MA_PERIODS = (5, 12, 30, 66, 120)
+MARKET_INDEX_MA_STYLES = {
+    "MA5": ("#111111", 1.2),
+    "MA12": ("#1F77B4", 1.2),
+    "MA30": ("#D62728", 1.2),
+    "MA66": ("#FF7F0E", 1.2),
+    "MA120": ("#9467BD", 1.2),
+}
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_INDEX_TIMEOUT_SECONDS = float(
     os.getenv("FINMIND_INDEX_TIMEOUT_SECONDS", "8")
@@ -1071,7 +1080,8 @@ def get_market_index_chart_url(snapshot: MarketIndexSnapshot | None = None) -> s
     """
     t0 = time.perf_counter()
 
-    cache_key = "TAIEX:D:MA"
+    # 均線組合納入 cache key，避免部署後誤用舊版 5/20/60/120 圖。
+    cache_key = f"TAIEX:D:{MARKET_INDEX_MA_VERSION}"
     now = time.time()
 
     cached = _MARKET_INDEX_CHART_CACHE.get(cache_key)
@@ -1810,7 +1820,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     work_df = df.copy()
 
     # 用完整資料先算均線
-    for period in [5, 20, 60, 120]:
+    for period in MARKET_INDEX_MA_PERIODS:
         work_df[f"MA{period}"] = (
             work_df["Close"]
             .astype(float)
@@ -1829,8 +1839,9 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     latest_date = work_df.index[-1].strftime("%Y-%m-%d")
 
     ma5 = _fmt_index_ma_value(latest.get("MA5"))
-    ma20 = _fmt_index_ma_value(latest.get("MA20"))
-    ma60 = _fmt_index_ma_value(latest.get("MA60"))
+    ma12 = _fmt_index_ma_value(latest.get("MA12"))
+    ma30 = _fmt_index_ma_value(latest.get("MA30"))
+    ma66 = _fmt_index_ma_value(latest.get("MA66"))
     ma120 = _fmt_index_ma_value(latest.get("MA120"))
 
     fig = plt.figure(figsize=FIGURE_SIZES["market_index"], dpi=130, facecolor="white")
@@ -1853,48 +1864,59 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
     # 第一排 MA
     ax_info.text(
-        0.00,
+        0.16,
         0.46,
-        f"5MA {ma5}",
+        f"MA5 {ma5}",
         fontsize=15,
         fontweight="bold",
         color="#111111",
-        ha="left",
+        ha="center",
         va="center",
         transform=ax_info.transAxes,
     )
     ax_info.text(
-        0.28,
+        0.50,
         0.46,
-        f"20MA {ma20}",
+        f"MA12 {ma12}",
         fontsize=15,
         fontweight="bold",
         color="#1F77B4",
-        ha="left",
+        ha="center",
+        va="center",
+        transform=ax_info.transAxes,
+    )
+    ax_info.text(
+        0.84,
+        0.46,
+        f"MA30 {ma30}",
+        fontsize=15,
+        fontweight="bold",
+        color="#D62728",
+        ha="center",
         va="center",
         transform=ax_info.transAxes,
     )
 
     # 第二排 MA
     ax_info.text(
-        0.00,
+        0.33,
         0.12,
-        f"60MA {ma60}",
+        f"MA66 {ma66}",
         fontsize=15,
         fontweight="bold",
         color="#FF7F0E",
-        ha="left",
+        ha="center",
         va="center",
         transform=ax_info.transAxes,
     )
     ax_info.text(
-        0.28,
+        0.67,
         0.12,
-        f"120MA {ma120}",
+        f"MA120 {ma120}",
         fontsize=15,
         fontweight="bold",
         color="#9467BD",
-        ha="left",
+        ha="center",
         va="center",
         transform=ax_info.transAxes,
     )
@@ -1958,14 +1980,7 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     )
 
     # 均線
-    ma_styles = {
-        "MA5": ("#111111", 1.2),
-        "MA20": ("#1F77B4", 1.2),
-        "MA60": ("#FF7F0E", 1.2),
-        "MA120": ("#9467BD", 1.2),
-    }
-
-    for col, (line_color, linewidth) in ma_styles.items():
+    for col, (line_color, linewidth) in MARKET_INDEX_MA_STYLES.items():
         if col in plot_df.columns:
             ax_k.plot(
                 x_values,
@@ -2022,6 +2037,9 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     )
 
     try:
-        return publish_figure(fig, "taiex_market_index_kline")
+        return publish_figure(
+            fig,
+            "taiex_market_index_kline_ma_5_12_30_66_120",
+        )
     finally:
         plt.close(fig)
