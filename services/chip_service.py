@@ -23,12 +23,15 @@ TDCC_LATEST_CSV_URLS = [
     "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5",
 ]
 
-TDCC_WEEKLY_SYNC_VERSION = "2026-07-18-v2-ONE-CSV-PARALLEL-LATEST"
+TDCC_WEEKLY_SYNC_VERSION = "2026-07-27-v3-ACCUMULATE-5W-AUTOREFRESH"
+LARGE_HOLDER_QUERY_VERSION = "2026-07-27-v7.1-ACCUMULATE-5W-AUTOREFRESH"
 _TDCC_LATEST_DF_CACHE: tuple[float, pd.DataFrame] = (0.0, pd.DataFrame())
 _TDCC_LATEST_DF_CACHE_LOCK = threading.Lock()
 TDCC_LATEST_DF_CACHE_TTL_SECONDS = float(
     os.getenv("TDCC_LATEST_DF_CACHE_TTL_SECONDS", "120") or 120
 )
+_LARGE_HOLDER_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_LARGE_HOLDER_REFRESH_LOCKS_GUARD = threading.Lock()
 
 
 # ============================================================
@@ -1303,6 +1306,210 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
         "message": "synced" if ok else "Supabase 寫入失敗",
     }
 
+
+def _large_holder_stock_refresh_lock(stock_id: str) -> threading.Lock:
+    sid = _clean_stock_id(stock_id)
+
+    with _LARGE_HOLDER_REFRESH_LOCKS_GUARD:
+        lock = _LARGE_HOLDER_REFRESH_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            _LARGE_HOLDER_REFRESH_LOCKS[sid] = lock
+        return lock
+
+
+def _latest_tdcc_trade_date(
+    latest_df: pd.DataFrame,
+    stock_id: str,
+) -> str:
+    """從 TDCC 最新全市場 CSV 取得該股票的最新資料日期。"""
+    if latest_df is None or latest_df.empty:
+        return ""
+    if "證券代號" not in latest_df.columns or "資料日期" not in latest_df.columns:
+        return ""
+
+    sid = _clean_stock_id(stock_id)
+    target = latest_df[
+        latest_df["證券代號"].astype(str).str.strip() == sid
+    ]
+    if target.empty:
+        return ""
+
+    dates = {
+        _normalize_date_for_db(value)
+        for value in target["資料日期"].tolist()
+    }
+    dates.discard("")
+    return max(dates) if dates else ""
+
+
+def _large_holder_threshold_fields_ready(
+    row: dict[str, Any],
+    threshold: int,
+) -> bool:
+    """確認最新週已包含指定門檻欄位，不拿千張欄位冒充其他級距。"""
+    if not isinstance(row, dict) or not row:
+        return False
+
+    threshold = _normalize_large_holder_threshold(threshold)
+    if threshold == 1000:
+        ratio = row.get("large_holder_1000_ratio")
+        people = row.get("large_holder_1000_people")
+        if ratio in (None, ""):
+            ratio = row.get("large_holder_ratio")
+        if people in (None, ""):
+            people = row.get("large_holder_people")
+    else:
+        ratio = row.get(f"large_holder_{threshold}_ratio")
+        people = row.get(f"large_holder_{threshold}_people")
+
+    return ratio not in (None, "") and people not in (None, "")
+
+
+def _latest_large_holder_db_status(
+    stock_id: str,
+    threshold: int,
+) -> dict[str, Any]:
+    """讀取資料庫最新週；只讀不刪，歷史資料會持續累積。"""
+    rows = _fetch_large_holder_history_rows_full(stock_id, limit=1)
+    row = rows[0] if rows else {}
+    trade_date = _normalize_date_for_db(row.get("trade_date", ""))
+    return {
+        "trade_date": trade_date,
+        "threshold_fields_ready": _large_holder_threshold_fields_ready(
+            row,
+            threshold,
+        ),
+    }
+
+
+def _refresh_large_holder_if_stale(
+    stock_id: str,
+    threshold: int,
+) -> dict[str, Any]:
+    """
+    LINE 查詢時只在資料庫落後 TDCC 最新週，或最新週缺指定門檻欄位時補抓。
+
+    每週資料以 (stock_id, trade_date) upsert，舊週不會被刪除；本函式只補
+    最新一週。若來源暫時失敗，呼叫端仍可顯示資料庫既有的最近五週。
+    """
+    sid = _clean_stock_id(stock_id)
+    threshold = _normalize_large_holder_threshold(threshold)
+    status: dict[str, Any] = {
+        "version": LARGE_HOLDER_QUERY_VERSION,
+        "stock_id": sid,
+        "threshold": threshold,
+        "db_latest_date": "",
+        "tdcc_latest_date": "",
+        "threshold_fields_ready": False,
+        "refresh_needed": False,
+        "sync_attempted": False,
+        "sync_success": False,
+        "lock_busy": False,
+        "message": "",
+    }
+
+    if not _bool_env("LARGE_HOLDER_AUTO_REFRESH_ON_QUERY", default=True):
+        status["message"] = "auto refresh disabled"
+        return status
+
+    db_status = _latest_large_holder_db_status(sid, threshold)
+    status["db_latest_date"] = db_status["trade_date"]
+    status["threshold_fields_ready"] = bool(
+        db_status["threshold_fields_ready"]
+    )
+
+    latest_df = _request_tdcc_latest_dataframe()
+    tdcc_latest_date = _latest_tdcc_trade_date(latest_df, sid)
+    status["tdcc_latest_date"] = tdcc_latest_date
+
+    if not tdcc_latest_date:
+        status["message"] = "TDCC latest source unavailable or stock missing"
+        print(
+            "DEBUG large_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    refresh_needed = (
+        not status["db_latest_date"]
+        or tdcc_latest_date > status["db_latest_date"]
+        or (
+            tdcc_latest_date == status["db_latest_date"]
+            and not status["threshold_fields_ready"]
+        )
+    )
+    status["refresh_needed"] = refresh_needed
+
+    if not refresh_needed:
+        status["sync_success"] = True
+        status["message"] = "database already current"
+        print(
+            "DEBUG large_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    lock = _large_holder_stock_refresh_lock(sid)
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        status["lock_busy"] = True
+        status["message"] = "another refresh is running"
+        print(
+            "DEBUG large_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    try:
+        # 取得鎖後再檢查一次，避免同時查詢不同門檻時重複寫入同一週。
+        current = _latest_large_holder_db_status(sid, threshold)
+        if (
+            current["trade_date"]
+            and current["trade_date"] >= tdcc_latest_date
+            and current["threshold_fields_ready"]
+        ):
+            status.update({
+                "db_latest_date": current["trade_date"],
+                "threshold_fields_ready": True,
+                "sync_success": True,
+                "message": "database refreshed by another request",
+            })
+            return status
+
+        status["sync_attempted"] = True
+        sync_result = sync_tdcc_latest_large_holder(sid)
+        after = _latest_large_holder_db_status(sid, threshold)
+        status["db_latest_date"] = after["trade_date"]
+        status["threshold_fields_ready"] = bool(
+            after["threshold_fields_ready"]
+        )
+        status["sync_success"] = bool(
+            sync_result.get("ok")
+            and after["trade_date"] >= tdcc_latest_date
+            and after["threshold_fields_ready"]
+        )
+        status["message"] = (
+            "latest week accumulated"
+            if status["sync_success"]
+            else str(sync_result.get("message") or "latest sync failed")
+        )
+        return status
+    except Exception as exc:
+        status["message"] = repr(exc)
+        return status
+    finally:
+        lock.release()
+        print(
+            "DEBUG large_holder freshness",
+            "|", status,
+            flush=True,
+        )
+
+
 def sync_tdcc_large_holder_history(stock_id: str, weeks: int = 6) -> dict:
     """
     相容舊函式名稱。
@@ -2251,10 +2458,13 @@ def get_large_holder_table(stock_id: str, threshold: int = 1000) -> list[dict]:
     大戶持股比率。
 
     threshold:
+    - 200：200張以上
     - 400：400張以上
     - 600：600張以上
     - 800：800張以上
     - 1000：1000張以上
+
+    Supabase 持續累積所有週別；回傳給 LINE 的資料固定只取最新 5 週。
     """
     import time
 
@@ -2278,6 +2488,31 @@ def get_large_holder_table(stock_id: str, threshold: int = 1000) -> list[dict]:
         len(history or []),
         "| history =",
         history,
+        flush=True,
+    )
+
+    # 不再以「已有 5 筆」當成資料新鮮。先比較 TDCC 最新週與資料庫日期；
+    # 落後時只補正在查詢的股票，成功或失敗都不刪除任何歷史週。
+    refresh_status = _refresh_large_holder_if_stale(
+        sid,
+        threshold,
+    )
+    if (
+        refresh_status.get("sync_attempted")
+        or refresh_status.get("lock_busy")
+    ):
+        history = _large_holder_from_supabase_history(
+            sid,
+            limit=6,
+            threshold=threshold,
+        )
+
+    print(
+        "DEBUG large_holder table freshness_checked",
+        "| stock_id =", sid,
+        "| threshold =", threshold,
+        "| refresh_status =", refresh_status,
+        "| history_count =", len(history or []),
         flush=True,
     )
 
