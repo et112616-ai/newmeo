@@ -12,6 +12,9 @@ MARKET_DATA_FRESHNESS_VERSION = "2026-07-16-v1-STOCK-CARD-FRESHNESS"
 ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
+POST_MARKET_COMPARISON_VERSION = (
+    "2026-07-27-v2.2-COMPARABLE-CURRENT-PRICE-ANCHOR"
+)
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
     "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
 )
@@ -33,7 +36,9 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
-from services.afterhours_analysis_service import generate_post_market_analysis_chart
+from services.afterhours_analysis_service_v2_2_comparable_cards import (
+    generate_post_market_analysis_chart,
+)
 from services.broker_branch_service import get_top_broker_branches
 from services.pe_river_service import get_pe_river_snapshot
 
@@ -7922,6 +7927,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             print(
                 "DEBUG stock timing post_market",
+                "| version =", POST_MARKET_COMPARISON_VERSION,
                 "| stock_id =", meta.stock_id,
                 "| rows =", 0 if df_for_post is None else len(df_for_post),
                 "| daytrade_ratio =", daytrade_ratio,
