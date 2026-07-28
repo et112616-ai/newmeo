@@ -31,6 +31,9 @@ POST_MARKET_CARD_ALIGNMENT_VERSION = (
 POST_MARKET_OUTER_CARD_VERSION = (
     "2026-07-28-v6.9-POST-MARKET-OUTER-CARD"
 )
+MARKET_DAILY_CONTRIBUTION_CARD_VERSION = (
+    "2026-07-28-v7.0-DAILY-TSE-OTC-CONTRIBUTION"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -3101,6 +3104,197 @@ def _build_market_afterhours_digest_flex(
             ],
         }
 
+    def contribution_item(
+        item: dict[str, Any],
+        fallback_rank: int,
+    ) -> dict[str, Any]:
+        points = item.get("contribution_points")
+        rank = item.get("rank") or fallback_rank
+        stock_name = str(
+            item.get("stock_name")
+            or item.get("stock_id")
+            or "--"
+        )
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{rank}. {stock_name}",
+                    "size": "sm",
+                    "color": "#374151",
+                    "flex": 7,
+                    "maxLines": 1,
+                },
+                {
+                    "type": "text",
+                    "text": signed(points, 1, "點"),
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": value_color(points),
+                    "align": "end",
+                    "flex": 3,
+                },
+            ],
+        }
+
+    def contribution_card_contents(
+        snapshot: dict[str, Any],
+        market_label: str,
+    ) -> list[dict[str, Any]]:
+        available = bool(snapshot.get("available"))
+        positive = [
+            item
+            for item in list(snapshot.get("positive") or [])[:5]
+            if isinstance(item, dict)
+        ]
+        negative = [
+            item
+            for item in list(snapshot.get("negative") or [])[:5]
+            if isinstance(item, dict)
+        ]
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"盤後貢獻｜{market_label}",
+                        "size": "xl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                    },
+                    {
+                        "type": "text",
+                        "text": "估算",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": "#7C3AED",
+                        "align": "end",
+                        "flex": 0,
+                    },
+                ],
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"{snapshot.get('index_name') or market_label} "
+                    f"{signed(snapshot.get('index_change_points'), 2, '點')}"
+                    f"（{signed(snapshot.get('index_change_pct'), 2, '%')}）"
+                    if available
+                    else "尚未同步當日盤後貢獻"
+                ),
+                "size": "md",
+                "weight": "bold",
+                "color": (
+                    value_color(snapshot.get("index_change_points"))
+                    if available
+                    else "#9CA3AF"
+                ),
+                "wrap": True,
+                "margin": "sm",
+            },
+            {
+                "type": "text",
+                "text": f"資料日 {mmdd(snapshot.get('date'))}",
+                "size": "xs",
+                "color": "#6B7280",
+            },
+        ]
+        if not available:
+            contents.append(
+                {
+                    "type": "text",
+                    "text": "請先執行每日盤後貢獻同步；本卡不使用盤中快照代替。",
+                    "size": "sm",
+                    "color": "#6B7280",
+                    "wrap": True,
+                    "margin": "lg",
+                }
+            )
+            contents.extend(_market_index_buttons("market_afterhours"))
+            return contents
+
+        contents.extend(
+            [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "xs",
+                    "margin": "md",
+                    "contents": [
+                        mini_cell(
+                            "拉抬合計",
+                            signed(
+                                snapshot.get(
+                                    "positive_contribution_points"
+                                ),
+                                1,
+                                "點",
+                            ),
+                            UP_COLOR,
+                        ),
+                        mini_cell(
+                            "拖累合計",
+                            signed(
+                                snapshot.get(
+                                    "negative_contribution_points"
+                                ),
+                                1,
+                                "點",
+                            ),
+                            DOWN_COLOR,
+                        ),
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": "正貢獻｜拉抬前5名",
+                    "size": "md",
+                    "weight": "bold",
+                    "color": UP_COLOR,
+                    "margin": "md",
+                },
+                *[
+                    contribution_item(item, rank)
+                    for rank, item in enumerate(positive, start=1)
+                ],
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": "負貢獻｜拖累前5名",
+                    "size": "md",
+                    "weight": "bold",
+                    "color": DOWN_COLOR,
+                    "margin": "md",
+                },
+                *[
+                    contribution_item(item, rank)
+                    for rank, item in enumerate(negative, start=1)
+                ],
+                {
+                    "type": "text",
+                    "text": (
+                        "依前日市值權重估算，並以官方指數當日漲跌校準；"
+                        "個股點數非交易所發布的官方逐檔數值。"
+                    ),
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "wrap": True,
+                    "margin": "md",
+                },
+            ]
+        )
+        contents.extend(_market_index_buttons("market_afterhours"))
+        return contents
+
     if not bool(result.get("ok")):
         contents: list[dict[str, Any]] = [
             {
@@ -3141,25 +3335,20 @@ def _build_market_afterhours_digest_flex(
     margin = result.get("margin") or {}
     margin_tse = margin.get("tse") or {}
     margin_otc = margin.get("otc") or {}
-    weight = result.get("weight") or {}
-    largest = weight.get("largest") or {}
+    contribution = result.get("contribution") or {}
+    tse_contribution = contribution.get("tse") or {}
+    otc_contribution = contribution.get("otc") or {}
+    tse_largest_negative = (
+        tse_contribution.get("largest_negative") or {}
+    )
+    otc_largest_negative = (
+        otc_contribution.get("largest_negative") or {}
+    )
     trade_date = str(result.get("trade_date") or "")
     data_mode = str(result.get("data_mode") or "收盤資料")
     change = market.get("change")
     change_pct = market.get("change_pct")
     close_color = value_color(change)
-
-    divergence = weight.get("taiex_otc_divergence_15m")
-    divergence_text = (
-        "尚未累積"
-        if divergence is None
-        else signed(divergence, 3, "%")
-    )
-    divergence_color = (
-        "#6B7280"
-        if divergence is None
-        else value_color(divergence)
-    )
 
     summary_contents: list[dict[str, Any]] = [
         {
@@ -3260,7 +3449,7 @@ def _build_market_afterhours_digest_flex(
             value_color(future.get("basis_points")),
         ),
         info_row(
-            f"法人合計 {mmdd(chip.get('date'))}",
+            f"三大法人 {mmdd(chip.get('date'))}",
             (
                 signed(chip.get("total_yi"), 1, "億")
                 if chip.get("available")
@@ -3287,22 +3476,32 @@ def _build_market_afterhours_digest_flex(
             value_color(margin_otc.get("money_change_yi")),
         ),
         info_row(
-            f"權值貢獻 {mmdd(weight.get('date'))}",
+            f"上市最大拖累 {mmdd(tse_contribution.get('date'))}",
             (
-                signed(
-                    weight.get("top20_contribution_points"),
-                    0,
-                    "點",
+                (
+                    f"{tse_largest_negative.get('stock_name') or '--'} "
+                    f"{signed(tse_largest_negative.get('contribution_points'), 1, '點')}"
                 )
-                if weight.get("available")
+                if tse_contribution.get("available")
                 else "資料待更新"
             ),
-            value_color(weight.get("top20_contribution_points")),
+            value_color(
+                tse_largest_negative.get("contribution_points")
+            ),
         ),
         info_row(
-            "上市－上櫃 15分",
-            divergence_text,
-            divergence_color,
+            f"上櫃最大拖累 {mmdd(otc_contribution.get('date'))}",
+            (
+                (
+                    f"{otc_largest_negative.get('stock_name') or '--'} "
+                    f"{signed(otc_largest_negative.get('contribution_points'), 2, '點')}"
+                )
+                if otc_contribution.get("available")
+                else "資料待更新"
+            ),
+            value_color(
+                otc_largest_negative.get("contribution_points")
+            ),
         ),
         {
             "type": "text",
@@ -3390,27 +3589,12 @@ def _build_market_afterhours_digest_flex(
         },
         {
             "type": "text",
-            "text": "權值與籌碼",
+            "text": "籌碼觀察",
             "size": "md",
             "weight": "bold",
             "color": "#374151",
             "margin": "md",
         },
-        info_row(
-            "最大影響",
-            (
-                f"{largest.get('stock_name') or '--'} "
-                f"{signed(largest.get('contribution_points'), 0, '點')}"
-            ),
-            value_color(largest.get("contribution_points")),
-        ),
-        info_row(
-            "前20大權值",
-            (
-                f"漲 {number(weight.get('positive_ratio_pct'), 1)}%"
-                f"｜跌 {number(weight.get('negative_ratio_pct'), 1)}%"
-            ),
-        ),
         info_row(
             "外資",
             (
@@ -3469,6 +3653,14 @@ def _build_market_afterhours_digest_flex(
             "margin": "md",
         },
     ]
+    tse_contribution_contents = contribution_card_contents(
+        tse_contribution,
+        "上市",
+    )
+    otc_contribution_contents = contribution_card_contents(
+        otc_contribution,
+        "上櫃",
+    )
 
     return {
         "type": "flex",
@@ -3484,6 +3676,26 @@ def _build_market_afterhours_digest_flex(
                         "layout": "vertical",
                         "spacing": "sm",
                         "contents": summary_contents,
+                    },
+                },
+                {
+                    "type": "bubble",
+                    "size": "mega",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": tse_contribution_contents,
+                    },
+                },
+                {
+                    "type": "bubble",
+                    "size": "mega",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": otc_contribution_contents,
                     },
                 },
                 {
@@ -8174,7 +8386,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             if action == "market_afterhours":
                 # 盤後服務延遲載入，避免增加一般圖卡冷啟動時間。
-                from services.market_afterhours_digest_service_v1 import (
+                from services.market_afterhours_digest_service_v2 import (
                     build_market_afterhours_digest,
                 )
 
