@@ -15,7 +15,7 @@ from services.supabase_service import upsert_market_index_contribution_daily_row
 
 
 MARKET_INDEX_CONTRIBUTION_VERSION = (
-    "2026-07-28-v1-DAILY-TSE-OTC-SIGNED-CONTRIBUTION"
+    "2026-07-28-v1.1-CROSS-MARKET-DATE-GUARD"
 )
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 HTTP_TIMEOUT_SECONDS = max(
@@ -638,6 +638,51 @@ def build_daily_market_index_contributions(
     if "otc" in scopes:
         results["otc"] = _build_otc(rows_by_key, requested_date)
 
+    source_dates = {
+        scope: str(result.get("trade_date") or "")
+        for scope, result in results.items()
+    }
+    successful_scopes = {
+        scope
+        for scope, result in results.items()
+        if bool(result.get("ok"))
+    }
+    successful_dates = {
+        source_dates.get(scope, "")
+        for scope in successful_scopes
+        if source_dates.get(scope)
+    }
+    all_markets_ready = (
+        normalized_scope != "all"
+        or successful_scopes == {"tse", "otc"}
+    )
+    date_consistent = (
+        len(successful_dates) == 1
+        if normalized_scope == "all"
+        else bool(successful_dates)
+    )
+    combined_ready = all_markets_ready and date_consistent
+    combined_trade_date = (
+        next(iter(successful_dates))
+        if combined_ready and successful_dates
+        else ""
+    )
+    write_blocked = normalized_scope == "all" and not combined_ready
+    if write_blocked:
+        if not all_markets_ready:
+            skip_reason = "market_scope_incomplete"
+            blocked_message = (
+                "上市或上櫃盤後資料尚未完成，本次不寫入"
+            )
+        else:
+            skip_reason = "market_trade_date_mismatch"
+            blocked_message = (
+                "上市與上櫃交易日不同，本次不寫入"
+            )
+    else:
+        skip_reason = ""
+        blocked_message = ""
+
     success_rows = [
         _db_row(result)
         for result in results.values()
@@ -648,23 +693,55 @@ def build_daily_market_index_contributions(
         "success": False,
         "rows": 0,
     }
-    if persist and success_rows:
+    if persist and write_blocked:
+        persist_result = {
+            "requested": True,
+            "success": False,
+            "rows": 0,
+            "message": blocked_message,
+            "write_blocked": True,
+        }
+    elif persist and success_rows:
         persist_result = {
             "requested": True,
             **upsert_market_index_contribution_daily_rows(success_rows),
         }
 
-    ok = bool(success_rows) and all(
+    all_requested_scopes_ok = bool(success_rows) and all(
         bool(result.get("ok")) for result in results.values()
     )
-    partial = bool(success_rows) and not ok
+    ok = all_requested_scopes_ok and not write_blocked
+    partial = (
+        bool(success_rows)
+        and not all_requested_scopes_ok
+        and not write_blocked
+    )
     response = {
         "ok": ok,
         "partial": partial,
-        "message": "ok" if ok else ("部分市場完成" if partial else "盤後貢獻計算失敗"),
+        "skipped": write_blocked,
+        "skip_reason": skip_reason,
+        "write_blocked": write_blocked,
+        "message": (
+            "ok"
+            if ok
+            else (
+                blocked_message
+                if write_blocked
+                else (
+                    "部分市場完成"
+                    if partial
+                    else "盤後貢獻計算失敗"
+                )
+            )
+        ),
         "version": MARKET_INDEX_CONTRIBUTION_VERSION,
         "requested_trade_date": requested_date or None,
         "market_scope": normalized_scope,
+        "source_dates": source_dates,
+        "date_consistent": date_consistent,
+        "all_markets_ready": all_markets_ready,
+        "combined_trade_date": combined_trade_date or None,
         "generated_at": datetime.now(TAIPEI_TZ).isoformat(),
         "markets": results,
         "fetch_errors": fetch_errors,
@@ -676,12 +753,11 @@ def build_daily_market_index_contributions(
         "| scope =", normalized_scope,
         "| ok =", ok,
         "| partial =", partial,
+        "| skipped =", write_blocked,
+        "| skip_reason =", skip_reason,
         "| persisted =", persist_result.get("success"),
-        "| dates =",
-        {
-            key: value.get("trade_date")
-            for key, value in results.items()
-        },
+        "| dates =", source_dates,
+        "| date_consistent =", date_consistent,
         "| sec =", response["seconds"],
     )
     return response
