@@ -26,7 +26,7 @@ os.environ.setdefault(
 )
 
 APP_BUILD_VERSION = (
-    "2026-07-28-v3.8-DAILY-TSE-OTC-CONTRIBUTION"
+    "2026-07-28-v3.8.1-CROSS-MARKET-DATE-GUARD"
 )
 APP_STARTED_TS = time.time()
 
@@ -1227,6 +1227,8 @@ def sync_market_index_contribution_daily_route():
             "MARKET_INDEX_CONTRIBUTION_DAILY_ROUTE",
             "| ok =", result.get("ok"),
             "| partial =", result.get("partial"),
+            "| skipped =", result.get("skipped"),
+            "| skip_reason =", result.get("skip_reason"),
             "| scope =", market_scope,
             "| tse_date =",
             (markets.get("tse") or {}).get("trade_date"),
@@ -1237,10 +1239,14 @@ def sync_market_index_contribution_daily_route():
             "| sec =", round(time.perf_counter() - started, 3),
             flush=True,
         )
-        # 部分市場完成仍以200回覆，避免Make把可用成果誤判為DataError。
+        # 日期尚未一致時安全略過，仍以200回覆，避免Make誤判為DataError。
         status_code = (
             200
-            if result.get("ok") or result.get("partial")
+            if (
+                result.get("ok")
+                or result.get("partial")
+                or result.get("skipped")
+            )
             else 422
         )
         return jsonify(result), status_code
