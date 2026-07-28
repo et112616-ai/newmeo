@@ -25,7 +25,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-27-v3.5-V8.1-FAIR-ABLATION"
+APP_BUILD_VERSION = "2026-07-28-v3.7-V8.2.1-WARMUP-SAFE"
 APP_STARTED_TS = time.time()
 
 print(
@@ -54,6 +54,29 @@ _MARKET_PREDICTION_SHADOW_JOB_STATE: dict[str, Any] = {
     "last_failure_at": "",
     "seconds": 0.0,
     "message": "尚未觸發影子預測",
+    "result": {},
+}
+_MARKET_PREDICTION_V8_2_PREPARE_LOCK = threading.Lock()
+_MARKET_PREDICTION_V8_2_SHADOW_LOCK = threading.Lock()
+_MARKET_PREDICTION_V8_2_STATE_LOCK = threading.Lock()
+_MARKET_PREDICTION_V8_2_PREPARE_STATE: dict[str, Any] = {
+    "status": "idle",
+    "job_id": "",
+    "accepted_at": "",
+    "started_at": "",
+    "completed_at": "",
+    "seconds": 0.0,
+    "message": "尚未觸發v8.2模型準備",
+    "result": {},
+}
+_MARKET_PREDICTION_V8_2_SHADOW_STATE: dict[str, Any] = {
+    "status": "idle",
+    "job_id": "",
+    "accepted_at": "",
+    "started_at": "",
+    "completed_at": "",
+    "seconds": 0.0,
+    "message": "尚未觸發v8.2影子預測",
     "result": {},
 }
 
@@ -1588,6 +1611,582 @@ def evaluate_market_prediction_v8_1_route():
         }), 500
 
 
+def _v8_2_state_update(
+    target: dict[str, Any],
+    **changes: Any,
+) -> dict[str, Any]:
+    with _MARKET_PREDICTION_V8_2_STATE_LOCK:
+        target.update(changes)
+        return dict(target)
+
+
+def _v8_2_state_snapshot(
+    target: dict[str, Any],
+    worker_lock: threading.Lock,
+) -> dict[str, Any]:
+    with _MARKET_PREDICTION_V8_2_STATE_LOCK:
+        state = dict(target)
+    state["worker_pid"] = os.getpid()
+    state["running"] = bool(worker_lock.locked())
+    return state
+
+
+def _v8_2_result_summary(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"ok": False, "message": "v8.2未回傳JSON object"}
+    return {
+        key: result.get(key)
+        for key in (
+            "ok",
+            "message",
+            "version",
+            "model_version",
+            "artifact_key",
+            "architecture",
+            "training_rows",
+            "trade_days",
+            "thresholds",
+            "unbiased_forward_start_date",
+            "signal",
+            "prediction_ts",
+            "horizon_ts",
+            "prediction_allowed",
+            "freshness_status",
+            "skipped",
+            "skip_reason",
+            "persist",
+            "settlement",
+            "seconds",
+        )
+        if key in result
+    }
+
+
+def _run_v8_2_prepare_async(
+    job_id: str,
+    training_start_date: str,
+    training_cutoff: str,
+    persist: bool,
+) -> None:
+    started = time.perf_counter()
+    _v8_2_state_update(
+        _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+        status="running",
+        job_id=job_id,
+        started_at=_server_time_text(),
+        completed_at="",
+        seconds=0.0,
+        message="v8.2模型正在背景建立",
+        result={},
+    )
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_hybrid_service_v8_2_1_warmup_safe"
+        )
+        result = getattr(module, "prepare_hybrid_model")(
+            training_start_date=training_start_date,
+            training_cutoff=training_cutoff,
+            persist=persist,
+        )
+        summary = _v8_2_result_summary(result)
+        succeeded = bool(summary.get("ok"))
+        elapsed = round(time.perf_counter() - started, 3)
+        _v8_2_state_update(
+            _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+            status="completed" if succeeded else "failed",
+            completed_at=_server_time_text(),
+            seconds=elapsed,
+            message=str(summary.get("message") or "v8.2模型準備完成"),
+            result=summary,
+        )
+        print(
+            "MARKET_PREDICTION_V8_2_PREPARE_COMPLETE",
+            "| job_id =", job_id,
+            "| ok =", succeeded,
+            "| rows =", summary.get("training_rows"),
+            "| sec =", elapsed,
+            flush=True,
+        )
+    except Exception as exc:
+        _v8_2_state_update(
+            _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+            status="failed",
+            completed_at=_server_time_text(),
+            seconds=round(time.perf_counter() - started, 3),
+            message="v8.2模型準備例外",
+            result={"ok": False, "error": repr(exc)},
+        )
+        print(traceback.format_exc(), flush=True)
+    finally:
+        try:
+            _MARKET_PREDICTION_V8_2_PREPARE_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+@app.route(
+    "/market_prediction_v8_2_prepare_trigger",
+    methods=["GET", "POST", "HEAD"],
+)
+def market_prediction_v8_2_prepare_trigger_route():
+    """快速接受v8.2訓練工作，避免Render/Make等待數分鐘。"""
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    started = time.perf_counter()
+    if not _MARKET_PREDICTION_V8_2_PREPARE_LOCK.acquire(blocking=False):
+        return jsonify({
+            "ok": True,
+            "accepted": False,
+            "skipped": True,
+            "message": "已有v8.2模型準備工作正在執行",
+            "job": _v8_2_state_snapshot(
+                _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+                _MARKET_PREDICTION_V8_2_PREPARE_LOCK,
+            ),
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+
+    training_start_date = str(
+        request.args.get("training_start_date", "2026-04-14")
+        or "2026-04-14"
+    ).strip()
+    training_cutoff = str(
+        request.args.get("training_cutoff", "2026-07-13")
+        or "2026-07-13"
+    ).strip()
+    persist = str(
+        request.args.get("persist", "1") or "1"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    job_id = (
+        f"v82-prepare-{int(time.time())}-{os.getpid()}-"
+        f"{threading.get_ident()}"
+    )
+    accepted_at = _server_time_text()
+    _v8_2_state_update(
+        _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+        status="accepted",
+        job_id=job_id,
+        accepted_at=accepted_at,
+        started_at="",
+        completed_at="",
+        seconds=0.0,
+        message="v8.2模型準備已接受",
+        result={},
+    )
+    try:
+        threading.Thread(
+            target=_run_v8_2_prepare_async,
+            args=(
+                job_id,
+                training_start_date,
+                training_cutoff,
+                persist,
+            ),
+            name=f"market-v82-prepare-{job_id}",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        _MARKET_PREDICTION_V8_2_PREPARE_LOCK.release()
+        return jsonify({
+            "ok": False,
+            "accepted": False,
+            "message": "v8.2背景工作無法啟動",
+            "error": repr(exc),
+        }), 200
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "job_id": job_id,
+        "message": "v8.2模型準備已接受，正在背景執行",
+        "accepted_at": accepted_at,
+        "status_url": "/market_prediction_v8_2_prepare_status",
+        "seconds": round(time.perf_counter() - started, 3),
+    }), 200
+
+
+@app.route(
+    "/market_prediction_v8_2_prepare_status",
+    methods=["GET", "HEAD"],
+)
+def market_prediction_v8_2_prepare_status_route():
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    return jsonify({
+        "ok": True,
+        "message": "ok",
+        "version": APP_BUILD_VERSION,
+        "job": _v8_2_state_snapshot(
+            _MARKET_PREDICTION_V8_2_PREPARE_STATE,
+            _MARKET_PREDICTION_V8_2_PREPARE_LOCK,
+        ),
+    }), 200
+
+
+def _run_v8_2_shadow_async(
+    job_id: str,
+    force_live: bool,
+) -> None:
+    started = time.perf_counter()
+    _v8_2_state_update(
+        _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+        status="running",
+        job_id=job_id,
+        started_at=_server_time_text(),
+        completed_at="",
+        seconds=0.0,
+        message="v8.2影子預測正在背景執行",
+        result={},
+    )
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_hybrid_service_v8_2_1_warmup_safe"
+        )
+        result = getattr(module, "predict_hybrid_shadow")(
+            persist=True,
+            force_live=force_live,
+        )
+        summary = _v8_2_result_summary(result)
+        succeeded = bool(summary.get("ok"))
+        elapsed = round(time.perf_counter() - started, 3)
+        _v8_2_state_update(
+            _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+            status="completed" if succeeded else "failed",
+            completed_at=_server_time_text(),
+            seconds=elapsed,
+            message=str(summary.get("message") or "v8.2影子預測完成"),
+            result=summary,
+        )
+        print(
+            "MARKET_PREDICTION_V8_2_SHADOW_COMPLETE",
+            "| job_id =", job_id,
+            "| ok =", succeeded,
+            "| signal =", summary.get("signal"),
+            "| persisted =", (summary.get("persist") or {}).get("success"),
+            "| sec =", elapsed,
+            flush=True,
+        )
+    except Exception as exc:
+        _v8_2_state_update(
+            _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+            status="failed",
+            completed_at=_server_time_text(),
+            seconds=round(time.perf_counter() - started, 3),
+            message="v8.2影子預測例外",
+            result={"ok": False, "error": repr(exc)},
+        )
+        print(traceback.format_exc(), flush=True)
+    finally:
+        try:
+            _MARKET_PREDICTION_V8_2_SHADOW_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+@app.route(
+    "/market_prediction_v8_2_shadow_trigger",
+    methods=["GET", "POST", "HEAD"],
+)
+def market_prediction_v8_2_shadow_trigger_route():
+    """Make專用：立即回200，行情與寫入在背景執行。"""
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    started = time.perf_counter()
+    if not _MARKET_PREDICTION_V8_2_SHADOW_LOCK.acquire(blocking=False):
+        return jsonify({
+            "ok": True,
+            "accepted": False,
+            "skipped": True,
+            "message": "已有v8.2影子預測正在執行",
+            "job": _v8_2_state_snapshot(
+                _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+                _MARKET_PREDICTION_V8_2_SHADOW_LOCK,
+            ),
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+    force_live = str(
+        request.args.get("force_live", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    job_id = (
+        f"v82-shadow-{int(time.time())}-{os.getpid()}-"
+        f"{threading.get_ident()}"
+    )
+    accepted_at = _server_time_text()
+    _v8_2_state_update(
+        _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+        status="accepted",
+        job_id=job_id,
+        accepted_at=accepted_at,
+        started_at="",
+        completed_at="",
+        seconds=0.0,
+        message="v8.2影子預測已接受",
+        result={},
+    )
+    try:
+        threading.Thread(
+            target=_run_v8_2_shadow_async,
+            args=(job_id, force_live),
+            name=f"market-v82-shadow-{job_id}",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        _MARKET_PREDICTION_V8_2_SHADOW_LOCK.release()
+        return jsonify({
+            "ok": False,
+            "accepted": False,
+            "message": "v8.2影子背景工作無法啟動",
+            "error": repr(exc),
+        }), 200
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "job_id": job_id,
+        "message": "v8.2影子預測已接受，正在背景執行",
+        "accepted_at": accepted_at,
+        "status_url": "/market_prediction_v8_2_shadow_status",
+        "seconds": round(time.perf_counter() - started, 3),
+    }), 200
+
+
+@app.route(
+    "/market_prediction_v8_2_shadow_status",
+    methods=["GET", "HEAD"],
+)
+def market_prediction_v8_2_shadow_status_route():
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    return jsonify({
+        "ok": True,
+        "message": "ok",
+        "version": APP_BUILD_VERSION,
+        "job": _v8_2_state_snapshot(
+            _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+            _MARKET_PREDICTION_V8_2_SHADOW_LOCK,
+        ),
+    }), 200
+
+
+@app.route(
+    "/market_prediction_ab_shadow_trigger",
+    methods=["GET", "POST", "HEAD"],
+)
+def market_prediction_ab_shadow_trigger_route():
+    """一次Make操作同時觸發v7與v8.2，避免雙倍排程用量。"""
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    started = time.perf_counter()
+    force_live = str(
+        request.args.get("force_live", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    launches: dict[str, Any] = {}
+
+    v7_acquired = _MARKET_PREDICTION_SHADOW_LOCK.acquire(blocking=False)
+    if v7_acquired:
+        v7_job_id = (
+            f"ab-v7-{int(time.time())}-{os.getpid()}-"
+            f"{threading.get_ident()}"
+        )
+        _shadow_job_state_update(
+            status="accepted",
+            job_id=v7_job_id,
+            accepted_at=_server_time_text(),
+            started_at="",
+            completed_at="",
+            seconds=0.0,
+            message="v7影子預測已由A/B端點接受",
+            result={},
+        )
+        try:
+            threading.Thread(
+                target=_run_market_prediction_shadow_async,
+                args=(v7_job_id, force_live),
+                name=f"market-ab-v7-{v7_job_id}",
+                daemon=True,
+            ).start()
+            launches["v7"] = {
+                "accepted": True,
+                "job_id": v7_job_id,
+            }
+        except Exception as exc:
+            _MARKET_PREDICTION_SHADOW_LOCK.release()
+            launches["v7"] = {
+                "accepted": False,
+                "error": repr(exc),
+            }
+    else:
+        launches["v7"] = {
+            "accepted": False,
+            "skipped": True,
+            "reason": "already_running",
+        }
+
+    v82_acquired = _MARKET_PREDICTION_V8_2_SHADOW_LOCK.acquire(
+        blocking=False
+    )
+    if v82_acquired:
+        v82_job_id = (
+            f"ab-v82-{int(time.time())}-{os.getpid()}-"
+            f"{threading.get_ident()}"
+        )
+        _v8_2_state_update(
+            _MARKET_PREDICTION_V8_2_SHADOW_STATE,
+            status="accepted",
+            job_id=v82_job_id,
+            accepted_at=_server_time_text(),
+            started_at="",
+            completed_at="",
+            seconds=0.0,
+            message="v8.2影子預測已由A/B端點接受",
+            result={},
+        )
+        try:
+            threading.Thread(
+                target=_run_v8_2_shadow_async,
+                args=(v82_job_id, force_live),
+                name=f"market-ab-v82-{v82_job_id}",
+                daemon=True,
+            ).start()
+            launches["v8_2"] = {
+                "accepted": True,
+                "job_id": v82_job_id,
+            }
+        except Exception as exc:
+            _MARKET_PREDICTION_V8_2_SHADOW_LOCK.release()
+            launches["v8_2"] = {
+                "accepted": False,
+                "error": repr(exc),
+            }
+    else:
+        launches["v8_2"] = {
+            "accepted": False,
+            "skipped": True,
+            "reason": "already_running",
+        }
+
+    return jsonify({
+        "ok": True,
+        "message": "A/B影子工作已處理",
+        "version": APP_BUILD_VERSION,
+        "launches": launches,
+        "v7_status_url": "/market_prediction_shadow_status",
+        "v8_2_status_url": "/market_prediction_v8_2_shadow_status",
+        "seconds": round(time.perf_counter() - started, 3),
+    }), 200
+
+
+@app.route(
+    "/market_prediction_v8_2_shadow_snapshot",
+    methods=["GET", "POST", "HEAD"],
+)
+def market_prediction_v8_2_shadow_snapshot_route():
+    """手動預覽；排程請使用shadow_trigger。"""
+    if request.method == "HEAD":
+        return "", 200
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    persist = str(
+        request.args.get("persist", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    force_live = str(
+        request.args.get("force_live", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if not _MARKET_PREDICTION_V8_2_SHADOW_LOCK.acquire(blocking=False):
+        return jsonify({
+            "ok": True,
+            "skipped": True,
+            "message": "已有v8.2影子預測正在執行",
+        }), 200
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_hybrid_service_v8_2_1_warmup_safe"
+        )
+        result = getattr(module, "predict_hybrid_shadow")(
+            persist=persist,
+            force_live=force_live,
+        )
+        return jsonify(result), 200
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "message": "v8.2 shadow snapshot failed",
+            "error": repr(exc),
+        }), 200
+    finally:
+        _MARKET_PREDICTION_V8_2_SHADOW_LOCK.release()
+
+
+@app.route(
+    "/market_prediction_v8_2_shadow_quality",
+    methods=["GET", "POST"],
+)
+def market_prediction_v8_2_shadow_quality_route():
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    start_date = str(
+        request.args.get("start_date", "") or ""
+    ).strip() or None
+    end_date = str(
+        request.args.get("end_date", "") or ""
+    ).strip() or None
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_hybrid_service_v8_2_1_warmup_safe"
+        )
+        result = getattr(module, "evaluate_hybrid_shadow")(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify(result), 200
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "message": "v8.2 shadow quality failed",
+            "error": repr(exc),
+        }), 200
+
+
+@app.route(
+    "/market_prediction_v8_2_ab_quality",
+    methods=["GET", "POST"],
+)
+def market_prediction_v8_2_ab_quality_route():
+    """以同分鐘、同實際結果公平比較v7與v8.2。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    start_date = str(
+        request.args.get("start_date", "") or ""
+    ).strip() or None
+    end_date = str(
+        request.args.get("end_date", "") or ""
+    ).strip() or None
+    try:
+        module = importlib.import_module(
+            "services.market_prediction_hybrid_service_v8_2_1_warmup_safe"
+        )
+        result = getattr(module, "compare_v7_and_v8_2")(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify(result), 200
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "message": "v8.2 A/B quality failed",
+            "error": repr(exc),
+        }), 200
+
+
 @app.route(
     "/prepare_market_prediction_shadow_model",
     methods=["GET", "POST"],
@@ -1611,7 +2210,7 @@ def prepare_market_prediction_shadow_model_route():
     started = time.perf_counter()
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_3_release_gate"
+            "services.market_prediction_shadow_service_v1_4_warmup_safe"
         )
         prepare_fn = getattr(module, "prepare_shadow_model")
         result = prepare_fn(
@@ -1682,7 +2281,7 @@ def market_prediction_shadow_snapshot_route():
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_3_release_gate"
+            "services.market_prediction_shadow_service_v1_4_warmup_safe"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1754,6 +2353,8 @@ def _shadow_result_summary(result: Any) -> dict[str, Any]:
             "horizon_ts",
             "prediction_allowed",
             "freshness_status",
+            "skipped",
+            "skip_reason",
             "persist",
             "settlement",
             "seconds",
@@ -1780,7 +2381,7 @@ def _run_market_prediction_shadow_async(
 
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_3_release_gate"
+            "services.market_prediction_shadow_service_v1_4_warmup_safe"
         )
         predict_fn = getattr(module, "predict_market_shadow")
         result = predict_fn(
@@ -1998,7 +2599,7 @@ def market_prediction_shadow_quality_route():
     ).strip() or None
     try:
         module = importlib.import_module(
-            "services.market_prediction_shadow_service_v1_3_release_gate"
+            "services.market_prediction_shadow_service_v1_4_warmup_safe"
         )
         evaluate_fn = getattr(module, "evaluate_shadow_history")
         result = evaluate_fn(
