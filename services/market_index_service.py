@@ -30,11 +30,17 @@ from utils.chart_style import (
     AXIS_TICK_FONTSIZE,
     CHART_BACKGROUND,
     DEFAULT_CANDLE_WIDTH,
-    FIGURE_SIZES,
     HIGH_LOW_FONTSIZE,
+    UNIFIED_KLINE_STYLE_VERSION,
+    add_moving_averages,
     annotate_visible_high_low,
     apply_axis_style,
     configure_chart_font,
+    draw_candles,
+    draw_moving_average_lines,
+    draw_volume_bars,
+    get_kline_display_rows,
+    get_kline_preset,
     hide_chart_spines,
     set_price_axis_to_visible_high_low,
 )
@@ -60,15 +66,10 @@ except Exception:
 MARKET_INDEX_CONTRACT_FIX_VERSION = "2026-07-16-v2-IX0001-YAHOO-SNAPSHOT-FALLBACK"
 MARKET_INDEX_SNAPSHOT_FIX_VERSION = "2026-07-16-v2-IND-ZERO-SNAPSHOT-FALLBACK"
 MARKET_INDEX_1M_HISTORY_VERSION = "2026-07-21-v2-SHIOAJI-FINMIND-MERGE"
-MARKET_INDEX_MA_VERSION = "2026-07-27-v2.2-MA-CENTERED-3-2"
-MARKET_INDEX_MA_PERIODS = (5, 12, 30, 66, 120)
-MARKET_INDEX_MA_STYLES = {
-    "MA5": ("#111111", 1.2),
-    "MA12": ("#1F77B4", 1.2),
-    "MA30": ("#D62728", 1.2),
-    "MA66": ("#FF7F0E", 1.2),
-    "MA120": ("#9467BD", 1.2),
-}
+MARKET_INDEX_MA_VERSION = "2026-07-28-v2.3-MA-5-12-22-30-66-120"
+MARKET_INDEX_KLINE_PRESET = get_kline_preset("market_index")
+MARKET_INDEX_MA_PERIODS = tuple(MARKET_INDEX_KLINE_PRESET["ma_periods"])
+MARKET_INDEX_MA_STYLES = dict(MARKET_INDEX_KLINE_PRESET["ma_styles"])
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_INDEX_TIMEOUT_SECONDS = float(
     os.getenv("FINMIND_INDEX_TIMEOUT_SECONDS", "8")
@@ -1817,19 +1818,15 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
     _setup_chinese_font()
 
-    work_df = df.copy()
-
-    # 用完整資料先算均線
-    for period in MARKET_INDEX_MA_PERIODS:
-        work_df[f"MA{period}"] = (
-            work_df["Close"]
-            .astype(float)
-            .rolling(period, min_periods=1)
-            .mean()
-        )
+    work_df = add_moving_averages(
+        df,
+        MARKET_INDEX_MA_PERIODS,
+    )
 
     # 顯示最近約 3 個月
-    plot_df = work_df.tail(60).copy()
+    plot_df = work_df.tail(
+        get_kline_display_rows("market_index", "D")
+    ).copy()
 
     if plot_df.empty:
         return ""
@@ -1840,17 +1837,32 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
 
     ma5 = _fmt_index_ma_value(latest.get("MA5"))
     ma12 = _fmt_index_ma_value(latest.get("MA12"))
+    ma22 = _fmt_index_ma_value(latest.get("MA22"))
     ma30 = _fmt_index_ma_value(latest.get("MA30"))
     ma66 = _fmt_index_ma_value(latest.get("MA66"))
     ma120 = _fmt_index_ma_value(latest.get("MA120"))
 
-    fig = plt.figure(figsize=FIGURE_SIZES["market_index"], dpi=130, facecolor="white")
+    _debug(
+        "generate kline",
+        "| version =", MARKET_INDEX_MA_VERSION,
+        "| style_version =", UNIFIED_KLINE_STYLE_VERSION,
+        "| latest_date =", latest_date,
+        "| latest_close =", latest_close,
+        "| ma_periods =", MARKET_INDEX_MA_PERIODS,
+        "| rows =", len(plot_df),
+    )
+
+    fig = plt.figure(
+        figsize=MARKET_INDEX_KLINE_PRESET["figure_size"],
+        dpi=int(MARKET_INDEX_KLINE_PRESET["dpi"]),
+        facecolor="white",
+    )
 
     # 上方資訊區 + K線 + 成交量
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[1.0, 3.5, 1.15],
+        height_ratios=MARKET_INDEX_KLINE_PRESET["height_ratios"],
         hspace=0.05,
     )
 
@@ -1862,76 +1874,42 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     ax_info.set_facecolor("white")
     ax_info.axis("off")
 
-    # 第一排 MA
-    ax_info.text(
-        0.16,
-        0.46,
-        f"MA5 {ma5}",
-        fontsize=15,
-        fontweight="bold",
-        color="#111111",
-        ha="center",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.50,
-        0.46,
-        f"MA12 {ma12}",
-        fontsize=15,
-        fontweight="bold",
-        color="#1F77B4",
-        ha="center",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.84,
-        0.46,
-        f"MA30 {ma30}",
-        fontsize=15,
-        fontweight="bold",
-        color="#D62728",
-        ha="center",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-
-    # 第二排 MA
-    ax_info.text(
-        0.33,
-        0.12,
-        f"MA66 {ma66}",
-        fontsize=15,
-        fontweight="bold",
-        color="#FF7F0E",
-        ha="center",
-        va="center",
-        transform=ax_info.transAxes,
-    )
-    ax_info.text(
-        0.67,
-        0.12,
-        f"MA120 {ma120}",
-        fontsize=15,
-        fontweight="bold",
-        color="#9467BD",
-        ha="center",
-        va="center",
-        transform=ax_info.transAxes,
-    )
+    # 六組 MA 固定為 3 欄 × 2 排，避免文字忽左忽右。
+    ma_values = {
+        "MA5": ma5,
+        "MA12": ma12,
+        "MA22": ma22,
+        "MA30": ma30,
+        "MA66": ma66,
+        "MA120": ma120,
+    }
+    ma_positions = [
+        ("MA5", 0.16, 0.53),
+        ("MA12", 0.50, 0.53),
+        ("MA22", 0.84, 0.53),
+        ("MA30", 0.16, 0.15),
+        ("MA66", 0.50, 0.15),
+        ("MA120", 0.84, 0.15),
+    ]
+    info_fontsize = int(MARKET_INDEX_KLINE_PRESET["info_ma_fontsize"])
+    for ma_name, x_pos, y_pos in ma_positions:
+        line_color = MARKET_INDEX_MA_STYLES[ma_name][0]
+        ax_info.text(
+            x_pos,
+            y_pos,
+            f"{ma_name} {ma_values[ma_name]}",
+            fontsize=info_fontsize,
+            fontweight="bold",
+            color=line_color,
+            ha="center",
+            va="center",
+            transform=ax_info.transAxes,
+        )
 
     # ========= K線區 =========
     ax_k.set_facecolor(CHART_BACKGROUND)
     ax_v.set_facecolor(CHART_BACKGROUND)
 
-    x_values = list(range(len(plot_df)))
-    candle_width = DEFAULT_CANDLE_WIDTH
-
-    open_values = pd.to_numeric(plot_df["Open"], errors="coerce").astype(float).values
-    high_values = pd.to_numeric(plot_df["High"], errors="coerce").astype(float).values
-    low_values = pd.to_numeric(plot_df["Low"], errors="coerce").astype(float).values
-    close_values = pd.to_numeric(plot_df["Close"], errors="coerce").astype(float).values
     volume_values = (
         pd.to_numeric(plot_df["Volume"], errors="coerce")
         .fillna(0)
@@ -1939,55 +1917,24 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
         .values
     )
 
-    candle_colors = [
-        "#FF2D2D" if close_price >= open_price else "#00B050"
-        for open_price, close_price in zip(open_values, close_values)
-    ]
-
-    body_bottom = [
-        min(open_price, close_price)
-        for open_price, close_price in zip(open_values, close_values)
-    ]
-    body_height = [
-        max(abs(close_price - open_price), 0.01)
-        for open_price, close_price in zip(open_values, close_values)
-    ]
-
-    # 一次建立整組 artists，避免 60 根 K 棒逐根呼叫造成額外開銷。
-    ax_k.vlines(
-        x_values,
-        low_values,
-        high_values,
-        linewidth=1.0,
-        colors=candle_colors,
+    x_values, candle_colors = draw_candles(
+        ax_k,
+        plot_df,
+        candle_width=DEFAULT_CANDLE_WIDTH,
     )
-
-    ax_k.bar(
-        x_values,
-        body_height,
-        bottom=body_bottom,
-        width=candle_width,
-        color=candle_colors,
-        align="center",
-    )
-
-    ax_v.bar(
-        x_values,
+    draw_volume_bars(
+        ax_v,
         volume_values,
-        width=candle_width,
-        color=candle_colors,
-        align="center",
+        candle_colors,
+        x_values=x_values,
+        candle_width=DEFAULT_CANDLE_WIDTH,
     )
-
-    # 均線
-    for col, (line_color, linewidth) in MARKET_INDEX_MA_STYLES.items():
-        if col in plot_df.columns:
-            ax_k.plot(
-                x_values,
-                plot_df[col].values,
-                linewidth=linewidth,
-                color=line_color,
-            )
+    draw_moving_average_lines(
+        ax_k,
+        plot_df,
+        MARKET_INDEX_MA_STYLES,
+        x_values=x_values,
+    )
 
     # 大盤 K 線同樣以畫面可見最高／最低作為價格軸上下緣，並顯示精確軸值。
     set_price_axis_to_visible_high_low(
@@ -2028,18 +1975,12 @@ def _generate_market_index_kline_chart(df: pd.DataFrame) -> str:
     _hide_top_right_spines(ax_v)
 
     # 固定留白比 tight_layout 更穩定，也少一次 layout 計算。
-    fig.subplots_adjust(
-        left=0.08,
-        right=0.97,
-        top=0.97,
-        bottom=0.075,
-        hspace=0.05,
-    )
+    fig.subplots_adjust(**MARKET_INDEX_KLINE_PRESET["subplots_adjust"])
 
     try:
         return publish_figure(
             fig,
-            "taiex_market_index_kline_ma_5_12_30_66_120",
+            "taiex_market_index_kline_ma_5_12_22_30_66_120",
         )
     finally:
         plt.close(fig)
