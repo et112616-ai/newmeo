@@ -22,10 +22,17 @@ from utils.chart_style import (
     HIGH_LOW_FONTSIZE,
     INTRADAY_VOLUME_ALPHA,
     INTRADAY_VOLUME_WIDTH_RATIO,
+    UNIFIED_KLINE_STYLE_VERSION,
+    add_moving_averages,
     annotate_visible_high_low,
     apply_axis_style,
     configure_chart_font,
+    draw_candles,
+    draw_moving_average_lines,
+    draw_volume_bars,
     format_price,
+    get_kline_display_rows,
+    get_kline_preset,
     hide_chart_spines,
     set_price_axis_to_visible_high_low,
 )
@@ -36,12 +43,13 @@ plt.rcParams["axes.unicode_minus"] = False
 
 INTRADAY_AXIS_FIX_VERSION = "2026-07-20-v3-ACTUAL-DAY-EXTREMA"
 INTRADAY_VOLUME_FIX_VERSION = "2026-07-16-v1-COMPACT-5M-VOLUME"
-KLINE_DISPLAY_FIX_VERSION = "2026-07-24-v5-WEEKLY-LOW0-LARGE-INFO"
+KLINE_DISPLAY_FIX_VERSION = "2026-07-28-v6-UNIFIED-KLINE-STYLE"
+STOCK_KLINE_PRESET = get_kline_preset("stock")
 
 # LINE 會把 960px 圖表縮到 Flex 卡片寬度；15pt 在手機上仍過小。
 # 保持原本兩行配置與行距，只放大文字本身。
-KLINE_INFO_MA_FONTSIZE = 21
-KLINE_INFO_OHLC_FONTSIZE = 18
+KLINE_INFO_MA_FONTSIZE = int(STOCK_KLINE_PRESET["info_ma_fontsize"])
+KLINE_INFO_OHLC_FONTSIZE = int(STOCK_KLINE_PRESET["info_ohlc_fontsize"])
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
@@ -685,7 +693,7 @@ def generate_instant_chart(df: pd.DataFrame, stock_id: str, stock_name: str) -> 
     _hide_top_right_spines(ax)
     _hide_top_right_spines(ax_v)
 
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.98, bottom=0.085, hspace=0.09)
+    fig.subplots_adjust(**STOCK_KLINE_PRESET["subplots_adjust"])
 
     try:
         image_url = publish_figure(fig, f"{stock_id}_instant")
@@ -910,6 +918,7 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     print(
         "DEBUG kline display active",
         "| version =", KLINE_DISPLAY_FIX_VERSION,
+        "| style_version =", UNIFIED_KLINE_STYLE_VERSION,
         "| stock_id =", stock_id,
         "| tf =", tf,
         "| source_rows =", len(df),
@@ -927,20 +936,12 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     # min_periods 用完整 period，避免資料不足時硬算出失真的 MA。
     close_for_ma = pd.to_numeric(work_df["Close"], errors="coerce")
 
-    for period in [5, 10, 20, 60, 120, 240]:
-        work_df[f"MA{period}"] = close_for_ma.rolling(
-            period,
-            min_periods=period,
-        ).mean()
-
-    if tf == "D":
-        plot_df = work_df.tail(60).copy()
-    elif tf == "W":
-        plot_df = work_df.tail(80).copy()
-    elif tf == "M":
-        plot_df = work_df.tail(80).copy()
-    else:
-        plot_df = work_df.tail(60).copy()
+    work_df = add_moving_averages(
+        work_df,
+        STOCK_KLINE_PRESET["ma_periods"],
+    )
+    display_rows = get_kline_display_rows("stock", tf)
+    plot_df = work_df.tail(display_rows).copy()
 
     if plot_df.empty:
         return ""
@@ -1017,11 +1018,15 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         except Exception:
             return "--"
 
-    fig = plt.figure(figsize=FIGURE_SIZES["stock_kline"], dpi=132, facecolor="white")
+    fig = plt.figure(
+        figsize=STOCK_KLINE_PRESET["figure_size"],
+        dpi=int(STOCK_KLINE_PRESET["dpi"]),
+        facecolor="white",
+    )
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[1.02, 3.32, 1.08],
+        height_ratios=STOCK_KLINE_PRESET["height_ratios"],
         hspace=0.09,
     )
 
@@ -1034,14 +1039,29 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     font_kwargs = _get_font_kwargs_safe()
 
-    ax_info.text(0.00, 0.52, f"5MA {_fmt_ma(ma5)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#111111", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.28, 0.52, f"20MA {_fmt_ma(ma20)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#1F77B4", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.56, 0.52, f"60MA {_fmt_ma(ma60)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#FF7F0E", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
-    ax_info.text(0.00, 0.20, f"120MA {_fmt_ma(ma120)}", fontsize=KLINE_INFO_MA_FONTSIZE, fontweight="bold", color="#9467BD", ha="left", va="center", transform=ax_info.transAxes, **font_kwargs)
+    ma_info_items = [
+        ("5MA", ma5, "#111111", 0.125),
+        ("20MA", ma20, "#1F77B4", 0.375),
+        ("60MA", ma60, "#FF7F0E", 0.625),
+        ("120MA", ma120, "#9467BD", 0.875),
+    ]
+    for ma_label, ma_value, ma_color, x_pos in ma_info_items:
+        ax_info.text(
+            x_pos,
+            0.56,
+            f"{ma_label} {_fmt_ma(ma_value)}",
+            fontsize=KLINE_INFO_MA_FONTSIZE,
+            fontweight="bold",
+            color=ma_color,
+            ha="center",
+            va="center",
+            transform=ax_info.transAxes,
+            **font_kwargs,
+        )
 
     ax_info.text(
-        0.35,
-        0.20,
+        0.00,
+        0.16,
         f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
         fontsize=KLINE_INFO_OHLC_FONTSIZE,
         color="#444444",
@@ -1054,41 +1074,28 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     ax_k.set_facecolor(CHART_BACKGROUND)
     ax_v.set_facecolor(CHART_BACKGROUND)
 
-    x_values = list(range(len(plot_df)))
-    candle_width = DEFAULT_CANDLE_WIDTH
-
-    for i in range(len(plot_df)):
-        row = plot_df.iloc[i]
-
-        open_price = float(row["Open"])
-        high_price = float(row["High"])
-        low_price = float(row["Low"])
-        close_price = float(row["Close"])
-        volume = _to_lots(row["Volume"], volume_unit)
-
-        color = "#FF2D2D" if close_price >= open_price else "#00B050"
-
-        ax_k.vlines(i, low_price, high_price, linewidth=1.0, color=color)
-
-        lower = min(open_price, close_price)
-        height = abs(close_price - open_price)
-
-        if height <= 0:
-            height = 0.01
-
-        ax_k.bar(i, height, bottom=lower, width=candle_width, color=color, align="center")
-        ax_v.bar(i, volume, width=candle_width, color=color, align="center")
-
-    ma_styles = {
-        "MA5": ("#111111", 1.2),
-        "MA20": ("#1F77B4", 1.2),
-        "MA60": ("#FF7F0E", 1.2),
-        "MA120": ("#9467BD", 1.2),
-    }
-
-    for col, (line_color, linewidth) in ma_styles.items():
-        if col in plot_df.columns:
-            ax_k.plot(x_values, plot_df[col].values, linewidth=linewidth, color=line_color)
+    x_values, candle_colors = draw_candles(
+        ax_k,
+        plot_df,
+        candle_width=DEFAULT_CANDLE_WIDTH,
+    )
+    plot_volume_lots = [
+        _to_lots(value, volume_unit)
+        for value in plot_df["Volume"].tolist()
+    ]
+    draw_volume_bars(
+        ax_v,
+        plot_volume_lots,
+        candle_colors,
+        x_values=x_values,
+        candle_width=DEFAULT_CANDLE_WIDTH,
+    )
+    draw_moving_average_lines(
+        ax_k,
+        plot_df,
+        STOCK_KLINE_PRESET["ma_styles"],
+        x_values=x_values,
+    )
 
     # K 線價格軸上下緣固定為畫面可見 K 棒的最高／最低，並強制加入 Y 軸刻度。
     ax_k.margins(x=0.025, y=0)
