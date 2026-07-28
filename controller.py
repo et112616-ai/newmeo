@@ -19,6 +19,9 @@ POST_MARKET_COMPARISON_VERSION = (
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
     "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
 )
+PE_RIVER_DISPLAY_TEXT_VERSION = (
+    "2026-07-28-v6.6-PE-RIVER-DISPLAY-TEXT"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -6289,11 +6292,13 @@ def _pe_river_button_row(stock_id: str, active: bool = False) -> dict[str, Any]:
                 label="財務",
                 data=f"{stock_id},financial,financial,D",
                 active=not active,
+                display_text=f"{stock_id} 財務",
             ),
             _postback_button(
                 label="河流圖",
                 data=f"{stock_id},pe_river,financial,D",
                 active=active,
+                display_text=f"{stock_id} 河流圖",
             ),
         ],
     }
