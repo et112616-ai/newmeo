@@ -1,5 +1,5 @@
 # Deploy as: services/supabase_service.py
-# Version: 2026-07-24-v4-SHADOW-PREDICTION
+# Version: 2026-07-28-v5-DAILY-INDEX-CONTRIBUTION
 from __future__ import annotations
 
 from datetime import datetime
@@ -355,6 +355,104 @@ def get_market_contribution_history(
             flush=True,
         )
         return []
+
+
+def upsert_market_index_contribution_daily_rows(
+    rows: list[dict[str, Any]],
+    batch_size: int = 20,
+) -> dict[str, Any]:
+    """保存上市／上櫃每日盤後正負貢獻排行。"""
+    client = get_supabase_client()
+    if client is None:
+        return {
+            "success": False,
+            "rows": 0,
+            "message": "Supabase client unavailable",
+        }
+    clean_rows = [
+        dict(row)
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("trade_date")
+        and str(row.get("market_scope") or "") in {"tse", "otc"}
+    ]
+    if not clean_rows:
+        return {
+            "success": True,
+            "rows": 0,
+            "batches": 0,
+            "message": "no rows",
+        }
+    safe_batch_size = max(1, min(int(batch_size or 20), 100))
+    written = 0
+    batches = 0
+    try:
+        for offset in range(0, len(clean_rows), safe_batch_size):
+            batch = clean_rows[offset : offset + safe_batch_size]
+            for row in batch:
+                row["updated_at"] = datetime.utcnow().isoformat()
+            client.table("market_index_contribution_daily").upsert(
+                batch,
+                on_conflict="trade_date,market_scope",
+            ).execute()
+            written += len(batch)
+            batches += 1
+        return {
+            "success": True,
+            "rows": written,
+            "batches": batches,
+            "message": "ok",
+        }
+    except Exception as exc:
+        print(
+            "upsert_market_index_contribution_daily_rows failed:"
+            f" written={written}, total={len(clean_rows)},"
+            f" error={exc}",
+            flush=True,
+        )
+        return {
+            "success": False,
+            "rows": written,
+            "batches": batches,
+            "message": repr(exc),
+        }
+
+
+def get_latest_market_index_contribution_daily(
+    market_scope: str,
+    trade_date: str | None = None,
+) -> dict[str, Any]:
+    """取得指定市場最近一筆已保存的盤後貢獻，不讀盤中1分鐘特徵表。"""
+    scope = str(market_scope or "").strip().lower()
+    if scope not in {"tse", "otc"}:
+        return {}
+    client = get_supabase_client()
+    if client is None:
+        return {}
+    try:
+        query = (
+            client.table("market_index_contribution_daily")
+            .select("*")
+            .eq("market_scope", scope)
+        )
+        if trade_date:
+            query = query.eq("trade_date", str(trade_date))
+        response = (
+            query.order("trade_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return rows[0]
+    except Exception as exc:
+        print(
+            "get_latest_market_index_contribution_daily failed:"
+            f" market_scope={scope}, trade_date={trade_date},"
+            f" error={exc}",
+            flush=True,
+        )
+    return {}
 
 
 def upsert_market_prediction_model_artifact(
