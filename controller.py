@@ -28,6 +28,9 @@ FINANCIAL_RIVER_VISUAL_VERSION = (
 POST_MARKET_CARD_ALIGNMENT_VERSION = (
     "2026-07-28-v6.8-POST-MARKET-CARD-ALIGNMENT"
 )
+POST_MARKET_OUTER_CARD_VERSION = (
+    "2026-07-28-v6.9-POST-MARKET-OUTER-CARD"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -3546,7 +3549,7 @@ def _time_buttons(stock_id: str, active_mode: str, current_tf: str) -> dict[str,
 def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]:
     mode = _normalize_action(active_mode)
     items = [
-        ("短線（5日）", "post_market_short"),
+        ("短線5日", "post_market_short"),
         ("隔日沖", "post_market_daytrade"),
     ]
     return {
@@ -3559,8 +3562,8 @@ def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]
                 label=label,
                 data=f"{stock_id},{action_name},{action_name},D",
                 active=mode == action_name,
-                display_text=f"{stock_id} {label}",
-                height="46px",
+                display_text=f"{stock_id} 盤後分析 {label}",
+                height="40px",
                 text_size="sm",
                 corner_radius="12px",
             )
@@ -5217,9 +5220,9 @@ def _build_chart_flex(
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
     if active_mode_norm == "post_market_short":
-        context_badge = "短線"
+        context_badge = "短線 1/2"
     elif active_mode_norm == "post_market_daytrade":
-        context_badge = "隔日"
+        context_badge = "隔日 2/2"
     else:
         context_badge = card_context_badge(active_mode_norm, tf_norm)
 
@@ -5358,7 +5361,14 @@ def _build_chart_flex(
                 "size": "full",
                 "aspectRatio": image_aspect_ratio,
                 "aspectMode": "fit",
-                "margin": "md",
+                "margin": (
+                    "sm"
+                    if active_mode_norm in {
+                        "post_market_short",
+                        "post_market_daytrade",
+                    }
+                    else "md"
+                ),
                 "backgroundColor": "#FFFFFF",
             }
         )
@@ -8629,6 +8639,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             print(
                 "DEBUG stock timing post_market",
                 "| version =", POST_MARKET_COMPARISON_VERSION,
+                "| outer_card_version =", POST_MARKET_OUTER_CARD_VERSION,
                 "| stock_id =", meta.stock_id,
                 "| rows =", 0 if df_for_post is None else len(df_for_post),
                 "| daytrade_ratio =", daytrade_ratio,
@@ -8650,7 +8661,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 current_tf="D",
                 image_aspect_ratio="1:1",
                 price_source="daily_history",
-                show_period_buttons=False,
+                show_period_buttons=True,
             )
             daytrade_flex = _build_chart_flex(
                 stock_id=meta.stock_id,
@@ -8664,7 +8675,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 current_tf="D",
                 image_aspect_ratio="1:1",
                 price_source="daily_history",
-                show_period_buttons=False,
+                show_period_buttons=True,
             )
 
             carousel = {
