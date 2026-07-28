@@ -21,12 +21,15 @@ from utils.chart_style import (
     AXIS_TICK_FONTSIZE,
     CHART_BACKGROUND,
     DEFAULT_CANDLE_WIDTH,
-    FIGURE_SIZES,
     HIGH_LOW_FONTSIZE,
+    UNIFIED_KLINE_STYLE_VERSION,
     annotate_visible_high_low,
     apply_axis_style,
     configure_chart_font,
+    draw_candles,
     format_price,
+    get_kline_display_rows,
+    get_kline_preset,
     hide_chart_spines,
     set_price_axis_to_visible_high_low,
 )
@@ -39,6 +42,8 @@ except Exception:
 
 
 MARKET_FUTURE_KLINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+MARKET_FUTURE_KLINE_VERSION = "2026-07-28-v2-UNIFIED-KLINE-STYLE"
+MARKET_FUTURE_KLINE_PRESET = get_kline_preset("market_future")
 
 TTL_MAP = {
     "1m": 30,
@@ -444,12 +449,15 @@ def _add_bollinger(df: pd.DataFrame) -> pd.DataFrame:
 
     close = pd.to_numeric(work["Close"], errors="coerce")
 
-    mid = close.rolling(20, min_periods=20).mean()
-    std = close.rolling(20, min_periods=20).std(ddof=0)
+    period = int(MARKET_FUTURE_KLINE_PRESET["bollinger_period"])
+    std_multiple = float(MARKET_FUTURE_KLINE_PRESET["bollinger_std"])
+
+    mid = close.rolling(period, min_periods=period).mean()
+    std = close.rolling(period, min_periods=period).std(ddof=0)
 
     work["BB_MID"] = mid
-    work["BB_UPPER"] = mid + 2 * std
-    work["BB_LOWER"] = mid - 2 * std
+    work["BB_UPPER"] = mid + std_multiple * std
+    work["BB_LOWER"] = mid - std_multiple * std
 
     return work
 
@@ -471,7 +479,8 @@ def _draw_market_future_bollinger_chart(
     label = _tf_label(tf)
 
     work = _add_bollinger(df)
-    plot_df = work.tail(max(30, int(rows))).copy()
+    preset_rows = get_kline_display_rows("market_future", tf)
+    plot_df = work.tail(max(30, min(int(rows), preset_rows))).copy()
 
     if plot_df.empty:
         return "", {}
@@ -486,66 +495,33 @@ def _draw_market_future_bollinger_chart(
     font_kwargs = _font_kwargs()
 
     # 單圖：刪除成交量副圖，降低高度，讓 K 線更清楚。
-    fig = plt.figure(figsize=FIGURE_SIZES["market_future"], dpi=118, facecolor="white")
+    fig = plt.figure(
+        figsize=MARKET_FUTURE_KLINE_PRESET["figure_size"],
+        dpi=int(MARKET_FUTURE_KLINE_PRESET["dpi"]),
+        facecolor="white",
+    )
 
     # 上方預留空間放「現價 / BB」
-    ax_k = fig.add_axes([0.08, 0.14, 0.88, 0.72])
+    ax_k = fig.add_axes(MARKET_FUTURE_KLINE_PRESET["axes_rect"])
     ax_k.set_facecolor(CHART_BACKGROUND)
 
-    x_values = list(range(len(plot_df)))
-    candle_width = DEFAULT_CANDLE_WIDTH
-
-    for i, (_, row) in enumerate(plot_df.iterrows()):
-        o = _safe_float(row.get("Open"))
-        h = _safe_float(row.get("High"))
-        l = _safe_float(row.get("Low"))
-        c = _safe_float(row.get("Close"))
-
-        color = "#FF2D2D" if c >= o else "#00B050"
-
-        ax_k.vlines(i, l, h, linewidth=0.9, color=color, zorder=2)
-
-        lower = min(o, c)
-        height = abs(c - o)
-
-        if height <= 0:
-            height = 0.01
-
-        ax_k.bar(
-            i,
-            height,
-            bottom=lower,
-            width=candle_width,
-            color=color,
-            edgecolor=color,
-            align="center",
-            zorder=3,
-        )
+    x_values, _candle_colors = draw_candles(
+        ax_k,
+        plot_df,
+        candle_width=DEFAULT_CANDLE_WIDTH,
+    )
 
     # 布林通道
-    ax_k.plot(
-        x_values,
-        plot_df["BB_UPPER"].values,
-        linewidth=1.25,
-        color="#D32F2F",
-        zorder=4,
-    )
-
-    ax_k.plot(
-        x_values,
-        plot_df["BB_MID"].values,
-        linewidth=1.15,
-        color="#333333",
-        zorder=4,
-    )
-
-    ax_k.plot(
-        x_values,
-        plot_df["BB_LOWER"].values,
-        linewidth=1.25,
-        color="#00A84F",
-        zorder=4,
-    )
+    for column, (line_color, linewidth) in (
+        MARKET_FUTURE_KLINE_PRESET["bollinger_styles"].items()
+    ):
+        ax_k.plot(
+            x_values,
+            plot_df[column].values,
+            linewidth=float(linewidth),
+            color=line_color,
+            zorder=4,
+        )
 
     # 價格軸上下緣精確等於可見 K 棒最高／最低，兩值也會出現在 Y 軸刻度。
     set_price_axis_to_visible_high_low(
@@ -570,9 +546,10 @@ def _draw_market_future_bollinger_chart(
         f"BB下 {_fmt_price(bb_lower)}"
     )
 
+    header_x, header_y = MARKET_FUTURE_KLINE_PRESET["header_position"]
     fig.text(
-        0.08,
-        0.94,
+        header_x,
+        header_y,
         bb_text,
         ha="left",
         va="top",
@@ -615,6 +592,15 @@ def _draw_market_future_bollinger_chart(
     _hide_top_right_spines(ax_k)
 
     image_key = f"TXF_bollinger_{tf}_{rows}_{int(time.time() // TTL_MAP.get(tf, 60))}"
+
+    _debug(
+        "draw chart",
+        "| version =", MARKET_FUTURE_KLINE_VERSION,
+        "| style_version =", UNIFIED_KLINE_STYLE_VERSION,
+        "| tf =", tf,
+        "| rows =", len(plot_df),
+        "| bb_period =", MARKET_FUTURE_KLINE_PRESET["bollinger_period"],
+    )
 
     try:
         image_url = publish_figure(fig, image_key) or ""
