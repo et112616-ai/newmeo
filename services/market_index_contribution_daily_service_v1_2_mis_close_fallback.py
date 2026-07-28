@@ -15,7 +15,7 @@ from services.supabase_service import upsert_market_index_contribution_daily_row
 
 
 MARKET_INDEX_CONTRIBUTION_VERSION = (
-    "2026-07-28-v1.1-CROSS-MARKET-DATE-GUARD"
+    "2026-07-28-v1.2-TWSE-MIS-CLOSE-FALLBACK"
 )
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 HTTP_TIMEOUT_SECONDS = max(
@@ -50,6 +50,9 @@ TWSE_DAILY_PRICE_URL = (
 TWSE_DAILY_INDEX_URL = (
     "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
 )
+TWSE_MIS_QUOTE_URL = (
+    "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+)
 TPEX_DAILY_QUOTES_URL = (
     "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 )
@@ -64,6 +67,30 @@ _HTTP.headers.update(
         "User-Agent": "Mozilla/5.0 market-index-contribution/1.0",
         "Accept": "application/json,text/plain,*/*",
     }
+)
+TWSE_MIS_BATCH_SIZE = max(
+    20,
+    min(
+        int(
+            os.getenv(
+                "MARKET_INDEX_CONTRIBUTION_MIS_BATCH_SIZE",
+                "120",
+            )
+        ),
+        120,
+    ),
+)
+TWSE_MIS_WORKERS = max(
+    2,
+    min(
+        int(
+            os.getenv(
+                "MARKET_INDEX_CONTRIBUTION_MIS_WORKERS",
+                "8",
+            )
+        ),
+        8,
+    ),
 )
 
 
@@ -144,33 +171,134 @@ def _request_rows(url: str) -> list[dict[str, Any]]:
     return []
 
 
+def _request_mis_quotes(ex_ch: str) -> list[dict[str, Any]]:
+    response = _HTTP.get(
+        TWSE_MIS_QUOTE_URL,
+        params={
+            "ex_ch": ex_ch,
+            "json": "1",
+            "delay": "0",
+        },
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("msgArray") if isinstance(payload, dict) else []
+    return [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _fetch_tse_mis_index() -> dict[str, Any]:
+    rows = _request_mis_quotes("tse_t00.tw")
+    if not rows:
+        return {}
+    raw = rows[0]
+    close = _safe_float(raw.get("z"))
+    previous_close = _safe_float(raw.get("y"))
+    trade_date = _iso_trade_date(raw.get("d"))
+    if close <= 0 or previous_close <= 0 or not trade_date:
+        return {}
+    return {
+        "trade_date": trade_date,
+        "close": close,
+        "previous_close": previous_close,
+        "change": close - previous_close,
+        "quote_time": str(raw.get("t") or ""),
+    }
+
+
+def _fetch_tse_mis_stocks(
+    stock_ids: list[str],
+    trade_date: str,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    unique_ids = list(dict.fromkeys(
+        stock_id
+        for stock_id in stock_ids
+        if re.fullmatch(r"\d{4}", stock_id)
+    ))
+    batches = [
+        unique_ids[index:index + TWSE_MIS_BATCH_SIZE]
+        for index in range(0, len(unique_ids), TWSE_MIS_BATCH_SIZE)
+    ]
+    quotes: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+
+    def fetch_batch(batch: list[str]) -> list[dict[str, Any]]:
+        ex_ch = "|".join(f"tse_{stock_id}.tw" for stock_id in batch)
+        return _request_mis_quotes(ex_ch)
+
+    with ThreadPoolExecutor(
+        max_workers=min(TWSE_MIS_WORKERS, max(1, len(batches)))
+    ) as executor:
+        futures = {
+            executor.submit(fetch_batch, batch): batch
+            for batch in batches
+        }
+        for future in as_completed(futures):
+            batch = futures[future]
+            try:
+                rows = future.result()
+            except Exception as exc:
+                errors.append(
+                    f"{batch[0]}-{batch[-1]}: {repr(exc)}"
+                )
+                continue
+            for raw in rows:
+                stock_id = str(raw.get("c") or "").strip()
+                if not re.fullmatch(r"\d{4}", stock_id):
+                    continue
+                if _iso_trade_date(raw.get("d")) != trade_date:
+                    continue
+                previous_close = _safe_float(raw.get("y"))
+                close = _safe_float(raw.get("z"))
+                # 無成交或暫停交易時 z 可能為「-」；以前收 y 視為當日平盤。
+                if close <= 0:
+                    close = previous_close
+                if close <= 0 or previous_close <= 0:
+                    continue
+                quotes[stock_id] = {
+                    "stock_name": str(raw.get("n") or "").strip(),
+                    "close": close,
+                    "previous_close": previous_close,
+                    "change": close - previous_close,
+                    "quote_time": str(raw.get("t") or ""),
+                }
+    return quotes, errors
+
+
 def _fetch_all_sources(
     scopes: set[str],
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
-    urls: dict[str, str] = {}
+    tasks: dict[str, tuple[Any, str]] = {}
     if "tse" in scopes:
-        urls.update(
+        tasks.update(
             {
-                "tse_company": TWSE_COMPANY_URL,
-                "tse_price": TWSE_DAILY_PRICE_URL,
-                "tse_index": TWSE_DAILY_INDEX_URL,
+                "tse_company": (_request_rows, TWSE_COMPANY_URL),
+                # 盤後貢獻優先採MIS正式收盤；OpenAPI每日檔常延後發布。
+                "tse_mis_index": (_request_mis_quotes, "tse_t00.tw"),
             }
         )
     if "otc" in scopes:
-        urls.update(
+        tasks.update(
             {
-                "otc_quote": TPEX_DAILY_QUOTES_URL,
-                "otc_market_value": TPEX_DAILY_MARKET_VALUE_URL,
-                "otc_index": TPEX_DAILY_INDEX_URL,
+                "otc_quote": (_request_rows, TPEX_DAILY_QUOTES_URL),
+                "otc_market_value": (
+                    _request_rows,
+                    TPEX_DAILY_MARKET_VALUE_URL,
+                ),
+                "otc_index": (_request_rows, TPEX_DAILY_INDEX_URL),
             }
         )
 
     rows_by_key: dict[str, list[dict[str, Any]]] = {}
     errors: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=min(6, len(urls))) as executor:
+    with ThreadPoolExecutor(max_workers=min(6, len(tasks))) as executor:
         futures = {
-            executor.submit(_request_rows, url): key
-            for key, url in urls.items()
+            executor.submit(function, value): key
+            for key, (function, value) in tasks.items()
         }
         for future in as_completed(futures):
             key = futures[future]
@@ -180,6 +308,27 @@ def _fetch_all_sources(
                 rows_by_key[key] = []
                 errors[key] = repr(exc)
     return rows_by_key, errors
+
+
+def _fetch_tse_openapi_daily() -> dict[str, list[dict[str, Any]]]:
+    """MIS不可用時才讀取較慢、且可能延後發布的每日OpenAPI。"""
+    sources = {
+        "tse_price": TWSE_DAILY_PRICE_URL,
+        "tse_index": TWSE_DAILY_INDEX_URL,
+    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_request_rows, url): key
+            for key, url in sources.items()
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                result[key] = future.result()
+            except Exception:
+                result[key] = []
+    return result
 
 
 def _latest_row(
@@ -375,6 +524,24 @@ def _build_tse(
     rows_by_key: dict[str, list[dict[str, Any]]],
     requested_date: str,
 ) -> dict[str, Any]:
+    mis_rows = rows_by_key.get("tse_mis_index", [])
+    mis_index: dict[str, Any] = {}
+    if mis_rows:
+        raw = mis_rows[0]
+        mis_close = _safe_float(raw.get("z"))
+        mis_previous_close = _safe_float(raw.get("y"))
+        mis_date = _iso_trade_date(raw.get("d"))
+        if mis_close > 0 and mis_previous_close > 0 and mis_date:
+            mis_index = {
+                "trade_date": mis_date,
+                "close": mis_close,
+                "previous_close": mis_previous_close,
+                "change": mis_close - mis_previous_close,
+                "quote_time": str(raw.get("t") or ""),
+            }
+    # 正常盤後直接採MIS；只有MIS無資料時才退回每日OpenAPI。
+    if not mis_index:
+        rows_by_key.update(_fetch_tse_openapi_daily())
     index_row, index_date = _latest_row(
         rows_by_key.get("tse_index", []),
         ("Date", "日期"),
@@ -383,14 +550,25 @@ def _build_tse(
         rows_by_key.get("tse_price", []),
         ("Date", "日期"),
     )
-    trade_date = min(
+    openapi_trade_date = min(
         value for value in (index_date, price_date) if value
     ) if index_date and price_date else ""
+    mis_index_error = ""
+    mis_trade_date = str(mis_index.get("trade_date") or "")
+    use_mis_fallback = bool(
+        mis_trade_date
+    )
+    trade_date = (
+        mis_trade_date
+        if use_mis_fallback
+        else openapi_trade_date
+    )
     if not trade_date:
         return {
             "ok": False,
             "market_scope": "tse",
             "message": "證交所每日行情或指數日期不足",
+            "mis_index_error": mis_index_error,
         }
     if requested_date and requested_date != trade_date:
         return {
@@ -426,50 +604,96 @@ def _build_tse(
         }
 
     candidates: list[dict[str, Any]] = []
-    for row in rows_by_key.get("tse_price", []):
-        if _iso_trade_date(_pick(row, "Date", "日期")) != trade_date:
-            continue
-        stock_id = str(
-            _pick(row, "Code", "證券代號", "公司代號") or ""
-        ).strip()
-        company = shares_map.get(stock_id)
-        if company is None:
-            continue
-        close = _safe_float(
-            _pick(row, "ClosingPrice", "收盤價", "Close")
+    mis_stock_errors: list[str] = []
+    if use_mis_fallback:
+        mis_quotes, mis_stock_errors = _fetch_tse_mis_stocks(
+            list(shares_map),
+            trade_date,
         )
-        change = _safe_float(_pick(row, "Change", "漲跌價差"))
-        previous_close = close - change
-        if close <= 0 or previous_close <= 0:
-            continue
-        shares = _safe_float(company.get("shares"))
-        candidates.append(
-            {
-                "stock_id": stock_id,
-                "stock_name": str(
-                    _pick(row, "Name", "證券名稱")
-                    or company.get("stock_name")
-                    or stock_id
-                ).strip(),
-                "close_price": close,
-                "previous_close": previous_close,
-                "change": change,
-                "return_pct": change / previous_close * 100.0,
-                "previous_market_cap": previous_close * shares,
-            }
+        for stock_id, company in shares_map.items():
+            quote = mis_quotes.get(stock_id)
+            if quote is None:
+                continue
+            close = _safe_float(quote.get("close"))
+            previous_close = _safe_float(quote.get("previous_close"))
+            change = close - previous_close
+            shares = _safe_float(company.get("shares"))
+            candidates.append(
+                {
+                    "stock_id": stock_id,
+                    "stock_name": str(
+                        quote.get("stock_name")
+                        or company.get("stock_name")
+                        or stock_id
+                    ).strip(),
+                    "close_price": close,
+                    "previous_close": previous_close,
+                    "change": change,
+                    "return_pct": change / previous_close * 100.0,
+                    "previous_market_cap": previous_close * shares,
+                }
+            )
+        index_close = _safe_float(mis_index.get("close"))
+        index_change = _safe_float(mis_index.get("change"))
+        source = (
+            "TWSE_MIS_ALL_STOCK_QUOTES+t187ap03_L+"
+            "TWSE_MIS_tse_t00.tw"
         )
-
-    index_close = _safe_float(_pick(index_row, "TAIEX", "收盤指數"))
-    index_change = _safe_float(_pick(index_row, "Change", "漲跌點數"))
-    return _finalize_market(
+    else:
+        for row in rows_by_key.get("tse_price", []):
+            if _iso_trade_date(_pick(row, "Date", "日期")) != trade_date:
+                continue
+            stock_id = str(
+                _pick(row, "Code", "證券代號", "公司代號") or ""
+            ).strip()
+            company = shares_map.get(stock_id)
+            if company is None:
+                continue
+            close = _safe_float(
+                _pick(row, "ClosingPrice", "收盤價", "Close")
+            )
+            change = _safe_float(_pick(row, "Change", "漲跌價差"))
+            previous_close = close - change
+            if close <= 0 or previous_close <= 0:
+                continue
+            shares = _safe_float(company.get("shares"))
+            candidates.append(
+                {
+                    "stock_id": stock_id,
+                    "stock_name": str(
+                        _pick(row, "Name", "證券名稱")
+                        or company.get("stock_name")
+                        or stock_id
+                    ).strip(),
+                    "close_price": close,
+                    "previous_close": previous_close,
+                    "change": change,
+                    "return_pct": change / previous_close * 100.0,
+                    "previous_market_cap": previous_close * shares,
+                }
+            )
+        index_close = _safe_float(_pick(index_row, "TAIEX", "收盤指數"))
+        index_change = _safe_float(_pick(index_row, "Change", "漲跌點數"))
+        source = "TWSE_OPENAPI_STOCK_DAY_ALL+t187ap03_L+FMTQIK"
+    result = _finalize_market(
         trade_date=trade_date,
         market_scope="tse",
         index_name="發行量加權股價指數",
         index_close=index_close,
         index_change=index_change,
         candidates=candidates,
-        source="TWSE_OPENAPI_STOCK_DAY_ALL+t187ap03_L+FMTQIK",
+        source=source,
     )
+    result["source_dates"] = {
+        "openapi": openapi_trade_date,
+        "mis": mis_trade_date,
+    }
+    result["used_mis_fallback"] = use_mis_fallback
+    if mis_index_error:
+        result["mis_index_error"] = mis_index_error
+    if mis_stock_errors:
+        result["mis_stock_batch_errors"] = mis_stock_errors
+    return result
 
 
 def _build_otc(
