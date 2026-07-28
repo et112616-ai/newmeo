@@ -26,7 +26,7 @@ os.environ.setdefault(
 )
 
 APP_BUILD_VERSION = (
-    "2026-07-28-v3.8.1-CROSS-MARKET-DATE-GUARD"
+    "2026-07-28-v3.8.2-TWSE-MIS-CLOSE-FALLBACK"
 )
 APP_STARTED_TS = time.time()
 
@@ -1211,7 +1211,7 @@ def sync_market_index_contribution_daily_route():
         }), 200
     try:
         module = importlib.import_module(
-            "services.market_index_contribution_daily_service_v1"
+            "services.market_index_contribution_daily_service_v1_2_mis_close_fallback"
         )
         build_fn = getattr(
             module,
