@@ -25,7 +25,9 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parent / ".mplconfig"),
 )
 
-APP_BUILD_VERSION = "2026-07-28-v3.7-V8.2.1-WARMUP-SAFE"
+APP_BUILD_VERSION = (
+    "2026-07-28-v3.8-DAILY-TSE-OTC-CONTRIBUTION"
+)
 APP_STARTED_TS = time.time()
 
 print(
@@ -42,6 +44,7 @@ from services.market_future_service import get_market_future_snapshot
 _MARKET_INDEX_FN = None
 _MARKET_INDEX_IMPORT_LOCK = threading.Lock()
 _MARKET_CONTRIBUTION_ROUTE_LOCK = threading.Lock()
+_MARKET_INDEX_CONTRIBUTION_DAILY_LOCK = threading.Lock()
 _MARKET_PREDICTION_SHADOW_LOCK = threading.Lock()
 _MARKET_PREDICTION_SHADOW_JOB_STATE_LOCK = threading.Lock()
 _MARKET_PREDICTION_SHADOW_JOB_STATE: dict[str, Any] = {
@@ -1174,6 +1177,89 @@ def sync_market_weights_route():
             "message": "market weight sync failed",
             "error": repr(exc),
         }), 500
+
+
+@app.route(
+    "/sync_market_index_contribution_daily",
+    methods=["GET", "POST"],
+)
+def sync_market_index_contribution_daily_route():
+    """每日盤後建立上市／上櫃正負指數貢獻排行。"""
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+    trade_date = str(
+        request.args.get("trade_date", "") or ""
+    ).strip() or None
+    market_scope = str(
+        request.args.get("market_scope", "all") or "all"
+    ).strip().lower()
+    persist = str(
+        request.args.get("persist", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    started = time.perf_counter()
+    lock_acquired = _MARKET_INDEX_CONTRIBUTION_DAILY_LOCK.acquire(
+        blocking=False
+    )
+    if not lock_acquired:
+        return jsonify({
+            "ok": True,
+            "skipped": True,
+            "skip_reason": "daily_contribution_already_running",
+            "message": "已有每日盤後貢獻同步正在執行，本次略過",
+            "version": APP_BUILD_VERSION,
+            "seconds": round(time.perf_counter() - started, 3),
+        }), 200
+    try:
+        module = importlib.import_module(
+            "services.market_index_contribution_daily_service_v1"
+        )
+        build_fn = getattr(
+            module,
+            "build_daily_market_index_contributions",
+        )
+        result = build_fn(
+            trade_date=trade_date,
+            market_scope=market_scope,
+            persist=persist,
+        )
+        markets = result.get("markets") or {}
+        print(
+            "MARKET_INDEX_CONTRIBUTION_DAILY_ROUTE",
+            "| ok =", result.get("ok"),
+            "| partial =", result.get("partial"),
+            "| scope =", market_scope,
+            "| tse_date =",
+            (markets.get("tse") or {}).get("trade_date"),
+            "| otc_date =",
+            (markets.get("otc") or {}).get("trade_date"),
+            "| persisted =",
+            (result.get("persist") or {}).get("success"),
+            "| sec =", round(time.perf_counter() - started, 3),
+            flush=True,
+        )
+        # 部分市場完成仍以200回覆，避免Make把可用成果誤判為DataError。
+        status_code = (
+            200
+            if result.get("ok") or result.get("partial")
+            else 422
+        )
+        return jsonify(result), status_code
+    except Exception as exc:
+        print(
+            "MARKET_INDEX_CONTRIBUTION_DAILY_ROUTE failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "daily market contribution sync failed",
+            "error": repr(exc),
+            "version": APP_BUILD_VERSION,
+        }), 500
+    finally:
+        if lock_acquired:
+            _MARKET_INDEX_CONTRIBUTION_DAILY_LOCK.release()
 
 
 @app.route("/market_contribution_snapshot", methods=["GET", "POST"])
