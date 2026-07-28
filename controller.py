@@ -14,13 +14,19 @@ ALL_CARD_FRESHNESS_VERSION = "2026-07-17-v2-STOCK-MARKET-FUTURES-FRESHNESS"
 MARKET_MARGIN_SWITCH_VERSION = "2026-07-23-v5-TPEX-MARGIN-MONEY"
 STOCK_FLEX_RESILIENT_VERSION = "2026-07-24-v1-STOCK-CARD-RESILIENT"
 POST_MARKET_COMPARISON_VERSION = (
-    "2026-07-27-v2.4-LINE-VISUAL-CLARITY"
+    "2026-07-28-v2.5-CARD-ALIGNMENT"
 )
 MARKET_PREDICTION_RELEASE_GATE_VERSION = (
     "2026-07-27-v1.1-LINE-PREDICTION-CARD-CLARITY"
 )
 PE_RIVER_DISPLAY_TEXT_VERSION = (
     "2026-07-28-v6.6-PE-RIVER-DISPLAY-TEXT"
+)
+FINANCIAL_RIVER_VISUAL_VERSION = (
+    "2026-07-28-v6.7-FINANCIAL-RIVER-VISUAL"
+)
+POST_MARKET_CARD_ALIGNMENT_VERSION = (
+    "2026-07-28-v6.8-POST-MARKET-CARD-ALIGNMENT"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -40,7 +46,7 @@ from services.sinopac_quote_service import (
 )
 from services.market_margin_service import get_market_margin_snapshot
 from services.financial_service import get_financial_snapshot
-from services.afterhours_analysis_service_v2_4_visual_clarity import (
+from services.afterhours_analysis_service_v2_5_card_alignment import (
     generate_post_market_analysis_chart,
 )
 from services.broker_branch_service import get_top_broker_branches
@@ -6192,11 +6198,38 @@ def _financial_color(value) -> str:
     return "#666666"
 
 
+def _financial_tint(value) -> str:
+    num = _financial_float(value)
+
+    if num > 0:
+        return "#FFF3F3"
+
+    if num < 0:
+        return "#F0FBF5"
+
+    return "#F8F9FA"
+
+
+def _pe_zone_style(zone_label: str) -> tuple[str, str]:
+    zone = str(zone_label or "").strip()
+
+    if zone in {"低估區", "偏低區", "合理偏低"}:
+        return "#EAF8F0", "#079455"
+
+    if zone in {"偏高區", "高估區", "極高區"}:
+        return "#FFF1F1", "#D92D20"
+
+    return "#FFF9E8", "#B77900"
+
+
 def _financial_metric_box(
     title: str,
     value: str,
     sub_value: str = "",
     value_color: str = "#111111",
+    background_color: str = "#F8F9FA",
+    value_size: str = "lg",
+    flex: int = 1,
 ) -> dict[str, Any]:
     contents: list[dict[str, Any]] = [
         {
@@ -6209,7 +6242,7 @@ def _financial_metric_box(
         {
             "type": "text",
             "text": value,
-            "size": "lg",
+            "size": value_size,
             "weight": "bold",
             "color": value_color,
             "margin": "xs",
@@ -6232,7 +6265,8 @@ def _financial_metric_box(
     return {
         "type": "box",
         "layout": "vertical",
-        "backgroundColor": "#F8F9FA",
+        "flex": flex,
+        "backgroundColor": background_color,
         "cornerRadius": "12px",
         "paddingAll": "10px",
         "contents": contents,
@@ -6271,7 +6305,7 @@ def _financial_table_row(
         "cornerRadius": "6px" if is_header else "0px",
         "paddingAll": "5px" if is_header else "3px",
         "contents": [
-            cell(quarter, 2, align="start"),
+            cell(quarter, 3, align="start"),
             cell(eps, 2),
             cell(eps_change, 2, change_color if not is_header else text_color),
             cell(ttm_eps, 2),
@@ -6373,44 +6407,75 @@ def _build_pe_river_flex(
         }
 
     current_pe = float(getattr(snapshot, "current_pe", 0.0) or 0.0)
+    median_pe = float(getattr(snapshot, "median_pe", 0.0) or 0.0)
     latest_close = float(getattr(snapshot, "latest_close", 0.0) or 0.0)
     latest_ttm_eps = float(getattr(snapshot, "latest_ttm_eps", 0.0) or 0.0)
     latest_date = str(getattr(snapshot, "latest_date", "") or "--")
     zone_label = str(getattr(snapshot, "zone_label", "") or "--")
     levels = list(getattr(snapshot, "pe_levels", []) or [])
 
-    level_text = "--"
+    level_text_top = "--"
+    level_text_bottom = ""
 
     if len(levels) >= 6:
-        level_text = (
+        level_text_top = (
             f"10% {levels[0]:.1f}｜25% {levels[1]:.1f}｜"
-            f"40% {levels[2]:.1f}｜60% {levels[3]:.1f}｜"
-            f"75% {levels[4]:.1f}｜90% {levels[5]:.1f}"
+            f"40% {levels[2]:.1f}"
         )
+        level_text_bottom = (
+            f"60% {levels[3]:.1f}｜75% {levels[4]:.1f}｜"
+            f"90% {levels[5]:.1f}"
+        )
+
+    zone_bg, zone_color = _pe_zone_style(zone_label)
 
     contents.extend(
         [
             {
+                "type": "text",
+                "text": "估值摘要",
+                "size": "sm",
+                "weight": "bold",
+                "color": "#344054",
+                "margin": "md",
+            },
+            {
                 "type": "box",
                 "layout": "horizontal",
-                "spacing": "sm",
-                "margin": "md",
+                "spacing": "xs",
+                "margin": "sm",
                 "contents": [
                     _financial_metric_box(
                         "目前 PE",
                         f"{_fmt_pe_river_value(current_pe)} 倍",
-                        zone_label,
+                        f"股價 {_fmt_pe_river_value(latest_close)}",
+                        background_color="#F5F8FF",
+                        value_size="md",
                     ),
                     _financial_metric_box(
-                        "TTM EPS",
-                        _fmt_pe_river_value(latest_ttm_eps),
-                        f"股價 {_fmt_pe_river_value(latest_close)}",
+                        "中位 PE",
+                        (
+                            f"{_fmt_pe_river_value(median_pe)} 倍"
+                            if median_pe > 0
+                            else "--"
+                        ),
+                        "歷史 50%",
+                        background_color="#F5F8FF",
+                        value_size="md",
+                    ),
+                    _financial_metric_box(
+                        "估值位置",
+                        zone_label,
+                        f"TTM EPS {_fmt_pe_river_value(latest_ttm_eps)}",
+                        value_color=zone_color,
+                        background_color=zone_bg,
+                        value_size="md",
                     ),
                 ],
             },
             {
                 "type": "text",
-                "text": f"最新日期：{latest_date}",
+                "text": f"資料日期 {latest_date}",
                 "size": "xs",
                 "color": "#777777",
                 "wrap": True,
@@ -6427,7 +6492,7 @@ def _build_pe_river_flex(
                 "type": "image",
                 "url": chart_url,
                 "size": "full",
-                "aspectRatio": "16:10",
+                "aspectRatio": "7:5",
                 "aspectMode": "fit",
                 "margin": "md",
             }
@@ -6436,12 +6501,43 @@ def _build_pe_river_flex(
     contents.extend(
         [
             {
-                "type": "text",
-                "text": f"PE分位：{level_text}",
-                "size": "xs",
-                "color": "#666666",
-                "wrap": True,
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#F8FAFC",
+                "cornerRadius": "10px",
+                "paddingAll": "8px",
                 "margin": "md",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "歷史 PE 分位",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": "#475467",
+                    },
+                    {
+                        "type": "text",
+                        "text": level_text_top,
+                        "size": "xs",
+                        "color": "#667085",
+                        "wrap": True,
+                        "margin": "xs",
+                    },
+                    *(
+                        [
+                            {
+                                "type": "text",
+                                "text": level_text_bottom,
+                                "size": "xs",
+                                "color": "#667085",
+                                "wrap": True,
+                                "margin": "xs",
+                            }
+                        ]
+                        if level_text_bottom
+                        else []
+                    ),
+                ],
             },
             {
                 "type": "text",
@@ -6544,22 +6640,40 @@ def _build_financial_flex(
     contents.extend(
         [
             {
+                "type": "text",
+                "text": "核心估值",
+                "size": "sm",
+                "weight": "bold",
+                "color": "#344054",
+                "margin": "md",
+            },
+            {
                 "type": "box",
                 "layout": "horizontal",
                 "spacing": "sm",
-                "margin": "md",
+                "margin": "sm",
                 "contents": [
                     _financial_metric_box(
                         "近四季 EPS",
                         _financial_fmt(latest_ttm_eps),
                         getattr(snapshot, "latest_quarter", ""),
+                        background_color="#F5F8FF",
                     ),
                     _financial_metric_box(
                         "目前本益比",
                         f"{_financial_fmt(current_pe)} 倍" if current_pe > 0 else "--",
                         f"股價 {_financial_fmt(current_price)}",
+                        background_color="#F5F8FF",
                     ),
                 ],
+            },
+            {
+                "type": "text",
+                "text": "最新季度",
+                "size": "sm",
+                "weight": "bold",
+                "color": "#344054",
+                "margin": "md",
             },
             {
                 "type": "box",
@@ -6570,18 +6684,21 @@ def _build_financial_flex(
                     _financial_metric_box(
                         "最新單季 EPS",
                         _financial_fmt(latest_eps),
+                        getattr(snapshot, "latest_quarter", ""),
                     ),
                     _financial_metric_box(
                         "EPS QoQ",
                         _financial_signed(eps_change),
+                        "較前一季",
                         value_color=_financial_color(eps_change),
+                        background_color=_financial_tint(eps_change),
                     ),
                 ],
             },
             {"type": "separator", "margin": "md"},
             {
                 "type": "text",
-                "text": "近8季",
+                "text": "近8季明細",
                 "size": "md",
                 "weight": "bold",
                 "color": "#444444",
