@@ -17,7 +17,7 @@ from services.upload_service import publish_figure
 
 
 POST_MARKET_ANALYSIS_VERSION = (
-    "2026-07-27-v2.4-LINE-VISUAL-CLARITY"
+    "2026-07-28-v2.5-CARD-ALIGNMENT"
 )
 BASE_DIR = Path(__file__).resolve().parents[1]
 FONT_PATH = BASE_DIR / "assets" / "fonts" / "NotoSansTC-Regular.ttf"
@@ -648,16 +648,16 @@ def generate_post_market_analysis_chart(
     if mode == "daytrade":
         title = "隔日沖觀察｜次一交易日"
         rows = [
-            ("壓 2", _fmt_zone(levels["r2"]), "#C62828", ""),
-            ("壓 1", _fmt_zone(levels["r1"]), "#E53935", ""),
+            ("壓 2", _fmt_zone(levels["r2"]), "#C62828", "Pivot"),
+            ("壓 1", _fmt_zone(levels["r1"]), "#E53935", "Pivot"),
             (
                 "現 價",
                 _fmt_price(levels["close"]),
                 "#C69200",
                 levels["bias"]["label"],
             ),
-            ("撐 1", _fmt_zone(levels["s1"]), "#00A84F", ""),
-            ("撐 2", _fmt_zone(levels["s2"]), "#008C3A", ""),
+            ("撐 1", _fmt_zone(levels["s1"]), "#00A84F", "Pivot"),
+            ("撐 2", _fmt_zone(levels["s2"]), "#008C3A", "Pivot"),
         ]
     else:
         title = "短線支撐壓力｜未來 1–5 日"
@@ -692,8 +692,9 @@ def generate_post_market_analysis_chart(
     )
 
     row_backgrounds = ["#FFF3F3", "#FFF8F7", "#FFFBEA", "#F2FBF6", "#ECF8F1"]
-    y = 0.79
+    row_y_positions = [0.79, 0.675, 0.56, 0.445, 0.33]
     for row_index, (label, value, color, badge) in enumerate(rows):
+        y = row_y_positions[row_index]
         ax.add_patch(
             FancyBboxPatch(
                 (0.075, y - 0.068),
@@ -722,7 +723,7 @@ def generate_post_market_analysis_chart(
             color=color, va="center", ha="right", **font_kwargs,
         )
         ax.text(
-            0.34, y - 0.018, value, fontsize=23, fontweight="bold",
+            0.34, y - 0.018, value, fontsize=22, fontweight="bold",
             color="#111111", va="center", ha="left", **font_kwargs,
         )
         if badge:
@@ -731,21 +732,27 @@ def generate_post_market_analysis_chart(
                 if row_index == 2 and badge in {"偏強", "中性", "偏弱"}
                 else color
             )
+            badge_facecolor = "#FFFFFF" if badge != "Pivot" else "#F8FAFC"
+            ax.add_patch(
+                FancyBboxPatch(
+                    (0.805, y - 0.044),
+                    0.12,
+                    0.052,
+                    boxstyle="round,pad=0.004,rounding_size=0.012",
+                    linewidth=0.8,
+                    edgecolor=badge_color,
+                    facecolor=badge_facecolor,
+                    transform=ax.transAxes,
+                )
+            )
             ax.text(
-                0.875,
+                0.865,
                 y - 0.018,
                 badge,
-                fontsize=10.2 if len(str(badge)) >= 4 else 11.5,
+                fontsize=9.6 if len(str(badge)) >= 4 else 10.8,
                 fontweight="bold",
                 color=badge_color, va="center", ha="center", **font_kwargs,
-                bbox={
-                    "boxstyle": "round,pad=0.28",
-                    "facecolor": "#FFFFFF",
-                    "edgecolor": badge_color,
-                    "linewidth": 0.8,
-                },
             )
-        y -= 0.115
 
     if mode == "daytrade":
         if daytrade_ratio is not None:
@@ -772,6 +779,15 @@ def generate_post_market_analysis_chart(
         )
         footnote = "支撐壓力依 Pivot 推估；中間列統一顯示現價。"
     else:
+        ax.text(
+            0.5,
+            0.175,
+            "觀察期 1–5 日｜以資料日收盤價作為現價",
+            fontsize=12.2,
+            fontweight="bold",
+            color="#4B5563",
+            va="center", ha="center", **font_kwargs,
+        )
         comparison_note = (
             f"短線判讀 {levels['bias']['label']}｜"
             f"MA5 {_fmt_price(levels['bias']['ma5'])}｜"
