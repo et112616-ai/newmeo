@@ -30,7 +30,7 @@ from services.upload_service import publish_figure
 
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
-PE_RIVER_CHART_VERSION = "2026-07-24-v2-MOBILE-READABLE"
+PE_RIVER_CHART_VERSION = "2026-07-28-v3-FINANCIAL-SUMMARY"
 
 
 @dataclass
@@ -44,6 +44,7 @@ class PeRiverSnapshot:
     latest_close: float = 0.0
     latest_ttm_eps: float = 0.0
     current_pe: float = 0.0
+    median_pe: float = 0.0
     pe_levels: list[float] = field(default_factory=list)
     zone_label: str = ""
     source: str = "FinMind"
@@ -331,7 +332,7 @@ def _make_pe_river_chart(
 
     # LINE 圖卡會把圖片縮到約 300～360px 寬，因此保留原本長寬比，
     # 但移除卡片上已經出現的重複標題與圖例，讓真正的繪圖區放大。
-    fig, ax = plt.subplots(figsize=(9.6, 6.2), dpi=100, facecolor="white")
+    fig, ax = plt.subplots(figsize=(9.8, 7.0), dpi=100, facecolor="white")
     ax.set_facecolor("#FAFBFC")
 
     x = weekly.index
@@ -544,6 +545,7 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
 
     percentiles = [10, 25, 40, 60, 75, 90]
     levels = [round(float(np.percentile(merged["pe"].values, p)), 2) for p in percentiles]
+    median_pe = round(float(np.percentile(merged["pe"].values, 50)), 2)
 
     chart_df = merged.set_index("date")[["Close", "ttm_eps", "pe"]].copy()
     chart_df = chart_df.tail(int(os.getenv("PE_RIVER_MAX_WEEKS", "52")))
@@ -587,6 +589,8 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
         latest_ttm_eps,
         "| current_pe =",
         current_pe,
+        "| median_pe =",
+        median_pe,
         "| levels =",
         levels,
         "| chart_url =",
@@ -606,6 +610,7 @@ def get_pe_river_snapshot(stock_id: str, stock_name: str = "") -> PeRiverSnapsho
         latest_close=latest_close,
         latest_ttm_eps=latest_ttm_eps,
         current_pe=current_pe,
+        median_pe=median_pe,
         pe_levels=levels,
         zone_label=zone,
         rows_count=len(chart_df),
