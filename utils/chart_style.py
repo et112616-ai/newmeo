@@ -11,7 +11,7 @@ from matplotlib import font_manager
 
 
 # 所有個股、大盤、期貨圖表的共用視覺規格。
-UNIFIED_KLINE_STYLE_VERSION = "2026-07-28-v2-UNIFIED-KLINE-PRESETS"
+UNIFIED_KLINE_STYLE_VERSION = "2026-07-29-v3-STOCK-MARKET-SIX-MA"
 
 AXIS_TICK_FONTSIZE = 11
 HIGH_LOW_FONTSIZE = 12
@@ -52,7 +52,7 @@ KLINE_PRESETS: dict[str, dict[str, Any]] = {
     "stock": {
         "figure_size": FIGURE_SIZES["stock_kline"],
         "dpi": 132,
-        "height_ratios": (1.02, 3.32, 1.08),
+        "height_ratios": (1.32, 3.32, 1.08),
         "subplots_adjust": {
             "left": 0.10,
             "right": 0.97,
@@ -60,11 +60,13 @@ KLINE_PRESETS: dict[str, dict[str, Any]] = {
             "bottom": 0.085,
             "hspace": 0.09,
         },
-        "ma_periods": (5, 20, 60, 120),
+        "ma_periods": (5, 12, 22, 30, 66, 120),
         "ma_styles": {
             "MA5": ("#111111", 1.2),
-            "MA20": ("#1F77B4", 1.2),
-            "MA60": ("#FF7F0E", 1.2),
+            "MA12": ("#1F77B4", 1.2),
+            "MA22": ("#2CA02C", 1.2),
+            "MA30": ("#D62728", 1.2),
+            "MA66": ("#FF7F0E", 1.2),
             "MA120": ("#9467BD", 1.2),
         },
         "display_rows": {
@@ -78,7 +80,7 @@ KLINE_PRESETS: dict[str, dict[str, Any]] = {
             "M": 80,
             "default": 60,
         },
-        "info_ma_fontsize": 16,
+        "info_ma_fontsize": 15,
         "info_ohlc_fontsize": 16,
     },
     "market_index": {
