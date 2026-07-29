@@ -38,7 +38,7 @@ CONCEPT_PEER_CARD_VERSION = (
     "2026-07-29-v7.7-GROUP-TREND-BEFORE-COMPARISON"
 )
 MAIN_FORCE_CARD_VERSION = (
-    "2026-07-29-v7.8-WANTGOO-MAIN-FORCE-CARD"
+    "2026-07-29-v7.9-WANTGOO-DIV-TEXT-FALLBACK"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -10292,7 +10292,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_main_force0 = time.perf_counter()
 
             # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
-            from services.stock_main_force_service_v1 import (
+            from services.stock_main_force_service_v1_1 import (
                 get_stock_main_force_snapshot,
             )
 
