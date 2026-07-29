@@ -38,7 +38,7 @@ CONCEPT_PEER_CARD_VERSION = (
     "2026-07-29-v7.7-GROUP-TREND-BEFORE-COMPARISON"
 )
 MAIN_FORCE_CARD_VERSION = (
-    "2026-07-29-v8.0-WANTGOO-EMBEDDED-DATA"
+    "2026-07-29-v8.1-FUBON-BACKEND-DATA"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -296,7 +296,7 @@ def _normalize_action(action: str | None) -> str:
         "河流": "pe_river",
         "估值": "pe_river",
 
-        # 主力進出（玩股網券商分點彙總）
+        # 主力進出（富邦 eBroker 券商分點彙總）
         "main_force": "main_force",
         "mainforce": "main_force",
         "major_force": "main_force",
@@ -8571,8 +8571,16 @@ def _build_main_force_flex(
                         ),
                         metric_box(
                             "家數差",
-                            signed_integer(count_diff, " 家"),
-                            value_color(count_diff),
+                            (
+                                signed_integer(count_diff, " 家")
+                                if number(count_diff) is not None
+                                else "來源未提供"
+                            ),
+                            (
+                                value_color(count_diff)
+                                if number(count_diff) is not None
+                                else "#6B7280"
+                            ),
                         ),
                     ],
                 },
@@ -8632,7 +8640,21 @@ def _build_main_force_flex(
                 },
                 {
                     "type": "text",
-                    "text": "資料來源：玩股網｜盤後資料，僅供參考",
+                    "text": (
+                        "計算：主力買賣超＝前15大買超合計－前15大賣超合計；"
+                        "集中度＝近5／20日主力買賣超合計÷同期成交量合計。"
+                    ),
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "資料來源：富邦 eBroker｜家數差來源未提供；"
+                        "盤後資料，僅供參考"
+                    ),
                     "size": "xs",
                     "color": "#9CA3AF",
                     "wrap": True,
@@ -8660,7 +8682,7 @@ def _build_main_force_flex(
                 },
                 {
                     "type": "text",
-                    "text": "資料來源：玩股網",
+                    "text": "資料來源：富邦 eBroker",
                     "size": "xs",
                     "color": "#9CA3AF",
                     "margin": "md",
@@ -10292,13 +10314,27 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_main_force0 = time.perf_counter()
 
             # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
-            from services.stock_main_force_service_v1_2 import (
+            from services.stock_main_force_service_v1_3 import (
                 get_stock_main_force_snapshot,
             )
+
+            daily_history = None
+            try:
+                daily_history = get_history(meta, "D")
+                if isinstance(daily_history, tuple):
+                    daily_history = daily_history[0]
+            except Exception as history_exc:
+                print(
+                    "DEBUG stock_main_force | daily_history_failed",
+                    "| stock_id =", meta.stock_id,
+                    "| error =", repr(history_exc),
+                    flush=True,
+                )
 
             snapshot = get_stock_main_force_snapshot(
                 stock_id=meta.stock_id,
                 stock_name=stock_name,
+                daily_history=daily_history,
             )
             t_main_force1 = time.perf_counter()
             flex = _build_main_force_flex(
