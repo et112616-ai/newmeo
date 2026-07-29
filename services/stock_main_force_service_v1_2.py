@@ -14,8 +14,8 @@ import pandas as pd
 import requests
 
 
-MAIN_FORCE_SERVICE_VERSION = "2026-07-29-v1.1-WANTGOO-DIV-TEXT-FALLBACK"
-MAIN_FORCE_PARSER_MODE = "html_table_or_visible_text"
+MAIN_FORCE_SERVICE_VERSION = "2026-07-29-v1.2-WANTGOO-EMBEDDED-DATA"
+MAIN_FORCE_PARSER_MODE = "table_visible_text_or_embedded_data"
 WANTGOO_MAIN_TREND_URL = (
     "https://www.wantgoo.com/stock/{stock_id}/major-investors/main-trend"
 )
@@ -197,6 +197,173 @@ def _rows_from_visible_text(html_text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _normalized_embedded_source(html_text: str) -> str:
+    text = unescape(str(html_text or ""))
+    replacements = {
+        "\\/": "/",
+        "\\u002F": "/",
+        "\\u002f": "/",
+        "\\u002D": "-",
+        "\\u002d": "-",
+        "\\u0025": "%",
+        "\\u002B": "+",
+        "\\u002b": "+",
+        "－": "-",
+        "−": "-",
+        "＋": "+",
+        "\xa0": " ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _build_row(
+    date_value: Any,
+    close_value: Any,
+    net_value: Any,
+    count_value: Any,
+    concentration_5_value: Any,
+    concentration_20_value: Any,
+) -> dict[str, Any] | None:
+    trade_date = _normalize_date(date_value)
+    close_price = _to_float(close_value)
+    net_buy_sell = _to_float(net_value)
+    broker_count_diff = _to_float(count_value)
+    concentration_5d = _to_float(concentration_5_value)
+    concentration_20d = _to_float(concentration_20_value)
+    if not trade_date or close_price is None or net_buy_sell is None:
+        return None
+    if close_price <= 0:
+        return None
+    return {
+        "trade_date": trade_date,
+        "close_price": close_price,
+        "net_buy_sell": int(round(net_buy_sell)),
+        "broker_count_diff": (
+            int(round(broker_count_diff))
+            if broker_count_diff is not None
+            else None
+        ),
+        "concentration_5d": concentration_5d,
+        "concentration_20d": concentration_20d,
+    }
+
+
+def _rows_from_embedded_data(html_text: str) -> list[dict[str, Any]]:
+    source = _normalized_embedded_source(html_text)
+    number = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    quoted_number = rf"(?:[\"']\s*)?({number})(?:\s*%)?(?:\s*[\"'])?"
+    separator = r"\s*(?:,|\||;)\s*"
+
+    # 常見的 SSR / hydration 格式：
+    # ["2026/07/28",77.2,556,-72,1.45,-1.11]
+    array_pattern = re.compile(
+        rf"[\"'](?P<date>20\d{{2}}[/-]\d{{1,2}}[/-]\d{{1,2}})[\"']"
+        rf"{separator}{quoted_number}"
+        rf"{separator}{quoted_number}"
+        rf"{separator}{quoted_number}"
+        rf"{separator}{quoted_number}"
+        rf"{separator}{quoted_number}",
+        flags=re.MULTILINE,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for match in array_pattern.finditer(source):
+        groups = match.groups()
+        row = _build_row(
+            groups[0],
+            groups[1],
+            groups[2],
+            groups[3],
+            groups[4],
+            groups[5],
+        )
+        if row:
+            rows.append(row)
+
+    if rows:
+        return rows
+
+    # 若資料是物件或 minified hydration 字串，先鎖定主力表格標題之後，
+    # 再針對每個日期到下一個日期之間擷取數值。
+    main_title_positions = [
+        source.find("主力進出動向"),
+        source.find("5日集中"),
+    ]
+    main_title_positions = [value for value in main_title_positions if value >= 0]
+    start_at = min(main_title_positions) if main_title_positions else 0
+    section = source[start_at:]
+    formula_at = section.find("主力進出表格欄目計算公式")
+    if formula_at > 0:
+        section = section[:formula_at]
+
+    date_pattern = re.compile(r"20\d{2}[/-]\d{1,2}[/-]\d{1,2}")
+    date_matches = list(date_pattern.finditer(section))
+    value_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_])(?P<value>{number})"
+        rf"(?P<pct>\s*%)?(?![A-Za-z0-9_])"
+    )
+
+    for index, date_match in enumerate(date_matches):
+        next_start = (
+            date_matches[index + 1].start()
+            if index + 1 < len(date_matches)
+            else min(len(section), date_match.end() + 1200)
+        )
+        segment = section[date_match.end():next_start]
+        # 限制單列長度，避免跨到文章或其他報價資料。
+        segment = segment[:1200]
+        tokens = [
+            (token.group("value"), bool(token.group("pct")))
+            for token in value_pattern.finditer(segment)
+        ]
+        if len(tokens) < 5:
+            continue
+
+        percent_values = [value for value, is_pct in tokens if is_pct]
+        plain_values = [value for value, is_pct in tokens if not is_pct]
+
+        if len(percent_values) >= 2 and len(plain_values) >= 3:
+            row = _build_row(
+                date_match.group(0),
+                plain_values[0],
+                plain_values[1],
+                plain_values[2],
+                percent_values[0],
+                percent_values[1],
+            )
+        elif len(plain_values) >= 5:
+            row = _build_row(
+                date_match.group(0),
+                plain_values[0],
+                plain_values[1],
+                plain_values[2],
+                plain_values[3],
+                plain_values[4],
+            )
+        else:
+            row = None
+
+        if row:
+            rows.append(row)
+
+    return rows
+
+
+def _safe_date_context(html_text: str, max_chars: int = 700) -> str:
+    source = _normalized_embedded_source(html_text)
+    date_match = re.search(r"20\d{2}[/-]\d{1,2}[/-]\d{1,2}", source)
+    if not date_match:
+        return "no_date_token"
+    start = max(0, date_match.start() - 160)
+    end = min(len(source), date_match.end() + max_chars)
+    context = source[start:end]
+    context = re.sub(r"<[^>]+>", " ", context)
+    context = re.sub(r"\s+", " ", context).strip()
+    return context[:max_chars]
+
+
 def _parse_main_force_html(html_text: str) -> list[dict[str, Any]]:
     if not str(html_text or "").strip():
         return []
@@ -265,6 +432,8 @@ def _parse_main_force_html(html_text: str) -> list[dict[str, Any]]:
 
     if not parsed_rows:
         parsed_rows = _rows_from_visible_text(html_text)
+    if not parsed_rows:
+        parsed_rows = _rows_from_embedded_data(html_text)
 
     unique_rows: dict[str, dict[str, Any]] = {}
     for row in parsed_rows:
@@ -352,6 +521,11 @@ def get_stock_main_force_snapshot(
         )
         response.raise_for_status()
         rows = _parse_main_force_html(response.text)
+        debug_context = (
+            _safe_date_context(response.text)
+            if not rows
+            else ""
+        )
         if not rows:
             snapshot = MainForceSnapshot(
                 stock_id=normalized_id,
@@ -385,6 +559,7 @@ def get_stock_main_force_snapshot(
                 value in (response.text or "")
                 for value in ("收盤價", "買賣超", "家數差")
             ),
+            "| date_context =", repr(debug_context),
             "| rows =", len(snapshot.rows),
             "| latest_date =", snapshot.latest_date,
             "| available =", snapshot.available,
