@@ -35,7 +35,7 @@ MARKET_DAILY_CONTRIBUTION_CARD_VERSION = (
     "2026-07-28-v7.0-DAILY-TSE-OTC-CONTRIBUTION"
 )
 CONCEPT_PEER_CARD_VERSION = (
-    "2026-07-29-v7.6-PRIMARY-GROUPS-CMONEY-AUX-70PCT"
+    "2026-07-29-v7.7-GROUP-TREND-BEFORE-COMPARISON"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -8424,7 +8424,303 @@ def _build_concept_peer_flex(
             ],
         }
 
+    def compact_number(value: Any, digits: int = 2) -> str:
+        try:
+            numeric = float(value)
+            if abs(numeric) >= 1000:
+                return f"{numeric:,.0f}"
+            if abs(numeric) >= 100:
+                return f"{numeric:,.1f}"
+            return f"{numeric:,.{digits}f}"
+        except Exception:
+            return "--"
+
+    def compact_signed(value: Any) -> str:
+        try:
+            numeric = float(value)
+            if abs(numeric) >= 100:
+                return f"{numeric:+,.0f}"
+            return f"{numeric:+,.2f}"
+        except Exception:
+            return "--"
+
+    def compact_volume(value: Any) -> str:
+        try:
+            lots = max(float(value), 0.0)
+            if lots >= 10000:
+                return f"{lots / 10000:.1f}萬"
+            if lots >= 1000:
+                return f"{lots:,.0f}"
+            return f"{lots:,.0f}"
+        except Exception:
+            return "--"
+
+    def build_group_trend_bubble(
+        trend: dict[str, Any],
+    ) -> dict[str, Any]:
+        trend_rows = list(trend.get("rows") or [])
+        up_count = sum(
+            1
+            for row in trend_rows
+            if float(row.get("change") or 0.0) > 0
+        )
+        down_count = sum(
+            1
+            for row in trend_rows
+            if float(row.get("change") or 0.0) < 0
+        )
+        flat_count = max(len(trend_rows) - up_count - down_count, 0)
+
+        table_rows: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "backgroundColor": "#F3F4F6",
+                "cornerRadius": "8px",
+                "paddingAll": "6px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "代號／股名",
+                        "size": "xxs",
+                        "weight": "bold",
+                        "color": "#6B7280",
+                        "flex": 5,
+                    },
+                    {
+                        "type": "text",
+                        "text": "日K",
+                        "size": "xxs",
+                        "weight": "bold",
+                        "color": "#6B7280",
+                        "align": "end",
+                        "flex": 2,
+                    },
+                    {
+                        "type": "text",
+                        "text": "漲跌",
+                        "size": "xxs",
+                        "weight": "bold",
+                        "color": "#6B7280",
+                        "align": "end",
+                        "flex": 2,
+                    },
+                    {
+                        "type": "text",
+                        "text": "漲幅",
+                        "size": "xxs",
+                        "weight": "bold",
+                        "color": "#6B7280",
+                        "align": "end",
+                        "flex": 2,
+                    },
+                    {
+                        "type": "text",
+                        "text": "總量",
+                        "size": "xxs",
+                        "weight": "bold",
+                        "color": "#6B7280",
+                        "align": "end",
+                        "flex": 2,
+                    },
+                ],
+            }
+        ]
+        for row in trend_rows:
+            change_value = float(row.get("change") or 0.0)
+            change_pct = float(row.get("change_pct") or 0.0)
+            change_color = (
+                UP_COLOR
+                if change_value > 0
+                else DOWN_COLOR if change_value < 0 else FLAT_COLOR
+            )
+            is_target = bool(row.get("is_target"))
+            table_rows.append(
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "backgroundColor": (
+                        "#F5F3FF" if is_target else "#FFFFFF"
+                    ),
+                    "cornerRadius": "7px",
+                    "paddingAll": "6px",
+                    "margin": "xs",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"{row.get('stock_id') or '--'} "
+                                f"{row.get('stock_name') or ''}"
+                            ),
+                            "size": "xxs",
+                            "weight": "bold" if is_target else "regular",
+                            "color": (
+                                "#7C3AED" if is_target else "#111827"
+                            ),
+                            "flex": 5,
+                            "wrap": False,
+                        },
+                        {
+                            "type": "text",
+                            "text": compact_number(row.get("price")),
+                            "size": "xxs",
+                            "color": "#111827",
+                            "align": "end",
+                            "flex": 2,
+                        },
+                        {
+                            "type": "text",
+                            "text": compact_signed(change_value),
+                            "size": "xxs",
+                            "color": change_color,
+                            "align": "end",
+                            "flex": 2,
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{change_pct:+.2f}%",
+                            "size": "xxs",
+                            "color": change_color,
+                            "align": "end",
+                            "flex": 2,
+                        },
+                        {
+                            "type": "text",
+                            "text": compact_volume(
+                                row.get("volume_lots")
+                            ),
+                            "size": "xxs",
+                            "color": "#4B5563",
+                            "align": "end",
+                            "flex": 2,
+                        },
+                    ],
+                }
+            )
+
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{stock_id} {stock_name}",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                        "wrap": True,
+                    },
+                    context_badge(),
+                ],
+            },
+            {
+                "type": "text",
+                "text": "族群趨勢",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#374151",
+                "margin": "sm",
+            },
+            {
+                "type": "text",
+                "text": str(trend.get("group_name") or "主分類"),
+                "size": "md",
+                "weight": "bold",
+                "color": "#7C3AED",
+                "wrap": True,
+                "margin": "xs",
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "backgroundColor": "#F9FAFB",
+                "cornerRadius": "9px",
+                "paddingAll": "7px",
+                "margin": "sm",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"上漲 {up_count}",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": UP_COLOR,
+                        "align": "center",
+                        "flex": 1,
+                    },
+                    {
+                        "type": "text",
+                        "text": f"下跌 {down_count}",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": DOWN_COLOR,
+                        "align": "center",
+                        "flex": 1,
+                    },
+                    {
+                        "type": "text",
+                        "text": f"平盤 {flat_count}",
+                        "size": "xs",
+                        "weight": "bold",
+                        "color": FLAT_COLOR,
+                        "align": "center",
+                        "flex": 1,
+                    },
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "none",
+                "margin": "md",
+                "contents": table_rows,
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"資料日 {trend.get('data_date') or '--'}｜"
+                    "依漲跌%由高到低｜總量單位：張"
+                ),
+                "size": "xxs",
+                "color": "#9CA3AF",
+                "align": "center",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": (
+                    "族群趨勢列出主分類全部股票，不套用70%相似度門檻；"
+                    "價格、漲跌與總量均取最新日K。"
+                ),
+                "size": "xs",
+                "color": "#6B7280",
+                "align": "center",
+                "wrap": True,
+                "margin": "xs",
+            },
+        ]
+        contents.extend(_mode_buttons(stock_id, "peer_compare", current_tf))
+        return {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        }
+
     comparisons = list(result.get("comparisons") or [])
+    group_trends = list(result.get("group_trends") or [])
+    bubbles: list[dict[str, Any]] = [
+        build_group_trend_bubble(trend)
+        for trend in group_trends
+        if trend.get("rows")
+    ]
     if not bool(result.get("available")) or not comparisons:
         contents: list[dict[str, Any]] = [
             {
@@ -8475,23 +8771,32 @@ def _build_concept_peer_flex(
             },
         ]
         contents.extend(_mode_buttons(stock_id, "peer_compare", current_tf))
-        return {
-            "type": "flex",
-            "altText": f"{stock_id} {stock_name} 族群比較",
-            "contents": {
-                "type": "bubble",
-                "size": "mega",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "paddingAll": "14px",
-                    "spacing": "sm",
-                    "contents": contents,
-                },
+        unavailable_bubble = {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
             },
         }
+        bubbles.append(unavailable_bubble)
+        flex_contents: dict[str, Any]
+        if len(bubbles) == 1:
+            flex_contents = bubbles[0]
+        else:
+            flex_contents = {
+                "type": "carousel",
+                "contents": bubbles,
+            }
+        return {
+            "type": "flex",
+            "altText": f"{stock_id} {stock_name} 族群趨勢與比較",
+            "contents": flex_contents,
+        }
 
-    bubbles: list[dict[str, Any]] = []
     methodology = result.get("methodology") or {}
     window_days = int(methodology.get("window_days") or 240)
     minimum_similarity_pct = float(
@@ -8736,7 +9041,7 @@ def _build_concept_peer_flex(
 
     return {
         "type": "flex",
-        "altText": f"{stock_id} {stock_name} 族群比較",
+        "altText": f"{stock_id} {stock_name} 族群趨勢與比較",
         "contents": {
             "type": "carousel",
             "contents": bubbles,
@@ -9597,7 +9902,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_peer0 = time.perf_counter()
 
             # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
-            from services.stock_group_comparison_service_v5_primary70 import (
+            from services.stock_group_comparison_service_v5_1_group_trend import (
                 build_stock_group_comparison,
             )
 
