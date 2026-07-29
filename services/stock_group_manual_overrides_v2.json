@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "updated_at": "2026-07-29",
+  "source": "人工不定期維護",
+  "notes": [
+    "主分類增刪寫在 primary_groups；理財網輔助分類增刪寫在 auxiliary_groups。",
+    "anchor_peers 只改變候選計算順序，不可略過70%相似度門檻。"
+  ],
+  "primary_groups": {},
+  "auxiliary_groups": {},
+  "anchor_peers": {
+    "2327": ["2492"],
+    "2492": ["2327"]
+  }
+}
