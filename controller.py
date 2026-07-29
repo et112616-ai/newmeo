@@ -35,7 +35,7 @@ MARKET_DAILY_CONTRIBUTION_CARD_VERSION = (
     "2026-07-28-v7.0-DAILY-TSE-OTC-CONTRIBUTION"
 )
 CONCEPT_PEER_CARD_VERSION = (
-    "2026-07-29-v7.5-CMONEY-FULL-CATALOG"
+    "2026-07-29-v7.6-PRIMARY-GROUPS-CMONEY-AUX-70PCT"
 )
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
@@ -8303,7 +8303,7 @@ def _build_concept_peer_flex(
     stock_name: str,
     current_tf: str,
 ) -> dict[str, Any]:
-    """CMoney 概念族群同業比較；實際樣本窗由服務回傳。"""
+    """人工主分類優先、理財網輔助的族群比較。"""
 
     def number(value: Any, digits: int = 2) -> str:
         try:
@@ -8465,7 +8465,7 @@ def _build_concept_peer_flex(
             {
                 "type": "text",
                 "text": (
-                    "分類以 CMoney 概念股為主並保留人工覆寫；"
+                    "分類以人工整理主清單為準，理財網概念僅作補充；"
                     "未收錄不代表公司沒有相關題材。"
                 ),
                 "size": "xs",
@@ -8493,6 +8493,12 @@ def _build_concept_peer_flex(
 
     bubbles: list[dict[str, Any]] = []
     methodology = result.get("methodology") or {}
+    window_days = int(methodology.get("window_days") or 240)
+    minimum_similarity_pct = float(
+        methodology.get("minimum_similarity_pct")
+        or result.get("minimum_similarity_pct")
+        or 70
+    )
     for comparison in comparisons:
         peer_id = str(comparison.get("peer_id") or "")
         peer_name = str(comparison.get("peer_name") or peer_id)
@@ -8506,10 +8512,10 @@ def _build_concept_peer_flex(
         )
         similarity_color = (
             "#7C3AED"
-            if similarity >= 75
+            if similarity >= 80
             else (
                 "#2563EB"
-                if similarity >= 60
+                if similarity >= minimum_similarity_pct
                 else "#6B7280"
             )
         )
@@ -8567,7 +8573,7 @@ def _build_concept_peer_flex(
                         ratio_text(comparison.get("ratio_current")),
                     ),
                     metric_box(
-                        "60日均值",
+                        f"{window_days}日均值",
                         ratio_text(comparison.get("ratio_mean")),
                     ),
                 ],
@@ -8674,7 +8680,7 @@ def _build_concept_peer_flex(
                 {
                     "type": "text",
                     "text": (
-                        f"分類：{result.get('catalog_source') or 'CMoney 概念股'}"
+                        f"分類：{comparison.get('classification_source') or result.get('catalog_source') or '人工主分類'}"
                         f"｜人工維護 {result.get('catalog_updated_at') or '--'}"
                     ),
                     "size": "xs",
@@ -9591,7 +9597,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             t_peer0 = time.perf_counter()
 
             # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
-            from services.stock_group_comparison_service_v4_cmoney_full_catalog import (
+            from services.stock_group_comparison_service_v5_primary70 import (
                 build_stock_group_comparison,
             )
 
