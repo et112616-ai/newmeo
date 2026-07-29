@@ -37,6 +37,9 @@ MARKET_DAILY_CONTRIBUTION_CARD_VERSION = (
 CONCEPT_PEER_CARD_VERSION = (
     "2026-07-29-v7.7-GROUP-TREND-BEFORE-COMPARISON"
 )
+MAIN_FORCE_CARD_VERSION = (
+    "2026-07-29-v7.8-WANTGOO-MAIN-FORCE-CARD"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -292,6 +295,16 @@ def _normalize_action(action: str | None) -> str:
         "河流圖": "pe_river",
         "河流": "pe_river",
         "估值": "pe_river",
+
+        # 主力進出（玩股網券商分點彙總）
+        "main_force": "main_force",
+        "mainforce": "main_force",
+        "major_force": "main_force",
+        "major_trend": "main_force",
+        "主力": "main_force",
+        "主力進出": "main_force",
+        "主力籌碼": "main_force",
+        "主力買賣超": "main_force",
 
         # 概念族群比較
         "peer_compare": "peer_compare",
@@ -3846,7 +3859,10 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             ("期貨", "futures"),
             ("盤後分析", "post_market_short"),
         ],
-        [("族群比較", "peer_compare")],
+        [
+            ("主力進出", "main_force"),
+            ("族群比較", "peer_compare"),
+        ],
     ]
 
     def _target_tf_for(action_name: str) -> str:
@@ -3887,6 +3903,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
                         in {
                             "融資券",
                             "盤後分析",
+                            "主力進出",
                             "族群比較",
                         }
                         else "xs"
@@ -8297,6 +8314,379 @@ def _build_futures_flex(
     }
 
 
+def _build_main_force_flex(
+    stock_id: str,
+    stock_name: str,
+    snapshot,
+    current_tf: str = "D",
+) -> dict[str, Any]:
+    rows = list(getattr(snapshot, "rows", []) or [])
+    latest = rows[0] if rows else {}
+    latest_date = str(
+        getattr(snapshot, "latest_date", "")
+        or latest.get("trade_date")
+        or "--"
+    )
+    status_label = str(
+        getattr(snapshot, "status_label", "")
+        or "暫無判讀"
+    )
+    status_key = str(
+        getattr(snapshot, "status_key", "")
+        or "unknown"
+    )
+
+    status_style = {
+        "buy": ("#B91C1C", "#FEE2E2"),
+        "sell": ("#047857", "#D1FAE5"),
+        "divergence": ("#B45309", "#FEF3C7"),
+        "neutral": ("#6B7280", "#F3F4F6"),
+        "unknown": ("#6B7280", "#F3F4F6"),
+    }
+    status_color, status_background = status_style.get(
+        status_key,
+        status_style["unknown"],
+    )
+
+    def number(value) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(str(value).replace(",", "").replace("%", "").strip())
+        except Exception:
+            return None
+
+    def signed_integer(value, suffix: str = "") -> str:
+        parsed = number(value)
+        if parsed is None:
+            return "--"
+        text = f"{parsed:+,.0f}"
+        return f"{text}{suffix}"
+
+    def plain_price(value) -> str:
+        parsed = number(value)
+        if parsed is None:
+            return "--"
+        return f"{parsed:,.2f}"
+
+    def percentage(value, signed: bool = True) -> str:
+        parsed = number(value)
+        if parsed is None:
+            return "--"
+        return f"{parsed:+.2f}%" if signed else f"{parsed:.2f}%"
+
+    def value_color(value) -> str:
+        parsed = number(value)
+        if parsed is None or parsed == 0:
+            return "#6B7280"
+        return "#DC2626" if parsed > 0 else "#059669"
+
+    def short_date(value) -> str:
+        text = str(value or "--").strip()
+        if len(text) >= 10 and text[4:5] in {"-", "/"}:
+            return text[5:10].replace("-", "/")
+        return text
+
+    def badge() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": status_background,
+            "cornerRadius": "12px",
+            "paddingAll": "7px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": status_label,
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": status_color,
+                    "align": "center",
+                    "wrap": True,
+                }
+            ],
+        }
+
+    def metric_box(
+        label: str,
+        value_text: str,
+        color: str = "#111827",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#F8FAFC",
+            "cornerRadius": "12px",
+            "paddingAll": "10px",
+            "flex": 1,
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": value_text,
+                    "size": "md",
+                    "weight": "bold",
+                    "color": color,
+                    "margin": "xs",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def table_cell(
+        text: str,
+        flex: int,
+        *,
+        color: str = "#111827",
+        align: str = "end",
+        weight: str = "regular",
+    ) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "text": str(text),
+            "size": "xs",
+            "color": color,
+            "align": align,
+            "weight": weight,
+            "flex": flex,
+            "wrap": False,
+        }
+
+    def table_row(row: dict[str, Any], is_header: bool = False) -> dict[str, Any]:
+        if is_header:
+            values = ("日期", "收盤價", "買賣超", "5日集中")
+            colors = ("#4B5563",) * 4
+        else:
+            net_value = row.get("net_buy_sell")
+            concentration_value = row.get("concentration_5d")
+            values = (
+                short_date(row.get("trade_date")),
+                plain_price(row.get("close_price")),
+                signed_integer(net_value),
+                percentage(concentration_value),
+            )
+            colors = (
+                "#374151",
+                "#111827",
+                value_color(net_value),
+                value_color(concentration_value),
+            )
+
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "backgroundColor": "#EEF2F7" if is_header else "#FFFFFF",
+            "cornerRadius": "7px" if is_header else "0px",
+            "paddingAll": "5px",
+            "contents": [
+                table_cell(
+                    values[0],
+                    3,
+                    color=colors[0],
+                    align="start",
+                    weight="bold" if is_header else "regular",
+                ),
+                table_cell(
+                    values[1],
+                    3,
+                    color=colors[1],
+                    weight="bold" if is_header else "regular",
+                ),
+                table_cell(
+                    values[2],
+                    4,
+                    color=colors[2],
+                    weight="bold",
+                ),
+                table_cell(
+                    values[3],
+                    4,
+                    color=colors[3],
+                    weight="bold",
+                ),
+            ],
+        }
+
+    available = bool(getattr(snapshot, "available", False)) and bool(rows)
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "alignItems": "center",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{stock_id} {stock_name}",
+                    "size": "xxl",
+                    "weight": "bold",
+                    "color": "#111827",
+                    "flex": 1,
+                    "wrap": True,
+                },
+                badge(),
+            ],
+        },
+        {
+            "type": "text",
+            "text": "主力進出",
+            "size": "lg",
+            "weight": "bold",
+            "color": "#374151",
+            "margin": "sm",
+        },
+        {
+            "type": "text",
+            "text": f"最新日期：{latest_date}",
+            "size": "sm",
+            "color": "#6B7280",
+            "margin": "xs",
+        },
+    ]
+
+    if available:
+        net_buy_sell = latest.get("net_buy_sell")
+        count_diff = latest.get("broker_count_diff")
+        concentration_5d = latest.get("concentration_5d")
+        concentration_20d = latest.get("concentration_20d")
+
+        contents.extend(
+            [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        metric_box(
+                            "今日主力買賣超",
+                            signed_integer(net_buy_sell, " 張"),
+                            value_color(net_buy_sell),
+                        ),
+                        metric_box(
+                            "家數差",
+                            signed_integer(count_diff, " 家"),
+                            value_color(count_diff),
+                        ),
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "margin": "sm",
+                    "contents": [
+                        metric_box(
+                            "5日集中度",
+                            percentage(concentration_5d),
+                            value_color(concentration_5d),
+                        ),
+                        metric_box(
+                            "20日集中度",
+                            percentage(concentration_20d),
+                            value_color(concentration_20d),
+                        ),
+                    ],
+                },
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": "最近10日",
+                    "size": "md",
+                    "weight": "bold",
+                    "color": "#374151",
+                    "margin": "md",
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "none",
+                    "margin": "sm",
+                    "paddingAll": "5px",
+                    "backgroundColor": "#F8FAFC",
+                    "cornerRadius": "10px",
+                    "contents": [
+                        table_row({}, is_header=True),
+                        *[table_row(row) for row in rows[:10]],
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "判讀：今日買賣超與5日集中度同為正＝偏買；"
+                        "同為負＝偏賣；方向不同＝分歧。"
+                    ),
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": "資料來源：玩股網｜盤後資料，僅供參考",
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+            ]
+        )
+    else:
+        contents.extend(
+            [
+                {
+                    "type": "separator",
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": str(
+                        getattr(snapshot, "message", "")
+                        or "目前查無主力進出資料。"
+                    ),
+                    "size": "sm",
+                    "color": "#6B7280",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": "資料來源：玩股網",
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "margin": "md",
+                },
+            ]
+        )
+
+    contents.extend(_mode_buttons(stock_id, "main_force", current_tf))
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 主力進出",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "14px",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
+
 def _build_concept_peer_flex(
     result: dict[str, Any],
     stock_id: str,
@@ -9894,6 +10284,50 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             "| elapsed_sec =", round(time.perf_counter() - stock_t0, 3),
             flush=True,
         )
+
+        # -------------------------
+        # 1.7 主力進出
+        # -------------------------
+        if action == "main_force":
+            t_main_force0 = time.perf_counter()
+
+            # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
+            from services.stock_main_force_service_v1 import (
+                get_stock_main_force_snapshot,
+            )
+
+            snapshot = get_stock_main_force_snapshot(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+            )
+            t_main_force1 = time.perf_counter()
+            flex = _build_main_force_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                snapshot=snapshot,
+                current_tf=requested_tf,
+            )
+
+            print(
+                "DEBUG stock timing main_force",
+                "| version =", MAIN_FORCE_CARD_VERSION,
+                "| stock_id =", meta.stock_id,
+                "| available =", bool(
+                    getattr(snapshot, "available", False)
+                ),
+                "| latest_date =",
+                getattr(snapshot, "latest_date", ""),
+                "| rows =",
+                len(getattr(snapshot, "rows", []) or []),
+                "| data_sec =", round(t_main_force1 - t_main_force0, 3),
+                "| total_sec =",
+                round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+            return _reply_with_title(
+                f"{stock_name} 主力進出",
+                flex,
+            )
 
         # -------------------------
         # 1.8 概念族群比較
