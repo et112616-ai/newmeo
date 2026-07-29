@@ -34,6 +34,9 @@ POST_MARKET_OUTER_CARD_VERSION = (
 MARKET_DAILY_CONTRIBUTION_CARD_VERSION = (
     "2026-07-28-v7.0-DAILY-TSE-OTC-CONTRIBUTION"
 )
+CONCEPT_PEER_CARD_VERSION = (
+    "2026-07-29-v7.5-CMONEY-FULL-CATALOG"
+)
 INTRADAY_TIME_FRAMES = {"1m", "5m", "15m", "30m", "60m"}
 INTRADAY_RESAMPLE_RULES = {
     "1m": "",
@@ -289,6 +292,26 @@ def _normalize_action(action: str | None) -> str:
         "河流圖": "pe_river",
         "河流": "pe_river",
         "估值": "pe_river",
+
+        # 概念族群比較
+        "peer_compare": "peer_compare",
+        "peer_comparison": "peer_compare",
+        "concept_peer": "peer_compare",
+        "concept_compare": "peer_compare",
+        "同族群": "peer_compare",
+        "同族群比較": "peer_compare",
+        "族群": "peer_compare",
+        "族群比較": "peer_compare",
+        "概念族群": "peer_compare",
+        "概念比較": "peer_compare",
+        # 舊卡片相容：原有「雙刀／配對」postback 全部轉入族群比較。
+        "double_knife": "peer_compare",
+        "pair_trade": "peer_compare",
+        "pair_research": "peer_compare",
+        "雙刀": "peer_compare",
+        "雙刀研究": "peer_compare",
+        "配對研究": "peer_compare",
+        "配對交易": "peer_compare",
 
         # 融資券
         "margin": "margin",
@@ -3823,6 +3846,7 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             ("期貨", "futures"),
             ("盤後分析", "post_market_short"),
         ],
+        [("族群比較", "peer_compare")],
     ]
 
     def _target_tf_for(action_name: str) -> str:
@@ -3859,7 +3883,12 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
                     height="25px",
                     text_size=(
                         "xxs"
-                        if label in {"融資券", "盤後分析"}
+                        if label
+                        in {
+                            "融資券",
+                            "盤後分析",
+                            "族群比較",
+                        }
                         else "xs"
                     ),
                     corner_radius="8px",
@@ -8266,7 +8295,904 @@ def _build_futures_flex(
             },
         },
     }
-    
+
+
+def _build_concept_peer_flex(
+    result: dict[str, Any],
+    stock_id: str,
+    stock_name: str,
+    current_tf: str,
+) -> dict[str, Any]:
+    """CMoney 概念族群同業比較；實際樣本窗由服務回傳。"""
+
+    def number(value: Any, digits: int = 2) -> str:
+        try:
+            return f"{float(value):,.{digits}f}"
+        except Exception:
+            return "--"
+
+    def signed_pct(value: Any, digits: int = 1) -> str:
+        try:
+            return f"{float(value):+,.{digits}f}%"
+        except Exception:
+            return "--"
+
+    def ratio_text(value: Any) -> str:
+        try:
+            numeric = float(value)
+            if abs(numeric) < 1:
+                return f"{numeric:.3f}"
+            if abs(numeric) < 10:
+                return f"{numeric:.2f}"
+            return f"{numeric:,.1f}"
+        except Exception:
+            return "--"
+
+    def value_color(value: Any) -> str:
+        try:
+            numeric = float(value)
+            if numeric > 0:
+                return UP_COLOR
+            if numeric < 0:
+                return DOWN_COLOR
+        except Exception:
+            pass
+        return FLAT_COLOR
+
+    def metric_box(
+        label: str,
+        value: str,
+        value_color_hex: str = "#111827",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 1,
+            "backgroundColor": "#F5F6F8",
+            "cornerRadius": "12px",
+            "paddingAll": "9px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "xxs",
+                    "color": "#6B7280",
+                    "align": "center",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "md",
+                    "weight": "bold",
+                    "color": value_color_hex,
+                    "align": "center",
+                    "margin": "xs",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def context_badge() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 0,
+            "backgroundColor": "#F3E8FF",
+            "cornerRadius": "8px",
+            "paddingAll": "6px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "族群",
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": "#7C3AED",
+                    "align": "center",
+                }
+            ],
+        }
+
+    def info_row(
+        label: str,
+        value: str,
+        color: str = "#374151",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#6B7280",
+                    "flex": 4,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": color,
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    comparisons = list(result.get("comparisons") or [])
+    if not bool(result.get("available")) or not comparisons:
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{stock_id} {stock_name}",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                        "wrap": True,
+                    },
+                    context_badge(),
+                ],
+            },
+            {
+                "type": "text",
+                "text": "族群比較",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#374151",
+                "margin": "sm",
+            },
+            {
+                "type": "text",
+                "text": str(
+                    result.get("message")
+                    or "目前沒有足夠的同族群資料可比較"
+                ),
+                "size": "sm",
+                "color": "#6B7280",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": (
+                    "分類以 CMoney 概念股為主並保留人工覆寫；"
+                    "未收錄不代表公司沒有相關題材。"
+                ),
+                "size": "xs",
+                "color": "#9CA3AF",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+        contents.extend(_mode_buttons(stock_id, "peer_compare", current_tf))
+        return {
+            "type": "flex",
+            "altText": f"{stock_id} {stock_name} 族群比較",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    bubbles: list[dict[str, Any]] = []
+    methodology = result.get("methodology") or {}
+    for comparison in comparisons:
+        peer_id = str(comparison.get("peer_id") or "")
+        peer_name = str(comparison.get("peer_name") or peer_id)
+        concept_text = "、".join(
+            str(value)
+            for value in (comparison.get("concepts") or [])
+            if value
+        ) or "概念族群"
+        similarity = float(
+            comparison.get("similarity_pct") or 0.0
+        )
+        similarity_color = (
+            "#7C3AED"
+            if similarity >= 75
+            else (
+                "#2563EB"
+                if similarity >= 60
+                else "#6B7280"
+            )
+        )
+        relative_5 = comparison.get("relative_strength_5_pct")
+        relative_20 = comparison.get("relative_strength_20_pct")
+        chart_url = str(comparison.get("chart_url") or "").strip()
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{stock_id} {stock_name}",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                        "wrap": True,
+                    },
+                    context_badge(),
+                ],
+            },
+            {
+                "type": "text",
+                "text": f"族群比較｜{concept_text}",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#374151",
+                "margin": "sm",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": f"與 {peer_id} {peer_name} 進行比較",
+                "size": "md",
+                "weight": "bold",
+                "color": "#111827",
+                "margin": "sm",
+                "wrap": True,
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "xs",
+                "margin": "md",
+                "contents": [
+                    metric_box(
+                        "相似度",
+                        f"{number(similarity, 0)}%",
+                        similarity_color,
+                    ),
+                    metric_box(
+                        "目前比值",
+                        ratio_text(comparison.get("ratio_current")),
+                    ),
+                    metric_box(
+                        "60日均值",
+                        ratio_text(comparison.get("ratio_mean")),
+                    ),
+                ],
+            },
+        ]
+        if chart_url:
+            contents.append(
+                {
+                    "type": "image",
+                    "url": chart_url,
+                    "size": "full",
+                    "aspectRatio": "9:4",
+                    "aspectMode": "fit",
+                    "margin": "md",
+                    "backgroundColor": "#FFFFFF",
+                }
+            )
+        contents.extend(
+            [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        info_row(
+                            "比值偏離均值",
+                            signed_pct(
+                                comparison.get("ratio_deviation_pct")
+                            ),
+                            value_color(
+                                comparison.get("ratio_deviation_pct")
+                            ),
+                        ),
+                        info_row(
+                            "比值 Z-score",
+                            number(
+                                comparison.get("ratio_zscore"),
+                                2,
+                            ),
+                            value_color(
+                                comparison.get("ratio_zscore")
+                            ),
+                        ),
+                        info_row(
+                            "近5日相對強弱",
+                            signed_pct(relative_5),
+                            value_color(relative_5),
+                        ),
+                        info_row(
+                            "近20日相對強弱",
+                            signed_pct(relative_20),
+                            value_color(relative_20),
+                        ),
+                        info_row(
+                            "日報酬相關",
+                            number(
+                                comparison.get("return_correlation"),
+                                2,
+                            ),
+                        ),
+                        info_row(
+                            "同向交易日",
+                            (
+                                f"{number(comparison.get('direction_agreement_pct'), 0)}%"
+                            ),
+                        ),
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F5F3FF",
+                    "cornerRadius": "10px",
+                    "paddingAll": "9px",
+                    "margin": "md",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": str(
+                                comparison.get("status")
+                                or "比值觀察中"
+                            ),
+                            "size": "sm",
+                            "weight": "bold",
+                            "color": similarity_color,
+                            "align": "center",
+                            "wrap": True,
+                        }
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"資料日 {comparison.get('data_date') or '--'}｜"
+                        f"共同樣本 {comparison.get('sample_days') or 0} 日"
+                    ),
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"分類：{result.get('catalog_source') or 'CMoney 概念股'}"
+                        f"｜人工維護 {result.get('catalog_updated_at') or '--'}"
+                    ),
+                    "size": "xs",
+                    "color": "#7C3AED",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+                {
+                    "type": "text",
+                    "text": str(
+                        methodology.get("similarity")
+                        or (
+                            "相似度依日報酬、同向率、"
+                            "波動與量能連動計算。"
+                        )
+                    ),
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "align": "center",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "概念分類與歷史連動僅供觀察；"
+                        "不代表未來仍同步。"
+                    ),
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+            ]
+        )
+        contents.extend(
+            _mode_buttons(stock_id, "peer_compare", current_tf)
+        )
+        bubbles.append(
+            {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            }
+        )
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 族群比較",
+        "contents": {
+            "type": "carousel",
+            "contents": bubbles,
+        },
+    }
+
+
+def _build_double_knife_flex(
+    result: dict[str, Any],
+    stock_id: str,
+    stock_name: str,
+    current_tf: str,
+) -> dict[str, Any]:
+    """240日雙刀配對研究卡；只呈現研究狀態，不產生交易指令。"""
+
+    def number(value: Any, digits: int = 2) -> str:
+        try:
+            return f"{float(value):,.{digits}f}"
+        except Exception:
+            return "--"
+
+    def signed_pct(value: Any, digits: int = 2) -> str:
+        try:
+            return f"{float(value):+,.{digits}f}%"
+        except Exception:
+            return "--"
+
+    def value_color(value: Any) -> str:
+        try:
+            numeric = float(value)
+            if numeric > 0:
+                return UP_COLOR
+            if numeric < 0:
+                return DOWN_COLOR
+        except Exception:
+            pass
+        return FLAT_COLOR
+
+    def metric_box(
+        label: str,
+        value: str,
+        color: str = "#111827",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 1,
+            "backgroundColor": "#F5F6F8",
+            "cornerRadius": "12px",
+            "paddingAll": "9px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "xxs",
+                    "color": "#6B7280",
+                    "align": "center",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "md",
+                    "weight": "bold",
+                    "color": color,
+                    "align": "center",
+                    "margin": "xs",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def info_row(
+        label: str,
+        value: str,
+        color: str = "#374151",
+    ) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label,
+                    "size": "sm",
+                    "color": "#6B7280",
+                    "flex": 5,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": value,
+                    "size": "sm",
+                    "weight": "bold",
+                    "color": color,
+                    "flex": 6,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    def badge() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 0,
+            "backgroundColor": "#FEF3C7",
+            "cornerRadius": "8px",
+            "paddingAll": "6px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "雙刀",
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": "#B45309",
+                    "align": "center",
+                }
+            ],
+        }
+
+    pairs = list(result.get("pairs") or [])
+    if not bool(result.get("available")) or not pairs:
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{stock_id} {stock_name}",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                        "wrap": True,
+                    },
+                    badge(),
+                ],
+            },
+            {
+                "type": "text",
+                "text": "雙刀配對研究",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#374151",
+                "margin": "sm",
+            },
+            {
+                "type": "text",
+                "text": str(
+                    result.get("message")
+                    or "目前沒有足夠的240日配對資料"
+                ),
+                "size": "sm",
+                "color": "#6B7280",
+                "wrap": True,
+                "margin": "md",
+            },
+            {
+                "type": "text",
+                "text": "此功能為配對研究工具，不代表建議放空或買進。",
+                "size": "xs",
+                "color": "#9CA3AF",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+        contents.extend(_mode_buttons(stock_id, "double_knife", current_tf))
+        return {
+            "type": "flex",
+            "altText": f"{stock_id} {stock_name} 雙刀配對研究",
+            "contents": {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            },
+        }
+
+    bubbles: list[dict[str, Any]] = []
+    disposition = result.get("disposition") or {}
+    for pair in pairs:
+        long_id = str(pair.get("long_id") or "")
+        long_name = str(pair.get("long_name") or long_id)
+        concept_text = "、".join(
+            str(value)
+            for value in (pair.get("concepts") or [])
+            if value
+        ) or "概念族群"
+        correlation = float(pair.get("return_correlation") or 0.0)
+        zscore = float(pair.get("spread_zscore") or 0.0)
+        chart_url = str(pair.get("chart_url") or "").strip()
+        state = str(pair.get("spread_state") or "觀察中")
+        state_color = (
+            "#059669"
+            if state in {"正在收斂", "接近均值"}
+            else (
+                "#DC2626"
+                if state == "持續發散"
+                else "#B45309"
+            )
+        )
+        contents: list[dict[str, Any]] = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": f"{stock_id} {stock_name}",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": "#111827",
+                        "flex": 1,
+                        "wrap": True,
+                    },
+                    badge(),
+                ],
+            },
+            {
+                "type": "text",
+                "text": f"雙刀研究｜{concept_text}",
+                "size": "lg",
+                "weight": "bold",
+                "color": "#374151",
+                "margin": "sm",
+                "wrap": True,
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "backgroundColor": "#FEF2F2",
+                        "cornerRadius": "12px",
+                        "paddingAll": "10px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "空方觀察",
+                                "size": "xxs",
+                                "color": "#B91C1C",
+                                "align": "center",
+                            },
+                            {
+                                "type": "text",
+                                "text": f"{stock_id} {stock_name}",
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#7F1D1D",
+                                "align": "center",
+                                "wrap": True,
+                                "margin": "xs",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "backgroundColor": "#ECFDF5",
+                        "cornerRadius": "12px",
+                        "paddingAll": "10px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "多方配對",
+                                "size": "xxs",
+                                "color": "#047857",
+                                "align": "center",
+                            },
+                            {
+                                "type": "text",
+                                "text": f"{long_id} {long_name}",
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#065F46",
+                                "align": "center",
+                                "wrap": True,
+                                "margin": "xs",
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "xs",
+                "margin": "md",
+                "contents": [
+                    metric_box(
+                        "240日相關",
+                        number(correlation, 2),
+                        "#2563EB" if correlation >= 0.55 else "#6B7280",
+                    ),
+                    metric_box(
+                        "避險 Beta",
+                        number(pair.get("hedge_beta"), 2),
+                    ),
+                    metric_box(
+                        "價差 Z",
+                        number(zscore, 2),
+                        value_color(zscore),
+                    ),
+                ],
+            },
+        ]
+        if chart_url:
+            contents.append(
+                {
+                    "type": "image",
+                    "url": chart_url,
+                    "size": "full",
+                    "aspectRatio": "9:4",
+                    "aspectMode": "fit",
+                    "margin": "md",
+                    "backgroundColor": "#FFFFFF",
+                }
+            )
+        contents.extend(
+            [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        info_row("價差狀態", state, state_color),
+                        info_row(
+                            "今日四象限",
+                            str(pair.get("quadrant") or "--"),
+                        ),
+                        info_row(
+                            "空方今日",
+                            signed_pct(pair.get("short_return_1d_pct")),
+                            value_color(pair.get("short_return_1d_pct")),
+                        ),
+                        info_row(
+                            "多方今日",
+                            signed_pct(pair.get("long_return_1d_pct")),
+                            value_color(pair.get("long_return_1d_pct")),
+                        ),
+                        info_row(
+                            "配對研究報酬",
+                            signed_pct(pair.get("pair_return_1d_pct")),
+                            value_color(pair.get("pair_return_1d_pct")),
+                        ),
+                        info_row(
+                            "同向交易日",
+                            f"{number(pair.get('direction_agreement_pct'), 0)}%",
+                        ),
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#FFFBEB",
+                    "cornerRadius": "10px",
+                    "paddingAll": "9px",
+                    "margin": "md",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": str(
+                                pair.get("research_status")
+                                or "配對觀察中"
+                            ),
+                            "size": "sm",
+                            "weight": "bold",
+                            "color": "#92400E",
+                            "align": "center",
+                            "wrap": True,
+                        }
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"官方處置資料："
+                        f"{disposition.get('status') or '尚未接入'}"
+                    ),
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "md",
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"資料日 {pair.get('data_date') or '--'}｜"
+                        f"共同樣本 {pair.get('sample_days') or 0} 日"
+                    ),
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "align": "center",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Z-score向0縮小才是收斂；同漲或同跌仍須比較幅度。"
+                    ),
+                    "size": "xs",
+                    "color": "#6B7280",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "研究卡未納入交易成本、融券限制與處置事件，"
+                        "不代表交易建議。"
+                    ),
+                    "size": "xs",
+                    "color": "#9CA3AF",
+                    "align": "center",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+            ]
+        )
+        contents.extend(_mode_buttons(stock_id, "double_knife", current_tf))
+        bubbles.append(
+            {
+                "type": "bubble",
+                "size": "mega",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "14px",
+                    "spacing": "sm",
+                    "contents": contents,
+                },
+            }
+        )
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 雙刀配對研究",
+        "contents": {
+            "type": "carousel",
+            "contents": bubbles,
+        },
+    }
+
+
 def _build_text_flex(
     stock_id: str,
     stock_name: str,
@@ -8657,6 +9583,52 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
             "| elapsed_sec =", round(time.perf_counter() - stock_t0, 3),
             flush=True,
         )
+
+        # -------------------------
+        # 1.8 概念族群比較
+        # -------------------------
+        if action == "peer_compare":
+            t_peer0 = time.perf_counter()
+
+            # 延遲載入，避免一般行情與K線查詢承擔額外啟動成本。
+            from services.stock_group_comparison_service_v4_cmoney_full_catalog import (
+                build_stock_group_comparison,
+            )
+
+            result = build_stock_group_comparison(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+            )
+            t_peer1 = time.perf_counter()
+            flex = _build_concept_peer_flex(
+                result=result,
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                current_tf=requested_tf,
+            )
+
+            print(
+                "DEBUG stock timing concept_peer",
+                "| version =", CONCEPT_PEER_CARD_VERSION,
+                "| stock_id =", meta.stock_id,
+                "| concepts =", result.get("concepts"),
+                "| comparisons =",
+                len(result.get("comparisons") or []),
+                "| best_peer =",
+                (
+                    (result.get("comparisons") or [{}])[0].get("peer_id")
+                    if result.get("comparisons")
+                    else ""
+                ),
+                "| data_sec =", round(t_peer1 - t_peer0, 3),
+                "| total_sec =",
+                round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+            return _reply_with_title(
+                f"{stock_name} 族群比較",
+                flex,
+            )
 
         # -------------------------
         # 2. 財務
