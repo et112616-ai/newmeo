@@ -284,7 +284,7 @@ def _normalize_action(action: str | None) -> str:
         "post_market_formula": "post_market_method",
         "盤後算法": "post_market_method",
         "計算方式": "post_market_method",
-        "黃金切割率": "post_market_finbonacci",
+        "黃金切割率": "post_market_fibonacci",
 
         # 本益比河流圖
         "pe_river": "pe_river",
@@ -3800,7 +3800,7 @@ def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]
     items = [
         ("短線5日", "post_market_short"),
         ("隔日沖", "post_market_daytrade"),
-        ("黃金切割","post_market_finbonacci"),
+        ("黃金切割","post_market_fibonacci"),
     ]
     return {
         "type": "box",
