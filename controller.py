@@ -70,6 +70,7 @@ from services.chart_service import (
     generate_chip_chart,
     generate_instant_chart,
     generate_kline_chart,
+    generate_fibonacci_chart,
 )
 from services.chip_service import (
     get_institutional_chips,
