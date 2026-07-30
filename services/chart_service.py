@@ -1412,11 +1412,6 @@ def generate_chip_chart(stock_id: str, stock_name: str, chip_rows: dict[str, lis
 
     try:
         return publish_figure(fig, f"{stock_id}_chip")
-
-def generate_fibonacci_chart(
-
-
-
-    
+   
     finally:
         plt.close(fig)
