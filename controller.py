@@ -284,6 +284,7 @@ def _normalize_action(action: str | None) -> str:
         "post_market_formula": "post_market_method",
         "盤後算法": "post_market_method",
         "計算方式": "post_market_method",
+        "黃金切割率": "post_market_finbonacci",
 
         # 本益比河流圖
         "pe_river": "pe_river",
@@ -5474,6 +5475,7 @@ def _build_chart_flex(
         "post_market": "盤後分析｜短線5日",
         "post_market_short": "盤後分析｜短線5日",
         "post_market_daytrade": "盤後分析｜隔日沖",
+        "post_market_fibonacci": "盤後分析｜黃金切割",
     }
 
     mode_title = mode_title_map.get(active_mode_norm, "個股觀測")
