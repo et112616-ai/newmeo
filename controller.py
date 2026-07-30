@@ -3800,6 +3800,7 @@ def _post_market_mode_buttons(stock_id: str, active_mode: str) -> dict[str, Any]
     items = [
         ("短線5日", "post_market_short"),
         ("隔日沖", "post_market_daytrade"),
+        ("黃金切割","post_market_finbonacci"),
     ]
     return {
         "type": "box",
