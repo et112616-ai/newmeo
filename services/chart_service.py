@@ -1330,45 +1330,30 @@ def generate_kline_chart(
     # 與大盤一致：六組 MA 固定為 3 欄 × 2 排。
     # 個股另保留第三排的開高低量，避免六組數字被壓成過小字體。
     fib_positions = [
-        ("100%",0.16,0.77),
-        ("78.6%",0.50,0.77),
-        ("61.8%",0.84,0.77),
-        ("50%",0.16,0.45),
-        ("38.2%",0.50,0.45),
-        ("23.6%",0.84,0.45),
+        ("100%", 0.16, 0.80),
+        ("78.6%", 0.50, 0.80),
+        ("61.8%", 0.84, 0.80),
+        ("50%", 0.16, 0.50),
+        ("38.2%", 0.50, 0.50),
+        ("23.6%", 0.84, 0.50),
+        ("0%", 0.50, 0.20),
     ]
+
+    fib_dict = dict(fib_levels)
+
     for label, x_pos, y_pos in fib_positions:
-        ma_color = STOCK_KLINE_PRESET["ma_styles"][ma_name][0]
         ax_info.text(
             x_pos,
             y_pos,
-            price = fib_levels.get(label)
-            
-            ax_info.text(
-                x_pos,
-                y_pos,
-                f"{label} {price:.2f}",
-                fontsize=KLINE_INFO_MA_FONTSIZE,
-                fontweight="bold",
-                color=ma_color,
-                ha="center",
-                va="center",
-                transform=ax_info.transAxes,
-                **font_kwargs,
-            )
+            f"{label} {fib_dict[label]:.2f}",
+            fontsize=KLINE_INFO_MA_FONTSIZE,
+            fontweight="bold",
+            color="#1976D2",
+            ha="center",
+            va="center",
+            transform=ax_info.transAxes,
+            **font_kwargs,
         )
-
-    ax_info.text(
-        0.00,
-        0.12,
-        f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
-        fontsize=KLINE_INFO_OHLC_FONTSIZE,
-        color="#444444",
-        ha="left",
-        va="center",
-        transform=ax_info.transAxes,
-        **font_kwargs,
-    )
 
     ax_k.set_facecolor(CHART_BACKGROUND)
 
