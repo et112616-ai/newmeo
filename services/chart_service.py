@@ -1319,19 +1319,25 @@ def generate_fibonacci_chart(
         ("38.2%",0.50,0.45),
         ("23.6%",0.84,0.45),
     ]
-    for ma_name, x_pos, y_pos in ma_positions:
+    for label, x_pos, y_pos in fib_positions:
         ma_color = STOCK_KLINE_PRESET["ma_styles"][ma_name][0]
         ax_info.text(
             x_pos,
             y_pos,
-            f"{ma_name} {_fmt_ma(ma_values.get(ma_name))}",
-            fontsize=KLINE_INFO_MA_FONTSIZE,
-            fontweight="bold",
-            color=ma_color,
-            ha="center",
-            va="center",
-            transform=ax_info.transAxes,
-            **font_kwargs,
+            price = fib_levels.get(label)
+            
+            ax_info.text(
+                x_pos,
+                y_pos,
+                f"{label} {price:.2f}",
+                fontsize=KLINE_INFO_MA_FONTSIZE,
+                fontweight="bold",
+                color=ma_color,
+                ha="center",
+                va="center",
+                transform=ax_info.transAxes,
+                **font_kwargs,
+            )
         )
 
     ax_info.text(
@@ -1347,7 +1353,6 @@ def generate_fibonacci_chart(
     )
 
     ax_k.set_facecolor(CHART_BACKGROUND)
-    ax_v.set_facecolor(CHART_BACKGROUND)
 
     x_values, candle_colors = draw_candles(
         ax_k,
@@ -1422,12 +1427,11 @@ def generate_fibonacci_chart(
     plt.setp(ax_k.get_xticklabels(), visible=False)
 
     ax_k.tick_params(axis="y", labelsize=12)
-    ax_v.tick_params(axis="y", labelsize=12)
 
     fig.subplots_adjust(left=0.10, right=0.97, top=0.98, bottom=0.085, hspace=0.09)
 
     try:
-        return publish_figure(fig, f"{stock_id}_{tf}_kline")
+        return publish_figure(fig, f"{stock_id}_{tf}_fib")
     finally:
         plt.close(fig)
 
