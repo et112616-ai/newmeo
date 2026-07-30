@@ -10601,11 +10601,12 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 daytrade_status=daytrade_status,
             )
 
-            fib_image_url = generate_fibonacci_chart(
-                daily_df,
-                meta.stock_id,
+            fib_image_url = generate_kline_chart(
+                df,
+                stock_id,
                 stock_name,
-                "D",
+                tf,
+                show_fibonacci=True,
             )
 
             print(
