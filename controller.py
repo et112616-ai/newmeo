@@ -10602,6 +10602,13 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 daytrade_status=daytrade_status,
             )
 
+            fib_image_url = generate_fibonacci_chart(
+                daily_df,
+                meta.stock_id,
+                stock_name,
+                "D",
+            )
+
             print(
                 "DEBUG stock timing post_market",
                 "| version =", POST_MARKET_COMPARISON_VERSION,
@@ -10643,6 +10650,20 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 price_source="daily_history",
                 show_period_buttons=True,
             )
+            fib_flex = _build_chart_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                image_url=fib_image_url,
+                price_info=price_info,
+                change_info=change_info,
+                update_time=update_time,
+                price_change=price_change,
+                active_mode="post_market_short",
+                current_tf="D",
+                image_aspect_ratio="1:1",
+                price_source="daily_history",
+                show_period_buttons=True,
+            )
 
             carousel = {
                 "type": "flex",
@@ -10652,6 +10673,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     "contents": [
                         short_flex["contents"],
                         daytrade_flex["contents"],
+                        fib_flex["contents"],
                     ],
                 },
             }
