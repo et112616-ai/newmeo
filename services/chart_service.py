@@ -906,7 +906,13 @@ def _prepare_kline_work_df(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     return work_df
 
 
-def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: str) -> str:
+def generate_kline_chart(
+    df: pd.DataFrame,
+    stock_id: str,
+    stock_name: str,
+    tf: str,
+    show_fibonacci: bool = False,
+) -> str:
     if df is None or df.empty:
         return ""
 
@@ -1113,20 +1119,6 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
                 transform=ax_info.transAxes,
                 **font_kwargs,
             )
-    for ma_name, x_pos, y_pos in ma_positions:
-        ma_color = STOCK_KLINE_PRESET["ma_styles"][ma_name][0]
-        ax_info.text(
-            x_pos,
-            y_pos,
-            f"{ma_name} {_fmt_ma(ma_values.get(ma_name))}",
-            fontsize=KLINE_INFO_MA_FONTSIZE,
-            fontweight="bold",
-            color=ma_color,
-            ha="center",
-            va="center",
-            transform=ax_info.transAxes,
-            **font_kwargs,
-        )
 
     ax_info.text(
         0.00,
