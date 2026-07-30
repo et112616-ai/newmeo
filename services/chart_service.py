@@ -1159,11 +1159,14 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     finally:
         plt.close(fig)
 
-def generate_fibonacci_chart(
+def generate_kline_chart(
     df: pd.DataFrame,
     stock_id: str,
     stock_name: str,
     tf: str = "D",
+    show_ma: bool = True,
+    show_volume: bool = True,
+    show_fibonacci: bool = False,
 ) -> str:
     if df is None or df.empty:
         return ""
@@ -1200,6 +1203,26 @@ def generate_fibonacci_chart(
     )
     display_rows = get_kline_display_rows("stock", tf)
     plot_df = work_df.tail(display_rows).copy()
+    # ===== Fibonacci =====
+    fib_levels = None
+
+    if show_fibonacci:
+        fib_df = work_df.tail(120)
+
+        highest = float(fib_df["High"].max())
+        lowest = float(fib_df["Low"].min())
+    
+        diff = highest - lowest
+
+        fib_levels = [
+            ("100%", highest),
+            ("78.6%", highest - diff * 0.214),
+            ("61.8%", highest - diff * 0.382),
+            ("50%", highest - diff * 0.500),
+            ("38.2%", highest - diff * 0.618),
+            ("23.6%", highest - diff * 0.764),
+            ("0%", lowest),
+        ]
     fib_df = work_df.tail(120)
 
     highest = fib_df["High"].max()
@@ -1244,11 +1267,6 @@ def generate_fibonacci_chart(
     if prev_close and prev_close != 0:
         change = latest_close - prev_close
         pct = change / prev_close * 100
-
-    ma_values = {
-        f"MA{period}": latest.get(f"MA{period}")
-        for period in STOCK_KLINE_PRESET["ma_periods"]
-    }
 
     if str(stock_id) == "5274" and tf == "D":
         try:
