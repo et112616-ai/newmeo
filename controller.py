@@ -5483,6 +5483,8 @@ def _build_chart_flex(
         context_badge = "短線 1/2"
     elif active_mode_norm == "post_market_daytrade":
         context_badge = "隔日 2/2"
+    elif active_mode_norm ==  "post_market_fibonacci":
+        context_badge = "黃金切割"    
     else:
         context_badge = card_context_badge(active_mode_norm, tf_norm)
 
