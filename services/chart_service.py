@@ -942,6 +942,26 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
     )
     display_rows = get_kline_display_rows("stock", tf)
     plot_df = work_df.tail(display_rows).copy()
+    
+    fib_levels = None
+
+    if show_fibonacci:
+        fib_df = work_df.tail(120)
+
+        highest = float(fib_df["High"].max())
+        lowest = float(fib_df["Low"].min())
+
+        diff = highest - lowest
+
+        fib_levels = [
+            ("100%", highest),
+            ("78.6%", highest - diff * 0.214),
+            ("61.8%", highest - diff * 0.382),
+            ("50%", highest - diff * 0.500),
+            ("38.2%", highest - diff * 0.618),
+            ("23.6%", highest - diff * 0.764),
+            ("0%", lowest),
+        ]
 
     if plot_df.empty:
         return ""
@@ -1038,14 +1058,61 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
 
     # 與大盤一致：六組 MA 固定為 3 欄 × 2 排。
     # 個股另保留第三排的開高低量，避免六組數字被壓成過小字體。
-    ma_positions = [
-        ("MA5", 0.16, 0.77),
-        ("MA12", 0.50, 0.77),
-        ("MA22", 0.84, 0.77),
-        ("MA30", 0.16, 0.45),
-        ("MA66", 0.50, 0.45),
-        ("MA120", 0.84, 0.45),
-    ]
+    if show_fibonacci:
+
+        fib_positions = [
+            ("100%",0.16,0.77),
+            ("78.6%",0.50,0.77),
+            ("61.8%",0.84,0.77),
+            ("50%",0.16,0.45),
+            ("38.2%",0.50,0.45),
+            ("23.6%",0.84,0.45),
+        ]
+
+        fib_dict = dict(fib_levels)
+
+        for label,x,y in fib_positions:
+
+            ax_info.text(
+                x,
+                y,
+                f"{label} {fib_dict[label]:.2f}",
+                fontsize=KLINE_INFO_MA_FONTSIZE,
+                fontweight="bold",
+                color="#1976D2",
+                ha="center",
+                va="center",
+                transform=ax_info.transAxes,
+                **font_kwargs,
+            )
+
+    else:
+
+        ma_positions = [
+            ("MA5",0.16,0.77),
+            ("MA12",0.50,0.77),
+            ("MA22",0.84,0.77),
+            ("MA30",0.16,0.45),
+            ("MA66",0.50,0.45),
+            ("MA120",0.84,0.45),
+        ]
+
+        for ma_name,x,y in ma_positions:
+
+            ma_color = STOCK_KLINE_PRESET["ma_styles"][ma_name][0]
+
+            ax_info.text(
+                x,
+                y,
+                f"{ma_name} {_fmt_ma(ma_values.get(ma_name))}",
+                fontsize=KLINE_INFO_MA_FONTSIZE,
+                fontweight="bold",
+                color=ma_color,
+                ha="center",
+                va="center",
+                transform=ax_info.transAxes,
+                **font_kwargs,
+            )
     for ma_name, x_pos, y_pos in ma_positions:
         ma_color = STOCK_KLINE_PRESET["ma_styles"][ma_name][0]
         ax_info.text(
@@ -1092,12 +1159,14 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         x_values=x_values,
         candle_width=DEFAULT_CANDLE_WIDTH,
     )
-    draw_moving_average_lines(
-        ax_k,
-        plot_df,
-        STOCK_KLINE_PRESET["ma_styles"],
-        x_values=x_values,
-    )
+    if not show_fibonacci:
+
+        draw_moving_average_lines(
+            ax_k,
+            plot_df,
+            STOCK_KLINE_PRESET["ma_styles"],
+            x_values=x_values,
+        )
 
     # K 線價格軸上下緣固定為畫面可見 K 棒的最高／最低，並強制加入 Y 軸刻度。
     ax_k.margins(x=0.025, y=0)
@@ -1107,6 +1176,29 @@ def generate_kline_chart(df: pd.DataFrame, stock_id: str, stock_name: str, tf: s
         plot_df["Low"],
         tick_fontsize=AXIS_TICK_FONTSIZE,
     )
+
+    if show_fibonacci:
+
+        for label, price in fib_levels:
+
+            ax_k.axhline(
+                price,
+                linestyle="--",
+                linewidth=1,
+                color="#1976D2",
+                alpha=0.8,
+            )
+
+            ax_k.text(
+                len(plot_df)-0.3,
+                price,
+                f"{label} {price:.2f}",
+                fontsize=10,
+                color="#1976D2",
+                ha="left",
+                va="center",
+                **font_kwargs,
+            )
 
     # 個股分 K 與日／週／月 K：標示目前顯示範圍內的最高、最低價。
     if tf in {"1m", "5m", "15m", "30m", "60m", "D", "W", "M"}:
