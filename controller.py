@@ -10603,7 +10603,7 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             fib_image_url = generate_kline_chart(
                 df,
-                stock_id,
+                meta.stock_id,
                 stock_name,
                 tf,
                 show_fibonacci=True,
