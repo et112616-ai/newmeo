@@ -1166,7 +1166,7 @@ def generate_kline_chart(
         ax_k,
         plot_df["High"],
         plot_df["Low"],
-        tick_fontsize=AXIS_TICK_FONTSIZE,
+        tick_fontsize=AXIS_TICK_FONTSIZE+3,
     )
 
     if show_fibonacci:
