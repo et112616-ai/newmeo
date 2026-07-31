@@ -3375,6 +3375,12 @@ def _build_market_afterhours_digest_flex(
     contribution = result.get("contribution") or {}
     tse_contribution = contribution.get("tse") or {}
     otc_contribution = contribution.get("otc") or {}
+    tse_largest_positive = (
+        tse_contribution.get("largest_positive") or {}
+    )
+    otc_largest_positive = (
+        otc_contribution.get("largest_positive") or {}
+    )
     tse_largest_negative = (
         tse_contribution.get("largest_negative") or {}
     )
