@@ -952,7 +952,7 @@ def generate_kline_chart(
     fib_levels = None
 
     if show_fibonacci:
-        fib_df = work_df.tail(120)
+        fib_df = work_df.tail(display_rows)
 
         highest = float(fib_df["High"].max())
         lowest = float(fib_df["Low"].min())
@@ -1083,7 +1083,7 @@ def generate_kline_chart(
                 x,
                 y,
                 f"{label} {fib_dict[label]:.2f}",
-                fontsize=KLINE_INFO_MA_FONTSIZE,
+                fontsize=15,
                 fontweight="bold",
                 color="#1976D2",
                 ha="center",
@@ -1111,7 +1111,7 @@ def generate_kline_chart(
                 x,
                 y,
                 f"{ma_name} {_fmt_ma(ma_values.get(ma_name))}",
-                fontsize=KLINE_INFO_MA_FONTSIZE,
+                fontsize=15,
                 fontweight="bold",
                 color=ma_color,
                 ha="center",
@@ -1124,7 +1124,7 @@ def generate_kline_chart(
         0.00,
         0.12,
         f"開 {_fmt_price(latest_open)}  高 {_fmt_price(latest_high)}  低 {_fmt_price(latest_low)}  量 {_fmt_lots(latest_volume)}",
-        fontsize=KLINE_INFO_OHLC_FONTSIZE,
+        fontsize=15,
         color="#444444",
         ha="left",
         va="center",
