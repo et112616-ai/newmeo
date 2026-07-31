@@ -3533,20 +3533,6 @@ def _build_market_afterhours_digest_flex(
             ),
         ),
         info_row(
-            f"上櫃最大貢獻 {mmdd(otc_contribution.get('date'))}",
-            (
-                (
-                    f"{otc_largest_positive.get('stock_name') or '--'} "
-                    f"{signed(otc_largest_positive.get('contribution_points'), 2, '點')}"
-                )
-                if otc_contribution.get("available")
-                else "資料待更新"
-            ),
-            value_color(
-                otc_largest_positive.get("contribution_points")
-            ),
-        ),
-        info_row(
             f"上市最大拖累 {mmdd(tse_contribution.get('date'))}",
             (
                 (
@@ -3558,6 +3544,20 @@ def _build_market_afterhours_digest_flex(
             ),
             value_color(
                 tse_largest_negative.get("contribution_points")
+            ),
+        ),
+        info_row(
+            f"上櫃最大貢獻 {mmdd(otc_contribution.get('date'))}",
+            (
+                (
+                    f"{otc_largest_positive.get('stock_name') or '--'} "
+                    f"{signed(otc_largest_positive.get('contribution_points'), 2, '點')}"
+                )
+                if otc_contribution.get("available")
+                else "資料待更新"
+            ),
+            value_color(
+                otc_largest_positive.get("contribution_points")
             ),
         ),
         info_row(
