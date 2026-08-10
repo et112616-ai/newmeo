@@ -74,6 +74,27 @@ class YuantaProvider:
 
         payload: Any = response.json()
 
+        print()
+        print("=" * 80)
+        print("YUANTA DEBUG")
+        print("=" * 80)
+        print("URL:")
+        print(url)
+        print()
+        print("HTTP STATUS:")
+        print(response.status_code)
+        print()
+        print("PAYLOAD TYPE:")
+        print(type(payload))
+        print()
+        print("RAW PAYLOAD:")
+        print(payload)
+        print()
+        print("=" * 80)
+        print("YUANTA URL:", url)
+        print("YUANTA STATUS:", response.status_code)
+        print("YUANTA PAYLOAD:", payload)
+
         rows = self._extract_rows(payload)
 
         if not rows:
