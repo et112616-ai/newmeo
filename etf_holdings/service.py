@@ -2,52 +2,29 @@ from __future__ import annotations
 
 from datetime import date
 
-from .registry import get_etf_registry
+from .models import ETFHolding
 from .providers.yuanta import YuantaProvider
-from .providers.fuhwa import FuhwaProvider
-from .providers.unified import UnifiedProvider
 
 
-PROVIDERS = {
-    "yuanta": YuantaProvider,
-    "fuhwa": FuhwaProvider,
-    "unified": UnifiedProvider,
-}
+class ETFHoldingsService:
+    """ETF 持股資料統一服務。"""
 
+    def __init__(self):
+        self.yuanta = YuantaProvider()
 
-def get_provider(provider_name: str):
-    provider_class = PROVIDERS.get(
-        str(provider_name or "").strip().lower()
-    )
+    def get_holdings(
+        self,
+        etf_code: str,
+        trade_date: date,
+    ) -> list[ETFHolding]:
+        """取得指定 ETF 指定日期的持股資料。"""
 
-    if provider_class is None:
-        raise ValueError(
-            f"Unsupported ETF provider: {provider_name}"
+        etf_code = str(etf_code or "").strip().upper()
+
+        if not etf_code:
+            raise ValueError("ETF code is required")
+
+        return self.yuanta.get_holdings(
+            etf_code=etf_code,
+            trade_date=trade_date,
         )
-
-    return provider_class()
-
-
-def get_etf_holdings(
-    client,
-    etf_code: str,
-    trade_date: date,
-):
-    registry = get_etf_registry(
-        client,
-        etf_code,
-    )
-
-    if not registry:
-        raise ValueError(
-            f"ETF not found: {etf_code}"
-        )
-
-    provider = get_provider(
-        registry["provider"]
-    )
-
-    return provider.get_holdings(
-        etf_code=etf_code,
-        trade_date=trade_date,
-    )
