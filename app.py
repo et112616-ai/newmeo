@@ -339,15 +339,32 @@ def _add_chart_cache_headers(response):
 @app.route("/test/yuanta/0050", methods=["GET"])
 def test_yuanta_0050():
     try:
-        from test_yuanta_0050 import get_yuanta_0050_data
+        from datetime import date
 
-        data = get_yuanta_0050_data()
+        from etf_holdings.providers.yuanta import YuantaProvider
+
+        provider = YuantaProvider()
+
+        holdings = provider.get_holdings(
+            etf_code="0050",
+            trade_date=date(2026, 7, 16),
+        )
 
         return jsonify({
             "ok": True,
             "source": "yuanta",
             "etf": "0050",
-            "data": data
+            "trade_date": "2026-07-16",
+            "count": len(holdings),
+            "data": [
+                {
+                    "stock_code": row.stock_code,
+                    "stock_name": row.stock_name,
+                    "shares": row.shares,
+                    "weight": row.weight,
+                }
+                for row in holdings
+            ],
         })
 
     except Exception as e:
@@ -355,7 +372,7 @@ def test_yuanta_0050():
             "ok": False,
             "source": "yuanta",
             "etf": "0050",
-            "error": str(e)
+            "error": str(e),
         }), 500
 
 @app.route("/route_probe", methods=["GET"])
