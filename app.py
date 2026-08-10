@@ -336,24 +336,25 @@ def _add_chart_cache_headers(response):
         pass
     return response
 
-@app.route("/test/yuanta/0050", methods=["GET"])
-def test_yuanta_0050():
+
+@app.route("/test/etf/<etf_code>", methods=["GET"])
+def test_etf_holdings(etf_code):
     try:
         from datetime import date
 
-        from etf_holdings.providers.yuanta import YuantaProvider
+        from etf_holdings.service import ETFHoldingsService
 
-        provider = YuantaProvider()
+        service = ETFHoldingsService()
 
-        holdings = provider.get_holdings(
-            etf_code="0050",
+        holdings = service.get_holdings(
+            etf_code=etf_code,
             trade_date=date(2026, 7, 16),
         )
 
         return jsonify({
             "ok": True,
             "source": "yuanta",
-            "etf": "0050",
+            "etf": etf_code.upper(),
             "trade_date": "2026-07-16",
             "count": len(holdings),
             "data": [
@@ -371,7 +372,7 @@ def test_yuanta_0050():
         return jsonify({
             "ok": False,
             "source": "yuanta",
-            "etf": "0050",
+            "etf": etf_code.upper(),
             "error": str(e),
         }), 500
 
