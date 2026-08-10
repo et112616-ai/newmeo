@@ -7,7 +7,7 @@ provider = YuantaProvider()
 
 holdings = provider.get_holdings(
     etf_code="0050",
-    trade_date=date(2026, 7, 16),
+    trade_date=date(2026, 8, 7),
 )
 
 print()
