@@ -336,6 +336,27 @@ def _add_chart_cache_headers(response):
         pass
     return response
 
+@app.route("/test/yuanta/0050", methods=["GET"])
+def test_yuanta_0050():
+    try:
+        from test_yuanta_0050 import get_yuanta_0050_data
+
+        data = get_yuanta_0050_data()
+
+        return jsonify({
+            "ok": True,
+            "source": "yuanta",
+            "etf": "0050",
+            "data": data
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "source": "yuanta",
+            "etf": "0050",
+            "error": str(e)
+        }), 500
 
 @app.route("/route_probe", methods=["GET"])
 def route_probe():
@@ -343,8 +364,6 @@ def route_probe():
         "status": "ok",
         "message": "route_probe registered",
     }), 200
-
-
 
 def _server_time_text() -> str:
     try:
