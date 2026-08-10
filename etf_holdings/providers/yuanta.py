@@ -108,26 +108,30 @@ class YuantaProvider:
         for row in rows:
 
             stock_code = str(
-                row.get("holding_ticker")
+                row.get("code")
+                or row.get("holding_ticker")
                 or row.get("ticker")
                 or row.get("stock_code")
                 or ""
             ).strip()
 
             stock_name = str(
-                row.get("holding_name")
+                row.get("name")
+                or row.get("holding_name")
                 or row.get("stock_name")
                 or ""
             ).strip()
 
             shares = self._number(
-                row.get("holding_units")
+                row.get("qty")
+                or row.get("holding_units")
                 or row.get("shares")
                 or row.get("quantity")
             )
 
             weight = self._number_or_none(
-                row.get("holding_weight")
+                row.get("weights")
+                or row.get("holding_weight")
                 or row.get("weight")
             )
 
@@ -165,40 +169,39 @@ class YuantaProvider:
 
     @staticmethod
     def _extract_rows(payload: Any) -> list[dict]:
+        """
+        解析元大 ETF 官方 PCF API。
 
-        if isinstance(payload, list):
-            return [
-                row for row in payload
-                if isinstance(row, dict)
-            ]
+        Yuanta API 的股票持股資料位於：
+
+            FundWeights
+                └── StockWeights
+
+        StockWeights 欄位：
+            code    股票代號
+            name    股票名稱
+            weights 持股權重
+            qty     基金實際持有股數
+        """
 
         if not isinstance(payload, dict):
             return []
 
-        # 常見可能位置
-        for key in (
-            "data",
-            "Data",
-            "result",
-            "Result",
-            "rows",
-            "Rows",
-        ):
-            value = payload.get(key)
+        fund_weights = payload.get("FundWeights")
 
-            if isinstance(value, list):
-                return [
-                    row for row in value
-                    if isinstance(row, dict)
-                ]
+        if not isinstance(fund_weights, dict):
+            return []
 
-            if isinstance(value, dict):
-                nested = YuantaProvider._extract_rows(value)
+        stock_weights = fund_weights.get("StockWeights")
 
-                if nested:
-                    return nested
+        if not isinstance(stock_weights, list):
+            return []
 
-        return []
+        return [
+            row
+            for row in stock_weights
+            if isinstance(row, dict)
+        ]
 
     @staticmethod
     def _number(value: Any) -> float:
