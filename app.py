@@ -348,7 +348,7 @@ def test_etf_holdings(etf_code):
 
         holdings = service.get_holdings(
             etf_code=etf_code,
-            trade_date=date(2026, 7, 16),
+            trade_date=date(2026, 8, 7),
         )
 
         return jsonify({
