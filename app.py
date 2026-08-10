@@ -355,7 +355,7 @@ def test_etf_holdings(etf_code):
             "ok": True,
             "source": "yuanta",
             "etf": etf_code.upper(),
-            "trade_date": "2026-07-16",
+            "trade_date": "2026-08-07",
             "count": len(holdings),
             "data": [
                 {
