@@ -477,6 +477,7 @@ def _version_payload() -> dict[str, Any]:
         "futures_service": _collect_module_versions("services.futures_service"),
         "market_future_service": _collect_module_versions("services.market_future_service"),
         "market_future_kline_service": _collect_module_versions("services.market_future_kline_service"),
+        "market_disposition_service": _collect_module_versions("services.market_disposition_service"),
     }
 
     return {
