@@ -336,6 +336,25 @@ def _add_chart_cache_headers(response):
         pass
     return response
 
+@app.route("/test_disposition")
+def test_disposition():
+    token = request.args.get("token", "")
+    persist = request.args.get("persist", "0")
+
+    if token != TEST_TOKEN:
+        return jsonify({
+            "ok": False,
+            "error": "invalid token"
+        }), 401
+
+    # 這裡呼叫處置資料抓取程式
+    result = fetch_disposition_data()
+
+    return jsonify({
+        "ok": True,
+        "persist": persist,
+        "data": result
+    })
 
 @app.route("/test/etf/<etf_code>", methods=["GET"])
 def test_etf_holdings(etf_code):
