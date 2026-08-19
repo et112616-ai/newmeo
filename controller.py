@@ -57,6 +57,7 @@ from services.sinopac_quote_service import (
     is_shioaji_api_ready,
 )
 from services.market_margin_service import get_market_margin_snapshot
+from services.market_disposition_service import get_market_disposition_snapshot
 from services.financial_service import get_financial_snapshot
 from services.afterhours_analysis_service_v2_5_card_alignment import (
     generate_post_market_analysis_chart,
@@ -164,6 +165,16 @@ def _normalize_action(action: str | None) -> str:
         "index_margin": "market_margin",
         "大盤融資券": "market_margin",
         "加權融資券": "market_margin",
+
+        # 處置日報（上市＋上櫃整合）
+        "market_disposition": "market_disposition",
+        "market_disposition_all": "market_disposition_all",
+        "disposition": "market_disposition",
+        "處置": "market_disposition",
+        "處置股票": "market_disposition",
+        "處置日報": "market_disposition",
+        "處置股": "market_disposition",
+        "處置股清單": "market_disposition",
 
         # 大盤 / 加權指數期貨：台指期 TXF
         "market_future": "market_future_all",
@@ -731,6 +742,267 @@ def _build_market_margin_flex(snapshot) -> dict[str, Any]:
             },
         },
     }
+
+
+def _market_disposition_group_buttons(
+    groups: list,
+    active_group_key: str = "all",
+) -> list[dict[str, Any]]:
+    """
+    處置日報分組按鈕：第一顆固定「全部」，其餘依當天實際出現的
+    撮合分鐘數動態產生（例如 2分鐘／10分鐘），每排最多 4 顆。
+    """
+    active_group_key = str(active_group_key or "all").strip().lower()
+
+    buttons = [
+        _postback_button(
+            label="全部",
+            data="TAIEX,market_disposition_all,market_index,D",
+            active=active_group_key in {"all", "market_disposition"},
+            display_text="處置股票 全部",
+            height="42px",
+            text_size="sm",
+        )
+    ]
+
+    for group in groups:
+        group_key = str(getattr(group, "key", "")).strip().lower()
+        buttons.append(
+            _postback_button(
+                label=getattr(group, "label", group_key),
+                data=f"TAIEX,market_disposition_g{group_key},market_index,D",
+                active=active_group_key == group_key,
+                display_text=f"處置股票 {getattr(group, 'label', group_key)}",
+                height="42px",
+                text_size="sm",
+            )
+        )
+
+    rows: list[dict[str, Any]] = []
+    chunk_size = 4
+
+    for i in range(0, len(buttons), chunk_size):
+        rows.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "xs",
+                "margin": "md" if i == 0 else "xs",
+                "contents": buttons[i : i + chunk_size],
+            }
+        )
+
+    return rows
+
+
+def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> dict[str, Any]:
+    """
+    大盤處置日報卡片：整合上市／上櫃處置股票，
+    依撮合分鐘數分組切換，表格顯示股號／股名／處置時間。
+    """
+    card_title = "處置股票"
+    active_group_key = str(active_group_key or "all").strip().lower()
+
+    def _table_header() -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "backgroundColor": "#EEF1F4",
+            "cornerRadius": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "股號",
+                    "size": "xs",
+                    "color": "#555555",
+                    "weight": "bold",
+                    "flex": 3,
+                    "align": "start",
+                },
+                {
+                    "type": "text",
+                    "text": "股名",
+                    "size": "xs",
+                    "color": "#555555",
+                    "weight": "bold",
+                    "flex": 4,
+                    "align": "start",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": "處置時間",
+                    "size": "xs",
+                    "color": "#555555",
+                    "weight": "bold",
+                    "flex": 5,
+                    "align": "end",
+                },
+            ],
+        }
+
+    def _table_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": str(row.get("code", "--")),
+                    "size": "xs",
+                    "color": "#333333",
+                    "flex": 3,
+                    "align": "start",
+                },
+                {
+                    "type": "text",
+                    "text": str(row.get("name", "--")) or "--",
+                    "size": "xs",
+                    "color": "#333333",
+                    "flex": 4,
+                    "align": "start",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(
+                        row.get("period_display")
+                        or row.get("period")
+                        or "--"
+                    ),
+                    "size": "xs",
+                    "color": "#333333",
+                    "flex": 5,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
+    groups = list(getattr(snapshot, "groups", []) or [])
+    all_rows = list(getattr(snapshot, "all_rows", []) or [])
+    trade_date = str(getattr(snapshot, "trade_date", "") or "--")
+    source = str(getattr(snapshot, "source", "") or "TWSE / TPEX")
+
+    if active_group_key in {"all", "market_disposition"}:
+        display_rows = all_rows
+        group_title = "全部"
+    else:
+        matched = next(
+            (g for g in groups if str(getattr(g, "key", "")).lower() == active_group_key),
+            None,
+        )
+        if matched is None:
+            display_rows = all_rows
+            group_title = "全部"
+        else:
+            display_rows = list(getattr(matched, "rows", []) or [])
+            group_title = getattr(matched, "label", "")
+
+    table_contents: list[dict[str, Any]] = [_table_header()]
+
+    if display_rows:
+        for row in display_rows:
+            table_contents.append(_table_row(row))
+    else:
+        table_contents.append(
+            {
+                "type": "text",
+                "text": "目前沒有處置中股票。",
+                "size": "sm",
+                "color": "#999999",
+                "margin": "sm",
+                "wrap": True,
+            }
+        )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": card_title,
+            "size": "xxl",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+        },
+        {
+            "type": "text",
+            "text": trade_date,
+            "size": "sm",
+            "color": "#666666",
+            "margin": "xs",
+        },
+        {
+            "type": "separator",
+            "margin": "md",
+        },
+    ]
+
+    contents.extend(_market_disposition_group_buttons(groups, active_group_key))
+
+    contents.append(
+        {
+            "type": "text",
+            "text": f"{group_title}　共 {len(display_rows)} 檔",
+            "size": "xs",
+            "color": "#888888",
+            "margin": "md",
+        }
+    )
+
+    contents.append(
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "xs",
+            "margin": "sm",
+            "paddingAll": "6px",
+            "backgroundColor": "#F8F9FA",
+            "cornerRadius": "md",
+            "contents": table_contents,
+        }
+    )
+
+    contents.append(
+        {
+            "type": "text",
+            "text": (
+                "股名前為上市或上櫃股票整合顯示；分組依交易所公告撮合頻率，"
+                f"僅供參考。資料來源：{source}。"
+            ),
+            "size": "xs",
+            "color": "#888888",
+            "wrap": True,
+            "margin": "md",
+        }
+    )
+
+    contents.append(
+        {
+            "type": "separator",
+            "margin": "md",
+        }
+    )
+
+    contents.extend(_market_index_buttons("market_disposition"))
+
+    return {
+        "type": "flex",
+        "altText": card_title,
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
+    }
+
 
 def _fmt_market_chip_yi(value) -> str:
     try:
@@ -2631,6 +2903,14 @@ def _market_index_buttons(active_action: str = "market_index") -> list[dict[str,
                 height="42px",
                 text_size="sm",
             ),
+            _postback_button(
+                label="處置日報",
+                data="TAIEX,market_disposition,market_index,D",
+                active=active_action.startswith("market_disposition"),
+                display_text="大盤 處置日報",
+                height="42px",
+                text_size="sm",
+            ),
         ],
     }
 
@@ -4259,6 +4539,14 @@ def _market_future_nav_buttons(active_action: str = "market_future_all") -> list
                 data="TAIEX,market_afterhours,market_index,D",
                 active=active_action == "market_afterhours",
                 display_text="大盤 盤後總覽",
+                height="42px",
+                text_size="sm",
+            ),
+            _postback_button(
+                label="處置日報",
+                data="TAIEX,market_disposition,market_index,D",
+                active=active_action.startswith("market_disposition"),
+                display_text="大盤 處置日報",
                 height="42px",
                 text_size="sm",
             ),
@@ -7881,6 +8169,8 @@ MARKET_INDEX_ACTIONS = {
     "market_future_day",
     "market_future_all",
     "market_future_k",
+    "market_disposition",
+    "market_disposition_all",
 }
 
 def _is_market_index_request(*values) -> bool:
@@ -7914,6 +8204,9 @@ def _is_market_index_request(*values) -> bool:
             return True
 
         if "15分預測" in text or "15分鐘預測" in text:
+            return True
+
+        if "處置" in text:
             return True
     
     return False
@@ -10044,9 +10337,13 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
         # =========================
         if (
             action in MARKET_INDEX_ACTIONS
+            or action.startswith("market_disposition")
             or _is_market_index_request(raw_stock, raw_text)
         ):
-            if action not in MARKET_INDEX_ACTIONS:
+            if (
+                action not in MARKET_INDEX_ACTIONS
+                and not action.startswith("market_disposition")
+            ):
                 request_text = f"{raw_stock} {raw_text}".strip()
                 if (
                     "盤後" in request_text
@@ -10067,6 +10364,8 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                     )
                 ):
                     action = "market_prediction"
+                elif "處置" in request_text:
+                    action = "market_disposition"
                 elif _is_market_future_request(raw_stock, raw_text):
                     action = "market_future_all"
                 else:
@@ -10255,6 +10554,30 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
                 return _reply_with_title(
                     f"台指期 {tf.replace('m', '分')}K",
                     _build_market_future_kline_flex(kline_snapshot, tf),
+                )
+
+            if action == "market_disposition" or action.startswith(
+                "market_disposition"
+            ):
+                group_key = "all"
+
+                if action.startswith("market_disposition_g"):
+                    group_key = action[len("market_disposition_g"):] or "all"
+
+                snapshot = get_market_disposition_snapshot()
+
+                print(
+                    "DEBUG market_disposition controller",
+                    "| action =", action,
+                    "| group_key =", group_key,
+                    "| available =", snapshot.available,
+                    "| total =", snapshot.total_count,
+                    flush=True,
+                )
+
+                return _reply_with_title(
+                    "處置股票",
+                    _build_market_disposition_flex(snapshot, group_key),
                 )
 
             return _reply_with_title(
