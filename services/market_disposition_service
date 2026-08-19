@@ -1,25 +1,5 @@
 from __future__ import annotations
 
-"""
-market_disposition_service.py
-
-用途：
-    大盤處置日報：整合 TWSE（上市）與 TPEX（上櫃）目前仍在
-    處置期間的股票，依「撮合分鐘數」分組，供 LINE 圖卡使用。
-
-資料來源：
-    1. TWSE 證交所 OpenAPI：openapi.twse.com.tw/v1/announcement/punish
-    2. TPEX 櫃買中心 OpenAPI：www.tpex.org.tw/openapi/v1/tpex_disposal_information
-
-篩選：
-    只保留「4 碼以內的純數字代號」，排除權證及其他衍生商品。
-    只保留「今天仍落在處置期間內」的股票。
-
-分組：
-    依官方公告內容判讀出的撮合分鐘數（例如「約每5分鐘撮合一次」）分組；
-    無法判讀者歸入「未列明」。
-"""
-
 import re
 import time
 from dataclasses import dataclass, field
