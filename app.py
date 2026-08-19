@@ -336,65 +336,6 @@ def _add_chart_cache_headers(response):
         pass
     return response
 
-@app.route("/test_disposition")
-def test_disposition():
-    token = request.args.get("token", "")
-    persist = request.args.get("persist", "0")
-
-    if token != TEST_TOKEN:
-        return jsonify({
-            "ok": False,
-            "error": "invalid token"
-        }), 401
-
-    # 這裡呼叫處置資料抓取程式
-    result = fetch_disposition_data()
-
-    return jsonify({
-        "ok": True,
-        "persist": persist,
-        "data": result
-    })
-
-@app.route("/test/etf/<etf_code>", methods=["GET"])
-def test_etf_holdings(etf_code):
-    try:
-        from datetime import date
-
-        from etf_holdings.service import ETFHoldingsService
-
-        service = ETFHoldingsService()
-
-        holdings = service.get_holdings(
-            etf_code=etf_code,
-            trade_date=date(2026, 8, 7),
-        )
-
-        return jsonify({
-            "ok": True,
-            "source": "yuanta",
-            "etf": etf_code.upper(),
-            "trade_date": "2026-08-07",
-            "count": len(holdings),
-            "data": [
-                {
-                    "stock_code": row.stock_code,
-                    "stock_name": row.stock_name,
-                    "shares": row.shares,
-                    "weight": row.weight,
-                }
-                for row in holdings
-            ],
-        })
-
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "source": "yuanta",
-            "etf": etf_code.upper(),
-            "error": str(e),
-        }), 500
-
 @app.route("/route_probe", methods=["GET"])
 def route_probe():
     return jsonify({
