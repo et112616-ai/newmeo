@@ -852,6 +852,10 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
         }
 
     def _table_row(row: dict[str, Any]) -> dict[str, Any]:
+        is_new_today = bool(row.get("is_new_today"))
+        text_color = "#E53935" if is_new_today else "#333333"
+        text_weight = "bold" if is_new_today else "regular"
+
         return {
             "type": "box",
             "layout": "horizontal",
@@ -861,7 +865,8 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
                     "type": "text",
                     "text": str(row.get("code", "--")),
                     "size": "xs",
-                    "color": "#333333",
+                    "color": text_color,
+                    "weight": text_weight,
                     "flex": 3,
                     "align": "start",
                 },
@@ -869,7 +874,8 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
                     "type": "text",
                     "text": str(row.get("name", "--")) or "--",
                     "size": "xs",
-                    "color": "#333333",
+                    "color": text_color,
+                    "weight": text_weight,
                     "flex": 4,
                     "align": "start",
                     "wrap": True,
@@ -882,7 +888,8 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
                         or "--"
                     ),
                     "size": "xs",
-                    "color": "#333333",
+                    "color": text_color,
+                    "weight": text_weight,
                     "flex": 5,
                     "align": "end",
                     "wrap": True,
@@ -978,7 +985,8 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
         {
             "type": "text",
             "text": (
-                "股名前為上市或上櫃股票整合顯示；分組依交易所公告撮合頻率，"
+                "紅色粗體為當日新增處置股票；同股票有多筆公告時，"
+                "以最新一筆為準。分組依交易所公告撮合頻率，"
                 f"僅供參考。資料來源：{source}。"
             ),
             "size": "xs",
