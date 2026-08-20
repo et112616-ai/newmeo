@@ -14,7 +14,7 @@ import yfinance as yf
 from utils.formatter import normalize_time_frame, signed_number, signed_percent
 
 
-STOCK_SERVICE_VERSION = "stock_service_v8_finmind_cache"
+STOCK_SERVICE_VERSION = "stock_service_v9_emerging_name_lookup"
 
 TW_SUFFIX = ".TW"
 TWO_SUFFIX = ".TWO"
@@ -85,6 +85,128 @@ def _twstock_lookup(query: str) -> Optional[tuple[str, str]]:
     return None
 
 
+FINMIND_STOCK_INFO_CACHE_TTL_SECONDS = int(
+    os.getenv("FINMIND_STOCK_INFO_CACHE_TTL_SECONDS", "86400")
+)
+_FINMIND_STOCK_INFO_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _get_finmind_stock_info_list() -> list[dict[str, Any]]:
+    """
+    取得 FinMind TaiwanStockInfo 全市場清單（上市／上櫃／興櫃皆含）。
+
+    用途：
+        twstock 套件內建的 codes 資料庫只有上市／上櫃，不含興櫃股票，
+        導致興櫃股票用中文名稱查詢時完全找不到、只能打代號。
+        這裡用 FinMind 的 TaiwanStockInfo 做名稱查詢的備援來源，
+        它明確涵蓋興櫃公司（以 stock_id 對照 type 欄位區分市場別）。
+
+    快取 24 小時：這份清單本來就是一天更新一次，不需要每次都重打。
+    """
+    cache_key = "finmind_stock_info"
+    now = time_module.time()
+
+    cached = _FINMIND_STOCK_INFO_CACHE.get(cache_key)
+    if cached:
+        ts, data = cached
+        if now - ts <= FINMIND_STOCK_INFO_CACHE_TTL_SECONDS:
+            return data
+
+    params = {"dataset": "TaiwanStockInfo"}
+    token = os.getenv("FINMIND_TOKEN") or os.getenv("FINMIND_API_TOKEN") or ""
+
+    if token:
+        params["token"] = token
+
+    try:
+        res = requests.get(
+            "https://api.finmindtrade.com/api/v4/data",
+            params=params,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "stock_service | finmind stock_info failed",
+                "| status =",
+                res.status_code,
+                "| body =",
+                res.text[:200],
+                flush=True,
+            )
+            return cached[1] if cached else []
+
+        payload = res.json()
+        rows = payload.get("data") or []
+
+        if not isinstance(rows, list) or not rows:
+            print(
+                "stock_service | finmind stock_info empty",
+                flush=True,
+            )
+            return cached[1] if cached else []
+
+        _FINMIND_STOCK_INFO_CACHE[cache_key] = (now, rows)
+
+        print(
+            "stock_service | finmind stock_info refreshed",
+            "| rows =",
+            len(rows),
+            flush=True,
+        )
+
+        return rows
+
+    except Exception as e:
+        print(
+            "stock_service | finmind stock_info exception",
+            "|",
+            type(e).__name__,
+            str(e),
+            flush=True,
+        )
+        return cached[1] if cached else []
+
+
+def _finmind_name_lookup(query: str) -> Optional[tuple[str, str]]:
+    """
+    用 FinMind TaiwanStockInfo（含興櫃）做股票名稱查詢的備援。
+    只在 twstock 找不到時才呼叫，避免不必要的網路請求。
+    """
+    q = str(query or "").strip()
+
+    if not q:
+        return None
+
+    rows = _get_finmind_stock_info_list()
+
+    if not rows:
+        return None
+
+    exact = []
+    partial = []
+
+    for row in rows:
+        name = str(row.get("stock_name") or "").strip()
+        stock_id = str(row.get("stock_id") or "").strip()
+
+        if not name or not stock_id:
+            continue
+
+        if q == name:
+            exact.append((stock_id, name))
+        elif q in name:
+            partial.append((stock_id, name))
+
+    if exact:
+        return exact[0]
+
+    if partial:
+        return partial[0]
+
+    return None
+
+
 def normalize_stock_input(stock_input: str) -> StockMeta:
     raw = str(stock_input or "").strip()
 
@@ -94,6 +216,11 @@ def normalize_stock_input(stock_input: str) -> StockMeta:
     cleaned = raw.upper().replace(TW_SUFFIX, "").replace(TWO_SUFFIX, "").strip()
 
     lookup = _twstock_lookup(raw)
+
+    if not lookup and not cleaned.isdigit():
+        # twstock 內建資料庫不含興櫃股票，改用 FinMind 全市場清單
+        # （上市／上櫃／興櫃皆含）做名稱查詢備援。
+        lookup = _finmind_name_lookup(raw)
 
     if lookup:
         stock_id, stock_name = lookup
