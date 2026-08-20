@@ -1,41 +1,41 @@
 from __future__ import annotations
- 
+
 """
 market_disposition_service.py
- 
+
 用途：
     大盤處置日報：整合 TWSE（上市）與 TPEX（上櫃）目前仍在
     處置期間的股票，依「撮合分鐘數」分組，供 LINE 圖卡使用。
- 
+
 資料來源：
     1. TWSE 證交所 OpenAPI：openapi.twse.com.tw/v1/announcement/punish
     2. TPEX 櫃買中心 OpenAPI：www.tpex.org.tw/openapi/v1/tpex_disposal_information
- 
+
 篩選：
     只保留「4 碼以內的純數字代號」，排除權證及其他衍生商品。
     只保留「今天仍落在處置期間內」的股票。
- 
+
 分組：
     依官方公告內容判讀出的撮合分鐘數（例如「約每5分鐘撮合一次」）分組；
     無法判讀者歸入「未列明」。
 """
- 
+
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
- 
+
 import requests
- 
-MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-19-v1"
- 
+
+MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-19-v2-dedupe-new-flag"
+
 TWSE_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
- 
+
 TIMEOUT = 20
- 
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -44,81 +44,81 @@ HEADERS = {
     ),
     "Accept": "application/json",
 }
- 
+
 MARKET_DISPOSITION_CACHE_TTL_SECONDS = 15 * 60
 _MARKET_DISPOSITION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
- 
+
 UNKNOWN_GROUP_KEY = "na"
- 
- 
+
+
 def _debug(*args):
     print("DEBUG market_disposition |", *args, flush=True)
- 
- 
+
+
 # ============================================================
 # 基本工具
 # ============================================================
- 
- 
+
+
 def _clean_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
- 
- 
+
+
 def _is_stock_code(code: str) -> bool:
     """只接受純數字、4 碼以下（排除權證等衍生商品）。"""
     code = _clean_text(code)
     return bool(re.fullmatch(r"\d+", code)) and len(code) <= 4
- 
- 
+
+
 def _today_tpe() -> date:
     return datetime.now(ZoneInfo("Asia/Taipei")).date()
- 
- 
+
+
 def _parse_date(value: Any):
     """支援 2026/08/18、2026-08-18、115/08/18、1150818。"""
     value = _clean_text(value)
     if not value:
         return None
- 
+
     m = re.fullmatch(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", value)
     if m:
         try:
             return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
             return None
- 
+
     m = re.fullmatch(r"(\d{3})[/-](\d{1,2})[/-](\d{1,2})", value)
     if m:
         try:
             return date(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
         except ValueError:
             return None
- 
+
     m = re.fullmatch(r"(\d{3})(\d{2})(\d{2})", value)
     if m:
         try:
             return date(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
         except ValueError:
             return None
- 
+
     return None
- 
- 
+
+
 def _parse_period(value: Any):
     """解析『115/08/18~115/08/29』『2026/08/18～2026/08/29』。"""
     value = _clean_text(value)
     if not value:
         return None, None
- 
+
     parts = re.split(r"[~～]", value)
     if len(parts) != 2:
         return None, None
- 
+
     return _parse_date(parts[0]), _parse_date(parts[1])
- 
- 
+
+
 _CHINESE_NUMBER = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
@@ -127,67 +127,67 @@ _CHINESE_NUMBER = {
     "二十一": 21, "二十二": 22, "二十三": 23, "二十四": 24, "二十五": 25,
     "四十五": 45, "六十": 60,
 }
- 
- 
+
+
 def _detect_matching_minutes(text: Any):
     """從官方處置內容判讀撮合分鐘數，例如『約每5分鐘撮合一次』。"""
     text = _clean_text(text)
     if not text:
         return None
- 
+
     match = re.search(r"約每\s*(\d+)\s*分鐘\s*撮合", text)
     if match:
         return int(match.group(1))
- 
+
     for chinese, number in sorted(
         _CHINESE_NUMBER.items(), key=lambda x: len(x[0]), reverse=True
     ):
         pattern = rf"約每\s*{re.escape(chinese)}\s*分鐘\s*撮合"
         if re.search(pattern, text):
             return number
- 
+
     return None
- 
- 
+
+
 def _period_display(start, end, fallback: str) -> str:
     """輸出 MM/DD～MM/DD；缺資料時退回官方原始文字。"""
     if start and end:
         return f"{start.month:02d}/{start.day:02d}～{end.month:02d}/{end.day:02d}"
     return fallback or "--"
- 
- 
+
+
 # ============================================================
 # TWSE（上市）
 # ============================================================
- 
- 
+
+
 def _fetch_twse() -> list[dict[str, Any]]:
     try:
         response = requests.get(TWSE_URL, headers=HEADERS, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()
- 
+
         if not isinstance(data, list):
             _debug("TWSE 回傳非 list", type(data))
             return []
- 
+
         result: list[dict[str, Any]] = []
- 
+
         for item in data:
             code = _clean_text(item.get("Code"))
             if not _is_stock_code(code):
                 continue
- 
+
             name = _clean_text(item.get("Name"))
             period = _clean_text(item.get("DispositionPeriod"))
             measures = _clean_text(item.get("DispositionMeasures"))
             detail = _clean_text(item.get("Detail"))
- 
+
             start_date, end_date = _parse_period(period)
             minutes = _detect_matching_minutes(detail) or _detect_matching_minutes(
                 measures
             )
- 
+
             result.append(
                 {
                     "market": "上市",
@@ -199,31 +199,31 @@ def _fetch_twse() -> list[dict[str, Any]]:
                     "minutes": minutes,
                 }
             )
- 
+
         return result
- 
+
     except Exception as e:
         _debug("TWSE 取得失敗", type(e).__name__, str(e))
         return []
- 
- 
+
+
 # ============================================================
 # TPEX（上櫃）
 # ============================================================
- 
- 
+
+
 def _fetch_tpex() -> list[dict[str, Any]]:
     try:
         response = requests.get(TPEX_URL, headers=HEADERS, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()
- 
+
         if not isinstance(data, list):
             _debug("TPEX 回傳非 list", type(data))
             return []
- 
+
         result: list[dict[str, Any]] = []
- 
+
         for item in data:
             code = ""
             for key in (
@@ -236,30 +236,30 @@ def _fetch_tpex() -> list[dict[str, Any]]:
                 if item.get(key):
                     code = _clean_text(item.get(key))
                     break
- 
+
             if not _is_stock_code(code):
                 continue
- 
+
             name = ""
             for key in ("CompanyName", "Name", "SecurityName", "證券名稱", "名稱"):
                 if item.get(key):
                     name = _clean_text(item.get(key))
                     break
- 
+
             period = ""
             for key in ("DispositionPeriod", "Period", "處置起訖時間"):
                 if item.get(key):
                     period = _clean_text(item.get(key))
                     break
- 
+
             detail_parts = [
                 _clean_text(value) for value in item.values() if _clean_text(value)
             ]
             detail = " ".join(detail_parts)
- 
+
             start_date, end_date = _parse_period(period)
             minutes = _detect_matching_minutes(detail)
- 
+
             result.append(
                 {
                     "market": "上櫃",
@@ -271,27 +271,27 @@ def _fetch_tpex() -> list[dict[str, Any]]:
                     "minutes": minutes,
                 }
             )
- 
+
         return result
- 
+
     except Exception as e:
         _debug("TPEX 取得失敗", type(e).__name__, str(e))
         return []
- 
- 
+
+
 # ============================================================
 # Snapshot
 # ============================================================
- 
- 
+
+
 @dataclass
 class MarketDispositionGroup:
     key: str
     minutes: int | None
     label: str
     rows: list[dict[str, Any]] = field(default_factory=list)
- 
- 
+
+
 @dataclass
 class MarketDispositionSnapshot:
     available: bool
@@ -301,16 +301,16 @@ class MarketDispositionSnapshot:
     all_rows: list[dict[str, Any]] = field(default_factory=list)
     total_count: int = 0
     source: str = "TWSE / TPEX"
- 
- 
+
+
 def _group_key(minutes: int | None) -> str:
     return UNKNOWN_GROUP_KEY if minutes is None else str(minutes)
- 
- 
+
+
 def _group_label(minutes: int | None) -> str:
     return "未列明" if minutes is None else f"{minutes}分鐘"
- 
- 
+
+
 def _row_sort_key(row: dict[str, Any]):
     """
     依「新增日期」新→舊排序；同一天新增的再依「到期日」近→遠排序，
@@ -319,79 +319,113 @@ def _row_sort_key(row: dict[str, Any]):
     """
     start_date = row.get("start_date")
     end_date = row.get("end_date")
- 
+
     # 用 toordinal() 讓 None 也能安全比較：
     # start_date 用負值做「新到舊」；end_date 用正值做「近到遠」。
     start_order = -start_date.toordinal() if start_date else 0
     end_order = end_date.toordinal() if end_date else 0
- 
+
     return (start_order, end_order, row.get("code", ""))
- 
- 
+
+
 def _build_groups(rows: list[dict[str, Any]]) -> list[MarketDispositionGroup]:
     by_key: dict[str, MarketDispositionGroup] = {}
- 
+
     for row in rows:
         minutes = row.get("minutes")
         key = _group_key(minutes)
- 
+
         if key not in by_key:
             by_key[key] = MarketDispositionGroup(
                 key=key, minutes=minutes, label=_group_label(minutes)
             )
- 
+
         by_key[key].rows.append(row)
- 
+
     def sort_key(group: MarketDispositionGroup):
         # 撮合分鐘數由小到大；未列明排最後。
         return (group.minutes is None, group.minutes or 0)
- 
+
     groups = sorted(by_key.values(), key=sort_key)
- 
+
     for group in groups:
         group.rows.sort(key=_row_sort_key)
- 
+
     return groups
- 
- 
+
+
+def _dedupe_latest_by_code(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    同一檔股票若因多次處置公告而重複出現（例如同代號有兩段不同
+    的處置期間），只保留「最新一筆」：以 start_date 較新者為準，
+    若 start_date 相同則以 end_date 較新者為準。
+    """
+    best_by_code: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        code = row.get("code")
+        existing = best_by_code.get(code)
+
+        if existing is None:
+            best_by_code[code] = row
+            continue
+
+        cur_start = row.get("start_date") or date.min
+        exist_start = existing.get("start_date") or date.min
+
+        if cur_start > exist_start:
+            best_by_code[code] = row
+        elif cur_start == exist_start:
+            cur_end = row.get("end_date") or date.min
+            exist_end = existing.get("end_date") or date.min
+            if cur_end > exist_end:
+                best_by_code[code] = row
+
+    return list(best_by_code.values())
+
+
 def get_market_disposition_snapshot(
     force_refresh: bool = False,
 ) -> MarketDispositionSnapshot:
     """取得目前仍在處置期間的上市＋上櫃股票，並依撮合分鐘數分組。"""
- 
+
     cache_key = "market_disposition:v1"
     now = time.time()
- 
+
     if not force_refresh:
         cached = _MARKET_DISPOSITION_CACHE.get(cache_key)
         if cached:
             ts, data = cached
             if now - ts <= MARKET_DISPOSITION_CACHE_TTL_SECONDS:
                 return _snapshot_from_dict(data)
- 
+
     today = _today_tpe()
- 
+
     twse_rows = _fetch_twse()
     tpex_rows = _fetch_tpex()
     raw_rows = twse_rows + tpex_rows
- 
+
     active_rows: list[dict[str, Any]] = []
     for row in raw_rows:
         start_date = row.get("start_date")
         end_date = row.get("end_date")
- 
+
         if not start_date or not end_date:
             continue
- 
+
         if start_date <= today <= end_date:
             row = dict(row)
             row["period_display"] = _period_display(
                 start_date, end_date, row.get("period", "")
             )
+            row["is_new_today"] = start_date == today
             active_rows.append(row)
- 
+
+    # 同一股票代號若重複出現（多筆處置公告），只保留最新一筆。
+    active_rows = _dedupe_latest_by_code(active_rows)
+
     active_rows.sort(key=_row_sort_key)
- 
+
     data = {
         "available": True,
         "message": "ok" if active_rows else "目前沒有處置中股票。",
@@ -402,23 +436,23 @@ def get_market_disposition_snapshot(
         "twse_count": len(twse_rows),
         "tpex_count": len(tpex_rows),
     }
- 
+
     _MARKET_DISPOSITION_CACHE[cache_key] = (now, data)
- 
+
     _debug(
         "version =", MARKET_DISPOSITION_SERVICE_VERSION,
         "| twse =", len(twse_rows),
         "| tpex =", len(tpex_rows),
         "| active =", len(active_rows),
     )
- 
+
     return _snapshot_from_dict(data)
- 
- 
+
+
 def _snapshot_from_dict(data: dict[str, Any]) -> MarketDispositionSnapshot:
     rows = list(data.get("rows", []))
     groups = _build_groups(rows)
- 
+
     return MarketDispositionSnapshot(
         available=bool(data.get("available", False)),
         message=str(data.get("message", "")),
@@ -428,4 +462,3 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketDispositionSnapshot:
         total_count=int(data.get("total_count", 0)),
         source=str(data.get("source", "TWSE / TPEX")),
     )
- 
