@@ -168,10 +168,13 @@ def _get_finmind_stock_info_list() -> list[dict[str, Any]]:
         return cached[1] if cached else []
 
 
-def _finmind_name_lookup(query: str) -> Optional[tuple[str, str]]:
+def _finmind_lookup(query: str) -> Optional[tuple[str, str]]:
     """
-    用 FinMind TaiwanStockInfo（含興櫃）做股票名稱查詢的備援。
+    用 FinMind TaiwanStockInfo（含興櫃）做「代號」或「名稱」查詢的備援。
     只在 twstock 找不到時才呼叫，避免不必要的網路請求。
+
+    - 輸入是純數字代號：直接比對 stock_id（精準比對，興櫃代號也能查到正確名稱）。
+    - 輸入是中文/文字名稱：精準比對優先，其次模糊比對（同 _twstock_lookup 的邏輯）。
     """
     q = str(query or "").strip()
 
@@ -181,6 +184,20 @@ def _finmind_name_lookup(query: str) -> Optional[tuple[str, str]]:
     rows = _get_finmind_stock_info_list()
 
     if not rows:
+        return None
+
+    q_upper = q.upper().replace(TW_SUFFIX, "").replace(TWO_SUFFIX, "")
+
+    if q_upper.isdigit():
+        for row in rows:
+            stock_id = str(row.get("stock_id") or "").strip()
+
+            if stock_id == q_upper:
+                name = str(row.get("stock_name") or "").strip()
+
+                if name:
+                    return stock_id, name
+
         return None
 
     exact = []
@@ -217,10 +234,11 @@ def normalize_stock_input(stock_input: str) -> StockMeta:
 
     lookup = _twstock_lookup(raw)
 
-    if not lookup and not cleaned.isdigit():
-        # twstock 內建資料庫不含興櫃股票，改用 FinMind 全市場清單
-        # （上市／上櫃／興櫃皆含）做名稱查詢備援。
-        lookup = _finmind_name_lookup(raw)
+    if not lookup:
+        # twstock 內建資料庫不含興櫃股票（不論用代號或名稱查詢都查不到），
+        # 改用 FinMind 全市場清單（上市／上櫃／興櫃皆含）做備援查詢，
+        # 確保興櫃股票不論輸入代號或中文名稱，都能拿到正確的股票名稱。
+        lookup = _finmind_lookup(raw)
 
     if lookup:
         stock_id, stock_name = lookup
