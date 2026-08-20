@@ -750,9 +750,19 @@ def _market_disposition_group_buttons(
 ) -> list[dict[str, Any]]:
     """
     處置日報分組按鈕：第一顆固定「全部」，其餘依當天實際出現的
-    撮合分鐘數動態產生（例如 2分鐘／10分鐘），每排最多 4 顆。
+    撮合分鐘數動態產生（例如 2分鐘／5分鐘／10分鐘／25分鐘…）。
+    不論當天出現幾種分組，一律集中在同一排，寬度自動平均分配
+    （按鈕數越多字級越小，避免文字被截斷）。
     """
     active_group_key = str(active_group_key or "all").strip().lower()
+
+    total_buttons = 1 + len(groups)
+    if total_buttons <= 4:
+        text_size = "sm"
+    elif total_buttons <= 6:
+        text_size = "xs"
+    else:
+        text_size = "xxs"
 
     buttons = [
         _postback_button(
@@ -761,7 +771,7 @@ def _market_disposition_group_buttons(
             active=active_group_key in {"all", "market_disposition"},
             display_text="處置股票 全部",
             height="42px",
-            text_size="sm",
+            text_size=text_size,
         )
     ]
 
@@ -774,21 +784,20 @@ def _market_disposition_group_buttons(
                 active=active_group_key == group_key,
                 display_text=f"處置股票 {getattr(group, 'label', group_key)}",
                 height="42px",
-                text_size="sm",
+                text_size=text_size,
             )
         )
 
     rows: list[dict[str, Any]] = []
-    chunk_size = 4
 
-    for i in range(0, len(buttons), chunk_size):
+    if buttons:
         rows.append(
             {
                 "type": "box",
                 "layout": "horizontal",
                 "spacing": "xs",
-                "margin": "md" if i == 0 else "xs",
-                "contents": buttons[i : i + chunk_size],
+                "margin": "md",
+                "contents": buttons,
             }
         )
 
@@ -10330,6 +10339,29 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
         raw_stock = str(getattr(req, "stock", "") or "").strip()
         raw_text = str(getattr(req, "raw_text", "") or "").strip()
+
+        # -------------------------------------------------------
+        # 直接輸入「處置」相關關鍵字時，優先導向處置日報，
+        # 不需要先進大盤卡片再點按鈕。這個判斷放在最前面，
+        # 確保不受下方大盤路由判斷順序影響。
+        # -------------------------------------------------------
+        _DISPOSITION_DIRECT_KEYWORDS = {
+            "處置",
+            "處置股票",
+            "處置日報",
+            "處置股",
+            "處置股清單",
+            "disposition",
+        }
+        if (
+            action not in MARKET_INDEX_ACTIONS
+            and not action.startswith("market_disposition")
+            and (
+                raw_stock in _DISPOSITION_DIRECT_KEYWORDS
+                or raw_text in _DISPOSITION_DIRECT_KEYWORDS
+            )
+        ):
+            action = "market_disposition"
 
         # =========================
         # 加權指數 / 大盤路由
