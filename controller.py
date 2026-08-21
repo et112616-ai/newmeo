@@ -897,6 +897,49 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
             ],
         }
 
+    def _released_table_row(row: dict[str, Any]) -> dict[str, Any]:
+        """今日解除的列：用灰色＋刪除線呈現「即將脫離處置」的感覺。"""
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "6px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": str(row.get("code", "--")),
+                    "size": "xs",
+                    "color": "#9E9E9E",
+                    "decoration": "line-through",
+                    "flex": 3,
+                    "align": "start",
+                },
+                {
+                    "type": "text",
+                    "text": str(row.get("name", "--")) or "--",
+                    "size": "xs",
+                    "color": "#9E9E9E",
+                    "decoration": "line-through",
+                    "flex": 4,
+                    "align": "start",
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": str(
+                        row.get("period_display")
+                        or row.get("period")
+                        or "--"
+                    ),
+                    "size": "xs",
+                    "color": "#9E9E9E",
+                    "decoration": "line-through",
+                    "flex": 5,
+                    "align": "end",
+                    "wrap": True,
+                },
+            ],
+        }
+
     groups = list(getattr(snapshot, "groups", []) or [])
     all_rows = list(getattr(snapshot, "all_rows", []) or [])
     trade_date = str(getattr(snapshot, "trade_date", "") or "--")
@@ -917,16 +960,31 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
             display_rows = list(getattr(matched, "rows", []) or [])
             group_title = getattr(matched, "label", "")
 
+    # 把「今天就到期、要解除處置」的股票獨立成一塊，跟仍在處置中的分開顯示。
+    ongoing_rows = [r for r in display_rows if not r.get("is_released_today")]
+    released_rows = [r for r in display_rows if r.get("is_released_today")]
+
     table_contents: list[dict[str, Any]] = [_table_header()]
 
-    if display_rows:
-        for row in display_rows:
+    if ongoing_rows:
+        for row in ongoing_rows:
             table_contents.append(_table_row(row))
-    else:
+    elif not released_rows:
         table_contents.append(
             {
                 "type": "text",
                 "text": "目前沒有處置中股票。",
+                "size": "sm",
+                "color": "#999999",
+                "margin": "sm",
+                "wrap": True,
+            }
+        )
+    else:
+        table_contents.append(
+            {
+                "type": "text",
+                "text": "無其他處置中股票。",
                 "size": "sm",
                 "color": "#999999",
                 "margin": "sm",
@@ -961,7 +1019,7 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
     contents.append(
         {
             "type": "text",
-            "text": f"{group_title}　共 {len(display_rows)} 檔",
+            "text": f"{group_title}　共 {len(ongoing_rows)} 檔",
             "size": "xs",
             "color": "#888888",
             "margin": "md",
@@ -981,11 +1039,41 @@ def _build_market_disposition_flex(snapshot, active_group_key: str = "all") -> d
         }
     )
 
+    if released_rows:
+        released_table_contents: list[dict[str, Any]] = [_table_header()]
+
+        for row in released_rows:
+            released_table_contents.append(_released_table_row(row))
+
+        contents.append(
+            {
+                "type": "text",
+                "text": f"🔓 今日解除　共 {len(released_rows)} 檔",
+                "size": "xs",
+                "color": "#4CAF50",
+                "weight": "bold",
+                "margin": "lg",
+            }
+        )
+
+        contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "xs",
+                "margin": "sm",
+                "paddingAll": "6px",
+                "backgroundColor": "#F1F4F1",
+                "cornerRadius": "md",
+                "contents": released_table_contents,
+            }
+        )
+
     contents.append(
         {
             "type": "text",
             "text": (
-                "紅色粗體為當日新增處置股票；同股票有多筆公告時，"
+                "紅色粗體為當日新增、灰色刪除線為當日解除處置；同股票有多筆公告時，"
                 "以最新一筆為準。分組依交易所公告撮合頻率，"
                 f"僅供參考。資料來源：{source}。"
             ),
