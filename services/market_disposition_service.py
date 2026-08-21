@@ -23,13 +23,13 @@ market_disposition_service.py
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 
-MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-20-v3-released-today"
+MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-21-v4-release-next-trading-day"
 
 TWSE_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
@@ -313,19 +313,19 @@ def _group_label(minutes: int | None) -> str:
 
 def _row_sort_key(row: dict[str, Any]):
     """
-    依「新增日期」新→舊排序；同一天新增的再依「到期日」近→遠排序，
+    依「新增日期」新→舊排序；同一天新增的再依「實際解除日」近→遠排序，
     最後用股號做穩定排序。
     → 最上面是最新增的，最下面是快要出關的。
     """
     start_date = row.get("start_date")
-    end_date = row.get("end_date")
+    release_date = row.get("release_date") or row.get("end_date")
 
     # 用 toordinal() 讓 None 也能安全比較：
-    # start_date 用負值做「新到舊」；end_date 用正值做「近到遠」。
+    # start_date 用負值做「新到舊」；release_date 用正值做「近到遠」。
     start_order = -start_date.toordinal() if start_date else 0
-    end_order = end_date.toordinal() if end_date else 0
+    release_order = release_date.toordinal() if release_date else 0
 
-    return (start_order, end_order, row.get("code", ""))
+    return (start_order, release_order, row.get("code", ""))
 
 
 def _build_groups(rows: list[dict[str, Any]]) -> list[MarketDispositionGroup]:
@@ -384,10 +384,24 @@ def _dedupe_latest_by_code(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(best_by_code.values())
 
 
+def _next_trading_day(d: date) -> date:
+    """
+    往後找下一個「交易日」（只跳過六日，不含國定假日／補假）。
+
+    注意：台灣證交所實際上還有國定假日不開盤，這裡沒有內建假日曆，
+    所以遇到連假（例如農曆年、國慶連假）算出來的解除日會提前，
+    需要另外維護假日清單才能完全準確。目前只處理最常見的週末情況。
+    """
+    next_day = d + timedelta(days=1)
+    while next_day.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        next_day += timedelta(days=1)
+    return next_day
+
+
 def get_market_disposition_snapshot(
     force_refresh: bool = False,
 ) -> MarketDispositionSnapshot:
-    """取得目前仍在處置期間的上市＋上櫃股票，並依撮合分鐘數分組。"""
+    """取得目前仍在處置期間（含當日剛解除者）的上市＋上櫃股票，並依撮合分鐘數分組。"""
 
     cache_key = "market_disposition:v1"
     now = time.time()
@@ -413,13 +427,19 @@ def get_market_disposition_snapshot(
         if not start_date or not end_date:
             continue
 
-        if start_date <= today <= end_date:
+        # 公告的處置期間「最後一天」當天仍受限，真正解除是期間結束後
+        # 的下一個交易日（例如期間 8/13~8/21〔五〕，下一個交易日
+        # 8/24〔一〕才解除）。所以顯示範圍要延伸到 release_date。
+        release_date = _next_trading_day(end_date)
+
+        if start_date <= today <= release_date:
             row = dict(row)
             row["period_display"] = _period_display(
                 start_date, end_date, row.get("period", "")
             )
+            row["release_date"] = release_date
             row["is_new_today"] = start_date == today
-            row["is_released_today"] = end_date == today
+            row["is_released_today"] = release_date == today
             active_rows.append(row)
 
     # 同一股票代號若重複出現（多筆處置公告），只保留最新一筆。
