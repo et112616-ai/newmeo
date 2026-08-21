@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-19-v2-dedupe-new-flag"
+MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-20-v3-released-today"
 
 TWSE_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
@@ -419,6 +419,7 @@ def get_market_disposition_snapshot(
                 start_date, end_date, row.get("period", "")
             )
             row["is_new_today"] = start_date == today
+            row["is_released_today"] = end_date == today
             active_rows.append(row)
 
     # 同一股票代號若重複出現（多筆處置公告），只保留最新一筆。
