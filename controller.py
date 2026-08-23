@@ -76,6 +76,7 @@ from services.chip_service import (
     get_institutional_chips,
     get_large_holder_table,
     get_margin_table,
+    get_retail_holder_table,
 )
 from services.market_chip_service import get_market_chip_snapshot
 from services.market_future_kline_service import get_market_future_kline_snapshot
@@ -262,6 +263,30 @@ def _normalize_action(action: str | None) -> str:
         "600張大戶": "large_holder_600",
         "800張大戶": "large_holder_800",
         "1000張大戶": "large_holder_1000",
+
+        # 散戶
+        "retail": "retail_holder",
+        "retail_holder": "retail_holder",
+        "small": "retail_holder",
+        "small_holder": "retail_holder",
+        "散戶": "retail_holder",
+        "散戶持股": "retail_holder",
+
+        "retail_holder_10": "retail_holder_10",
+        "retail_holder_20": "retail_holder_20",
+        "retail_holder_30": "retail_holder_30",
+        "retail_holder_50": "retail_holder_50",
+        "retail_holder_200": "retail_holder_200",
+        "10張散戶": "retail_holder_10",
+        "20張散戶": "retail_holder_20",
+        "30張散戶": "retail_holder_30",
+        "50張散戶": "retail_holder_50",
+        "200張散戶": "retail_holder_200",
+        "散戶10": "retail_holder_10",
+        "散戶20": "retail_holder_20",
+        "散戶30": "retail_holder_30",
+        "散戶50": "retail_holder_50",
+        "散戶200": "retail_holder_200",
 
         # EPS
         "financial": "financial",
@@ -4272,17 +4297,18 @@ def _mode_buttons(stock_id: str, active_mode: str, current_tf: str) -> list[dict
             ("即時", "instant"),
             ("K線", "k_line"),
             ("法人", "chip"),
-            ("大戶", "large_holder"),
+            ("融資券", "margin"),
         ],
         [
-            ("融資券", "margin"),
+            ("大戶", "large_holder"),
+            ("散戶", "retail_holder"),
             ("財務", "financial"),
-            ("期貨", "futures"),
             ("盤後分析", "post_market_short"),
         ],
         [
             ("主力進出", "main_force"),
             ("族群比較", "peer_compare"),
+            ("期貨", "futures"),
         ],
     ]
 
@@ -6537,6 +6563,279 @@ def _large_holder_threshold_buttons(
         "spacing": "xs",
         "margin": "md",
         "contents": buttons,
+    }
+
+
+def _retail_holder_threshold_from_action(action: str | None) -> int:
+    text = str(action or "").strip().lower()
+
+    for threshold in [10, 20, 30, 50, 200]:
+        if str(threshold) in text:
+            return threshold
+
+    return 200
+
+
+def _retail_holder_threshold_label(threshold: int) -> str:
+    try:
+        threshold = int(threshold)
+    except Exception:
+        threshold = 200
+
+    return f"未達{threshold}張"
+
+
+def _retail_holder_threshold_buttons(
+    stock_id: str,
+    active_threshold: int,
+    current_tf: str = "D",
+) -> dict[str, Any]:
+    try:
+        active_threshold = int(active_threshold)
+    except Exception:
+        active_threshold = 200
+
+    tf = normalize_time_frame(current_tf)
+
+    buttons = []
+
+    for threshold in [10, 20, 30, 50, 200]:
+        action_name = f"retail_holder_{threshold}"
+        is_active = active_threshold == threshold
+
+        buttons.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "height": "36px",
+                "cornerRadius": "8px",
+                "backgroundColor": ACTIVE_COLOR if is_active else INACTIVE_COLOR,
+                "justifyContent": "center",
+                "alignItems": "center",
+                "action": {
+                    "type": "postback",
+                    "label": str(threshold),
+                    "data": f"{stock_id},{action_name},{action_name},{tf}",
+                    "displayText": f"{stock_id} 散戶{threshold}",
+                },
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": str(threshold),
+                        "size": "xs",
+                        "weight": "bold" if is_active else "regular",
+                        "align": "center",
+                        "gravity": "center",
+                        "color": "#FFFFFF" if is_active else "#111111",
+                    }
+                ],
+            }
+        )
+
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "xs",
+        "margin": "md",
+        "contents": buttons,
+    }
+
+
+def _build_retail_holder_flex(
+    stock_id: str,
+    stock_name: str,
+    rows,
+    current_tf: str = "D",
+    threshold: int = 200,
+):
+    """
+    顯示個股散戶（未達 X 張）持股近 5 週。
+    欄位：日期 | 人數 | 持股比 | 增減
+
+    跟 _build_large_holder_flex 是同一套 row 資料形狀（date/people/ratio/diff），
+    共用同一批 _lh_* 輔助函式，只有標題／門檻／資料來源不同。
+    """
+    try:
+        threshold = int(threshold)
+    except Exception:
+        threshold = 200
+
+    if threshold not in {10, 20, 30, 50, 200}:
+        threshold = 200
+
+    threshold_label = _retail_holder_threshold_label(threshold)
+    raw_rows = list(rows or [])
+
+    print(
+        "DEBUG retail_holder flex",
+        "| stock_id =",
+        stock_id,
+        "| threshold =",
+        threshold,
+        "| rows_count =",
+        len(raw_rows),
+        "| sample =",
+        raw_rows[:2],
+        flush=True,
+    )
+
+    contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{stock_id} {stock_name}",
+            "weight": "bold",
+            "size": "xxl",
+            "color": "#111111",
+            "wrap": True,
+        }
+    ]
+
+    if not raw_rows:
+        contents.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f"散戶持股｜{threshold_label}",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#444444",
+                    "margin": "sm",
+                    "wrap": True,
+                },
+                _retail_holder_threshold_buttons(stock_id, threshold, current_tf),
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": f"目前查無{threshold_label}散戶持股資料。",
+                    "size": "sm",
+                    "color": "#777777",
+                    "margin": "md",
+                    "wrap": True,
+                },
+            ]
+        )
+    else:
+        sorted_rows = sorted(raw_rows, key=_lh_sort_key)
+        latest_rows = list(reversed(sorted_rows[-5:]))
+
+        computed_rows = [
+            _lh_row_to_computed(row, sorted_rows)
+            for row in latest_rows
+        ]
+
+        latest = computed_rows[0] if computed_rows else {
+            "date": "--",
+            "people": "--",
+            "ratio": "--",
+            "change": "--",
+            "change_color": "#666666",
+        }
+
+        contents.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f"散戶持股｜{threshold_label}｜最新 {latest.get('date', '--')}",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#444444",
+                    "margin": "sm",
+                    "wrap": True,
+                },
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "margin": "md",
+                    "contents": [
+                        _lh_metric_box(
+                            f"{threshold_label}人數",
+                            _lh_with_unit_people(latest.get("people", "--")),
+                        ),
+                        _lh_metric_box(
+                            "持股比",
+                            latest.get("ratio", "--"),
+                        ),
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#F8F9FA",
+                    "cornerRadius": "12px",
+                    "paddingAll": "10px",
+                    "margin": "sm",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "週變化",
+                            "size": "xs",
+                            "color": "#888888",
+                        },
+                        {
+                            "type": "text",
+                            "text": latest.get("change", "--"),
+                            "size": "lg",
+                            "weight": "bold",
+                            "color": latest.get("change_color", "#666666"),
+                            "margin": "xs",
+                        },
+                    ],
+                },
+                _retail_holder_threshold_buttons(stock_id, threshold, current_tf),
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": "近5週",
+                    "size": "md",
+                    "weight": "bold",
+                    "color": "#444444",
+                    "margin": "md",
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "sm",
+                    "spacing": "xs",
+                    "contents": [
+                        _large_holder_week_row(
+                            "日期",
+                            "人數",
+                            "持股比",
+                            "增減",
+                            "#666666",
+                            is_header=True,
+                        ),
+                        *[
+                            _large_holder_week_row(
+                                row["date"],
+                                row["people"],
+                                row["ratio"],
+                                row["change"],
+                                row["change_color"],
+                            )
+                            for row in computed_rows
+                        ],
+                    ],
+                },
+            ]
+        )
+
+    contents.extend(_mode_buttons(stock_id, "retail_holder", current_tf))
+
+    return {
+        "type": "flex",
+        "altText": f"{stock_id} {stock_name} 散戶持股",
+        "contents": {
+            "type": "bubble",
+            "size": "mega",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": contents,
+            },
+        },
     }
 
 
@@ -11621,6 +11920,47 @@ def handle_request(req: BotRequest) -> dict[str, Any]:
 
             return _reply_with_title(
                 f"{stock_name} 大戶持股",
+                flex,
+            )
+
+        # -------------------------
+        # 3b. 散戶持股
+        # -------------------------
+        if action in {"retail_holder", "retail_holder_10", "retail_holder_20", "retail_holder_30", "retail_holder_50", "retail_holder_200"}:
+            t_data0 = time.perf_counter()
+
+            retail_threshold = _retail_holder_threshold_from_action(action)
+
+            rows = get_retail_holder_table(
+                meta.stock_id,
+                threshold=retail_threshold,
+            )
+
+            t_data1 = time.perf_counter()
+
+            flex = _build_retail_holder_flex(
+                stock_id=meta.stock_id,
+                stock_name=stock_name,
+                rows=rows,
+                current_tf=requested_tf,
+                threshold=retail_threshold,
+            )
+
+            t_flex1 = time.perf_counter()
+
+            print(
+                "DEBUG stock timing retail_holder",
+                "| stock_id =", getattr(meta, "stock_id", ""),
+                "| threshold =", retail_threshold,
+                "| rows =", 0 if rows is None else len(rows),
+                "| data_sec =", round(t_data1 - t_data0, 3),
+                "| flex_sec =", round(t_flex1 - t_data1, 3),
+                "| total_sec =", round(time.perf_counter() - stock_t0, 3),
+                flush=True,
+            )
+
+            return _reply_with_title(
+                f"{stock_name} 散戶持股",
                 flex,
             )
 
