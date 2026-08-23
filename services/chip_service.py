@@ -586,6 +586,173 @@ def _threshold_from_tdcc_level(level_num: int) -> list[int]:
     return []
 
 
+RETAIL_HOLDER_THRESHOLDS = [10, 20, 30, 50, 200]
+
+
+def _retail_threshold_from_tdcc_level(level_num: int) -> list[int]:
+    """
+    回傳此 TDCC 分級應該累計到哪些「散戶」門檻（未達 X 張）。
+
+    TDCC 持股分級（股數）：
+    1 = 1~999            2 = 1,000~5,000       3 = 5,001~10,000
+    4 = 10,001~15,000    5 = 15,001~20,000     6 = 20,001~30,000
+    7 = 30,001~40,000    8 = 40,001~50,000     9 = 50,001~100,000
+    10 = 100,001~200,000
+
+    散戶門檻＝未達 X 張（X張 = X*1,000股）：
+    10張  ← level 1~3   （上限 10,000股）
+    20張  ← level 1~5   （上限 20,000股）
+    30張  ← level 1~6   （上限 30,000股）
+    50張  ← level 1~8   （上限 50,000股）
+    200張 ← level 1~10  （上限 200,000股）
+    """
+    if 1 <= level_num <= 3:
+        return [10, 20, 30, 50, 200]
+    if 4 <= level_num <= 5:
+        return [20, 30, 50, 200]
+    if level_num == 6:
+        return [30, 50, 200]
+    if 7 <= level_num <= 8:
+        return [50, 200]
+    if 9 <= level_num <= 10:
+        return [200]
+    return []
+
+
+def _empty_retail_holder_metrics() -> dict[int, dict[str, float]]:
+    return {
+        threshold: {
+            "ratio": 0.0,
+            "people": 0,
+        }
+        for threshold in RETAIL_HOLDER_THRESHOLDS
+    }
+
+
+def _calc_retail_holder_threshold_metrics(rows: list[dict]) -> dict[int, dict[str, float]]:
+    """
+    從同一天同一檔股票的 TDCC 分級 rows，
+    加總「未達 10 / 20 / 30 / 50 / 200 張」人數與持股比（散戶視角）。
+    跟大戶共用同一批 rows，不用另外打一次 TDCC。
+    """
+    metrics = _empty_retail_holder_metrics()
+
+    for r in rows or []:
+        level_num = _tdcc_holding_level_num(r.get("持股分級", ""))
+
+        if level_num <= 0:
+            continue
+
+        ratio = _to_float(r.get("占集保庫存數比例%"))
+        people = _extract_holder_people(r)
+
+        for threshold in _retail_threshold_from_tdcc_level(level_num):
+            metrics[threshold]["ratio"] += ratio
+            metrics[threshold]["people"] += people
+
+    return metrics
+
+
+def _retail_holder_payload_from_metrics(
+    stock_id: str,
+    trade_date: str,
+    metrics: dict[int, dict[str, float]],
+    source: str = "TDCC",
+) -> dict[str, Any]:
+    sid = _clean_stock_id(stock_id)
+
+    payload: dict[str, Any] = {
+        "stock_id": sid,
+        "trade_date": trade_date,
+        "source": source,
+    }
+
+    for threshold in RETAIL_HOLDER_THRESHOLDS:
+        item = metrics.get(threshold, {}) or {}
+        payload[f"retail_holder_{threshold}_ratio"] = float(item.get("ratio", 0.0) or 0.0)
+        payload[f"retail_holder_{threshold}_people"] = int(item.get("people", 0) or 0)
+
+    return payload
+
+
+def _upsert_retail_holder_history_full(payload: dict[str, Any]) -> bool:
+    """
+    寫入散戶（未達 10/20/30/50/200 張）欄位。
+
+    刻意跟大戶 upsert 完全獨立：這裡失敗（例如欄位還沒建立）只會讓
+    散戶這次寫入失敗，絕對不會影響已經在正常運作的大戶資料寫入。
+    """
+    if not payload:
+        return False
+
+    url = _supabase_table_url("tdcc_large_holder_history")
+
+    if not url:
+        return False
+
+    headers = _supabase_headers_for_large_holder()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+
+    try:
+        res = requests.post(
+            url,
+            headers=headers,
+            params={"on_conflict": "stock_id,trade_date"},
+            json=payload,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            print(
+                "DEBUG retail_holder full upsert failed",
+                "| stock_id =",
+                payload.get("stock_id"),
+                "| trade_date =",
+                payload.get("trade_date"),
+                "| status =",
+                res.status_code,
+                "| body =",
+                res.text[:300],
+                flush=True,
+            )
+            return False
+
+        return True
+
+    except Exception as exc:
+        print(
+            "DEBUG retail_holder full upsert exception",
+            "| stock_id =",
+            payload.get("stock_id"),
+            "| trade_date =",
+            payload.get("trade_date"),
+            "| error =",
+            repr(exc),
+            flush=True,
+        )
+        return False
+
+
+def _normalize_retail_holder_threshold(value: Any = 200) -> int:
+    try:
+        num = int(
+            float(
+                str(value)
+                .replace("張", "")
+                .replace("未達", "")
+                .replace("+", "")
+                .strip()
+            )
+        )
+    except Exception:
+        num = 200
+
+    if num in RETAIL_HOLDER_THRESHOLDS:
+        return num
+
+    return 200
+
+
 def _empty_large_holder_metrics() -> dict[int, dict[str, float]]:
     return {
         threshold: {
@@ -1071,11 +1238,18 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
 
     for trade_date, date_rows in sorted(by_date.items(), reverse=True):
         metrics = _calc_large_holder_threshold_metrics(date_rows)
+        retail_metrics = _calc_retail_holder_threshold_metrics(date_rows)
 
         payload = _large_holder_payload_from_metrics(
             stock_id=sid,
             trade_date=trade_date,
             metrics=metrics,
+            source="TDCC",
+        )
+        retail_payload = _retail_holder_payload_from_metrics(
+            stock_id=sid,
+            trade_date=trade_date,
+            metrics=retail_metrics,
             source="TDCC",
         )
 
@@ -1087,6 +1261,8 @@ def _extract_tdcc_large_holder_records(stock_id: str) -> list[dict]:
                 "people": payload["large_holder_people"],
                 "payload": payload,
                 "metrics": metrics,
+                "retail_payload": retail_payload,
+                "retail_metrics": retail_metrics,
             }
         )
 
@@ -1256,6 +1432,333 @@ def _large_holder_from_supabase_history(
     return output_asc[-limit:][::-1]
 
 
+def _retail_holder_from_supabase_history(
+    stock_id: str,
+    limit: int = 6,
+    threshold: int = 200,
+) -> list[dict]:
+    """
+    從 Supabase 撈最近幾週散戶（未達 X 張）資料。比照大戶讀取邏輯。
+
+    threshold:
+    - 10 / 20 / 30 / 50 / 200（未達 X 張）
+    """
+    sid = _clean_stock_id(stock_id)
+    threshold = _normalize_retail_holder_threshold(threshold)
+
+    rows = _fetch_large_holder_history_rows_full(sid, limit=limit + 1)
+
+    if not rows:
+        rows = get_large_holder_history_rows(sid, limit=limit + 1)
+
+    if not rows:
+        return []
+
+    ratio_col = f"retail_holder_{threshold}_ratio"
+    people_col = f"retail_holder_{threshold}_people"
+
+    normalized = []
+
+    for r in rows:
+        date = str(r.get("trade_date", "")).strip()
+
+        if not date:
+            continue
+
+        ratio = _to_float(r.get(ratio_col))
+        people = _to_int(r.get(people_col))
+
+        # 散戶欄位若尚未同步（或 migration 還沒跑），不硬拿其他欄位誤導。
+        if ratio <= 0:
+            continue
+
+        normalized.append(
+            {
+                "date": date,
+                "ratio": ratio,
+                "people": people,
+                "threshold": threshold,
+            }
+        )
+
+    if not normalized:
+        return []
+
+    normalized = sorted(normalized, key=lambda x: x["date"])
+
+    output_asc = []
+
+    for i, item in enumerate(normalized):
+        ratio = item["ratio"]
+
+        if i > 0:
+            prev_ratio = normalized[i - 1]["ratio"]
+            diff = ratio - prev_ratio
+            diff_text = f"{diff:+.2f}%" if diff else "--"
+        else:
+            diff_text = "--"
+
+        output_asc.append(
+            {
+                "date": _fmt_md(item["date"]),
+                "people": item.get("people", 0),
+                "ratio": f"{ratio:.2f}%",
+                "diff": diff_text,
+                "threshold": threshold,
+            }
+        )
+
+    return output_asc[-limit:][::-1]
+
+
+def _retail_holder_threshold_fields_ready(
+    row: dict[str, Any],
+    threshold: int,
+) -> bool:
+    """確認最新週已包含指定散戶門檻欄位。"""
+    if not isinstance(row, dict) or not row:
+        return False
+
+    threshold = _normalize_retail_holder_threshold(threshold)
+    ratio = row.get(f"retail_holder_{threshold}_ratio")
+    people = row.get(f"retail_holder_{threshold}_people")
+
+    return ratio not in (None, "") and people not in (None, "")
+
+
+def _latest_retail_holder_db_status(
+    stock_id: str,
+    threshold: int,
+) -> dict[str, Any]:
+    """讀取資料庫最新週；只讀不刪，歷史資料會持續累積。"""
+    rows = _fetch_large_holder_history_rows_full(stock_id, limit=1)
+    row = rows[0] if rows else {}
+    trade_date = _normalize_date_for_db(row.get("trade_date", ""))
+    return {
+        "trade_date": trade_date,
+        "threshold_fields_ready": _retail_holder_threshold_fields_ready(
+            row,
+            threshold,
+        ),
+    }
+
+
+def _refresh_retail_holder_if_stale(
+    stock_id: str,
+    threshold: int,
+) -> dict[str, Any]:
+    """
+    LINE 查詢散戶時，只在資料庫落後 TDCC 最新週、或最新週缺該散戶門檻
+    欄位時才補抓。呼叫的是跟大戶同一個同步函式（sync_tdcc_latest_large_holder
+    現在會一併同步大戶＋散戶），所以不會為了散戶額外多打一次 TDCC。
+    """
+    sid = _clean_stock_id(stock_id)
+    threshold = _normalize_retail_holder_threshold(threshold)
+    status: dict[str, Any] = {
+        "version": LARGE_HOLDER_QUERY_VERSION,
+        "stock_id": sid,
+        "threshold": threshold,
+        "db_latest_date": "",
+        "tdcc_latest_date": "",
+        "threshold_fields_ready": False,
+        "refresh_needed": False,
+        "sync_attempted": False,
+        "sync_success": False,
+        "lock_busy": False,
+        "message": "",
+    }
+
+    if not _bool_env("LARGE_HOLDER_AUTO_REFRESH_ON_QUERY", default=True):
+        status["message"] = "auto refresh disabled"
+        return status
+
+    db_status = _latest_retail_holder_db_status(sid, threshold)
+    status["db_latest_date"] = db_status["trade_date"]
+    status["threshold_fields_ready"] = bool(
+        db_status["threshold_fields_ready"]
+    )
+
+    latest_df = _request_tdcc_latest_dataframe()
+    tdcc_latest_date = _latest_tdcc_trade_date(latest_df, sid)
+    status["tdcc_latest_date"] = tdcc_latest_date
+
+    if not tdcc_latest_date:
+        status["message"] = "TDCC latest source unavailable or stock missing"
+        print(
+            "DEBUG retail_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    refresh_needed = (
+        not status["db_latest_date"]
+        or tdcc_latest_date > status["db_latest_date"]
+        or (
+            tdcc_latest_date == status["db_latest_date"]
+            and not status["threshold_fields_ready"]
+        )
+    )
+    status["refresh_needed"] = refresh_needed
+
+    if not refresh_needed:
+        status["sync_success"] = True
+        status["message"] = "database already current"
+        print(
+            "DEBUG retail_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    # 共用大戶那把鎖：同一檔股票同時查大戶跟散戶時，只會有一邊真的去打 TDCC。
+    lock = _large_holder_stock_refresh_lock(sid)
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        status["lock_busy"] = True
+        status["message"] = "another refresh is running"
+        print(
+            "DEBUG retail_holder freshness",
+            "|", status,
+            flush=True,
+        )
+        return status
+
+    try:
+        current = _latest_retail_holder_db_status(sid, threshold)
+        if (
+            current["trade_date"]
+            and current["trade_date"] >= tdcc_latest_date
+            and current["threshold_fields_ready"]
+        ):
+            status.update({
+                "db_latest_date": current["trade_date"],
+                "threshold_fields_ready": True,
+                "sync_success": True,
+                "message": "database refreshed by another request",
+            })
+            return status
+
+        status["sync_attempted"] = True
+        sync_result = sync_tdcc_latest_large_holder(sid)
+        after = _latest_retail_holder_db_status(sid, threshold)
+        status["db_latest_date"] = after["trade_date"]
+        status["threshold_fields_ready"] = bool(
+            after["threshold_fields_ready"]
+        )
+        status["sync_success"] = bool(
+            sync_result.get("retail_ok")
+            and after["trade_date"] >= tdcc_latest_date
+            and after["threshold_fields_ready"]
+        )
+        status["message"] = (
+            "latest week accumulated"
+            if status["sync_success"]
+            else str(sync_result.get("message") or "latest sync failed")
+        )
+        return status
+    except Exception as exc:
+        status["message"] = repr(exc)
+        return status
+    finally:
+        lock.release()
+        print(
+            "DEBUG retail_holder freshness",
+            "|", status,
+            flush=True,
+        )
+
+
+def get_retail_holder_table(stock_id: str, threshold: int = 200) -> list[dict]:
+    """
+    散戶（未達 X 張）持股比率。用法比照 get_large_holder_table。
+
+    threshold:
+    - 10：未達 10 張
+    - 20：未達 20 張
+    - 30：未達 30 張
+    - 50：未達 50 張
+    - 200：未達 200 張
+
+    Supabase 持續累積所有週別；回傳給 LINE 的資料固定只取最新 5 週。
+    """
+    sid = _clean_stock_id(stock_id)
+    threshold = _normalize_retail_holder_threshold(threshold)
+
+    history = _retail_holder_from_supabase_history(
+        sid,
+        limit=6,
+        threshold=threshold,
+    )
+
+    print(
+        "DEBUG retail_holder table supabase_first",
+        "| stock_id =", sid,
+        "| threshold =", threshold,
+        "| history_count =", len(history or []),
+        flush=True,
+    )
+
+    refresh_status = _refresh_retail_holder_if_stale(sid, threshold)
+    if (
+        refresh_status.get("sync_attempted")
+        or refresh_status.get("lock_busy")
+    ):
+        history = _retail_holder_from_supabase_history(
+            sid,
+            limit=6,
+            threshold=threshold,
+        )
+
+    print(
+        "DEBUG retail_holder table freshness_checked",
+        "| stock_id =", sid,
+        "| threshold =", threshold,
+        "| refresh_status =", refresh_status,
+        "| history_count =", len(history or []),
+        flush=True,
+    )
+
+    # 跟大戶一樣：Supabase 不足 2 週時，第一次查詢自動補歷史（8 週）。
+    # 這個回補流程本來就會把大戶＋散戶一起寫入。
+    if len(history or []) < 2:
+        try:
+            start_date = os.getenv("TDCC_HISTORY_START_DATE", "20260626").strip() or "20260626"
+            max_weeks = int(os.getenv("TDCC_HISTORY_MAX_WEEKS", "8"))
+
+            sync_result = sync_tdcc_large_holder_history_since(
+                sid,
+                start_date=start_date,
+                max_weeks=max_weeks,
+            )
+
+            history = _retail_holder_from_supabase_history(
+                sid,
+                limit=6,
+                threshold=threshold,
+            )
+
+            print(
+                "DEBUG retail_holder table after_auto_history_sync",
+                "| stock_id =", sid,
+                "| threshold =", threshold,
+                "| sync_result =", sync_result,
+                "| history_count =", len(history or []),
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "DEBUG retail_holder table auto_history_sync_failed",
+                "| stock_id =", sid,
+                "| threshold =", threshold,
+                "| error =", repr(exc),
+                flush=True,
+            )
+
+    return history or []
+
+
 def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
     """
     同步單檔 TDCC latest CSV 的最新一週 200 / 400 / 600 / 800 / 1000 張以上資料。
@@ -1287,9 +1790,22 @@ def sync_tdcc_latest_large_holder(stock_id: str) -> dict:
 
     ok = _upsert_large_holder_payload(payload, source="TDCC")
 
+    # 散戶（未達 10/20/30/50/200 張）是額外、獨立的 upsert，
+    # 跟大戶完全共用同一批 TDCC 原始 rows，不會多打一次 TDCC。
+    # 就算散戶欄位還沒建立（Supabase 尚未跑 migration），也只會讓
+    # retail_ok = False，不影響上面大戶的 ok。
+    retail_payload = record.get("retail_payload") or _retail_holder_payload_from_metrics(
+        stock_id=record["stock_id"],
+        trade_date=record["trade_date"],
+        metrics=record.get("retail_metrics") or {},
+        source="TDCC",
+    )
+    retail_ok = _upsert_retail_holder_history_full(retail_payload)
+
     return {
         "stock_id": sid,
         "ok": bool(ok),
+        "retail_ok": bool(retail_ok),
         "trade_date": payload.get("trade_date"),
         "ratio": payload.get("large_holder_ratio"),
         "people": payload.get("large_holder_people"),
@@ -1970,11 +2486,18 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
 
     trade_date = _yyyymmdd_to_db_date(sca_date)
     metrics = _calc_large_holder_threshold_metrics(rows)
+    retail_metrics = _calc_retail_holder_threshold_metrics(rows)
 
     payload = _large_holder_payload_from_metrics(
         stock_id=sid,
         trade_date=trade_date,
         metrics=metrics,
+        source="TDCC_HISTORY",
+    )
+    retail_payload = _retail_holder_payload_from_metrics(
+        stock_id=sid,
+        trade_date=trade_date,
+        metrics=retail_metrics,
         source="TDCC_HISTORY",
     )
 
@@ -2000,6 +2523,8 @@ def _extract_tdcc_large_holder_record_by_date(stock_id: str, sca_date: str) -> d
         "people": payload["large_holder_people"],
         "payload": payload,
         "metrics": metrics,
+        "retail_payload": retail_payload,
+        "retail_metrics": retail_metrics,
     }
 
 def sync_tdcc_large_holder_history_since(
@@ -2046,6 +2571,7 @@ def sync_tdcc_large_holder_history_since(
 
     synced_count = 0
     failed_count = 0
+    retail_synced_count = 0
 
     for record in records:
         payload = dict(record.get("payload") or {})
@@ -2070,6 +2596,16 @@ def sync_tdcc_large_holder_history_since(
         else:
             failed_count += 1
 
+        # 散戶：獨立 upsert，失敗不影響上面大戶的計數。
+        retail_payload = record.get("retail_payload") or _retail_holder_payload_from_metrics(
+            stock_id=record["stock_id"],
+            trade_date=record["trade_date"],
+            metrics=record.get("retail_metrics") or {},
+            source="TDCC_HISTORY",
+        )
+        if _upsert_retail_holder_history_full(retail_payload):
+            retail_synced_count += 1
+
     result = {
         "stock_id": sid,
         "ok": synced_count > 0,
@@ -2078,6 +2614,7 @@ def sync_tdcc_large_holder_history_since(
         "available_dates": dates,
         "synced_count": synced_count,
         "failed_count": failed_count,
+        "retail_synced_count": retail_synced_count,
         "records_count": len(records),
         "dates": [r["trade_date"] for r in records],
         "seconds": round(time.perf_counter() - t0, 3),
