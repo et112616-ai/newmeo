@@ -679,10 +679,28 @@ def _upsert_retail_holder_history_full(payload: dict[str, Any]) -> bool:
     """
     寫入散戶（未達 10/20/30/50/200 張）欄位。
 
-    刻意跟大戶 upsert 完全獨立：這裡失敗（例如欄位還沒建立）只會讓
-    散戶這次寫入失敗，絕對不會影響已經在正常運作的大戶資料寫入。
+    刻意用 PATCH（純更新），不用 upsert POST：
+    這一步永遠是接在大戶 upsert 成功建立/更新該筆列「之後」才呼叫，
+    所以那筆 (stock_id, trade_date) 列一定已經存在。
+
+    如果改用 upsert（INSERT ... ON CONFLICT DO UPDATE），Postgres 會在
+    「假設要新增這筆」的當下，就去檢查整張表的 NOT NULL 欄位限制——
+    即使最後其實走的是「更新已存在列」，還是會因為 payload 沒帶到
+    某個舊欄位（例如大戶那些欄位）而被 NOT NULL 擋下來，導致整次寫入
+    失敗。PATCH 沒有「假設要新增」這個動作，只會更新已存在的欄位，
+    可以完全避開這個問題。
+
+    若列真的還不存在（例如大戶那步剛好失敗），PATCH 就是 0 rows
+    affected，不會噴錯，但也不能算成功——用 return=representation
+    確認實際有更新到列，回傳的陣列若是空的就當作失敗。
     """
     if not payload:
+        return False
+
+    stock_id = payload.get("stock_id")
+    trade_date = payload.get("trade_date")
+
+    if not stock_id or not trade_date:
         return False
 
     url = _supabase_table_url("tdcc_large_holder_history")
@@ -690,25 +708,35 @@ def _upsert_retail_holder_history_full(payload: dict[str, Any]) -> bool:
     if not url:
         return False
 
+    # 過濾條件（stock_id / trade_date）不放進更新內容，只放 body。
+    body = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"stock_id", "trade_date"}
+    }
+
     headers = _supabase_headers_for_large_holder()
-    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    headers["Prefer"] = "return=representation"
 
     try:
-        res = requests.post(
+        res = requests.patch(
             url,
             headers=headers,
-            params={"on_conflict": "stock_id,trade_date"},
-            json=payload,
+            params={
+                "stock_id": f"eq.{stock_id}",
+                "trade_date": f"eq.{trade_date}",
+            },
+            json=body,
             timeout=15,
         )
 
         if res.status_code >= 400:
             print(
-                "DEBUG retail_holder full upsert failed",
+                "DEBUG retail_holder full patch failed",
                 "| stock_id =",
-                payload.get("stock_id"),
+                stock_id,
                 "| trade_date =",
-                payload.get("trade_date"),
+                trade_date,
                 "| status =",
                 res.status_code,
                 "| body =",
@@ -717,20 +745,36 @@ def _upsert_retail_holder_history_full(payload: dict[str, Any]) -> bool:
             )
             return False
 
+        updated_rows = res.json() if res.text else []
+
+        if not updated_rows:
+            print(
+                "DEBUG retail_holder full patch no_matching_row",
+                "| stock_id =",
+                stock_id,
+                "| trade_date =",
+                trade_date,
+                "| message =",
+                "大戶那筆列可能還不存在，散戶這次沒有實際更新到任何列",
+                flush=True,
+            )
+            return False
+
         return True
 
     except Exception as exc:
         print(
-            "DEBUG retail_holder full upsert exception",
+            "DEBUG retail_holder full patch exception",
             "| stock_id =",
-            payload.get("stock_id"),
+            stock_id,
             "| trade_date =",
-            payload.get("trade_date"),
+            trade_date,
             "| error =",
             repr(exc),
             flush=True,
         )
         return False
+
 
 
 def _normalize_retail_holder_threshold(value: Any = 200) -> int:
