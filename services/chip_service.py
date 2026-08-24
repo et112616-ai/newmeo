@@ -501,14 +501,18 @@ def _normalize_large_holder_threshold(value: Any = 1000) -> int:
 
 def _tdcc_holding_level_num(level_raw: Any) -> int:
     """
-    TDCC 股權分散表持股分級：
-    11 = 200,001 ~ 400,000 股
-    12 = 400,001 ~ 600,000 股
-    13 = 600,001 ~ 800,000 股
-    14 = 800,001 ~ 1,000,000 股
-    15 = 1,000,001 股以上
+    TDCC 股權分散表持股分級（股數）：
+    1  = 1~999            2  = 1,000~5,000       3  = 5,001~10,000
+    4  = 10,001~15,000    5  = 15,001~20,000     6  = 20,001~30,000
+    7  = 30,001~40,000    8  = 40,001~50,000     9  = 50,001~100,000
+    10 = 100,001~200,000  11 = 200,001~400,000   12 = 400,001~600,000
+    13 = 600,001~800,000  14 = 800,001~1,000,000 15 = 1,000,001以上
 
     回傳 0 代表無法辨識或合計列。
+
+    這個函式要同時吃兩種格式：
+    - 最新 CSV：直接是數字代碼（"1"、"11"...）
+    - 歷史 HTML 回補：文字級距（"1-999"、"1,000-5,000"...）
     """
     import re
 
@@ -531,19 +535,68 @@ def _tdcc_holding_level_num(level_raw: Any) -> int:
     except Exception:
         pass
 
-    # 文字級距。
+    # 文字級距「上界」對照表：涵蓋 1~14 級（15 級無上界，另外判斷）。
+    # 例如 "1-999" 上界 999 -> 1 級；"5001-10000" 上界 10000 -> 3 級。
+    BOUNDARY_TO_LEVEL = {
+        999: 1,
+        5000: 2,
+        10000: 3,
+        15000: 4,
+        20000: 5,
+        30000: 6,
+        40000: 7,
+        50000: 8,
+        100000: 9,
+        200000: 10,
+        400000: 11,
+        600000: 12,
+        800000: 13,
+        1000000: 14,
+    }
+
+    range_match = re.fullmatch(r"(\d+)[~-](\d+)", text)
+    if range_match:
+        upper = int(range_match.group(2))
+        if upper in BOUNDARY_TO_LEVEL:
+            return BOUNDARY_TO_LEVEL[upper]
+
+    # 15 級無上界："1000001以上" 這類格式。
     if "1000001" in text and ("以上" in text or "up" in lowered):
         return 15
+
+    # 舊版備援：以防範圍格式跟預期不完全一樣（例如少了連字號）。
     if "800001" in text and "1000000" in text:
         return 14
     if "600001" in text and "800000" in text:
         return 13
-    if "200001" in text and "400000" in text:
-        return 11
     if "400001" in text and "600000" in text:
         return 12
+    if "200001" in text and "400000" in text:
+        return 11
+    if "100001" in text and "200000" in text:
+        return 10
+    if "50001" in text and "100000" in text:
+        return 9
+    if "40001" in text and "50000" in text:
+        return 8
+    if "30001" in text and "40000" in text:
+        return 7
+    if "20001" in text and "30000" in text:
+        return 6
+    if "15001" in text and "20000" in text:
+        return 5
+    if "10001" in text and "15000" in text:
+        return 4
+    if "5001" in text and "10000" in text:
+        return 3
+    if "1000" in text and "5000" in text:
+        return 2
+    if text in {"1999", "1-999", "0999"}:
+        return 1
 
-    # 備援：從文字中的第一個數字推估。
+    # 最後備援：從文字中的第一個數字推估（只能大概判斷大戶級距，
+    # 散戶級距數字太小、範圍太密，這個備援對散戶不可靠，
+    # 但至少不會誤判成大戶級距）。
     nums = re.findall(r"\d+", text)
 
     if not nums:
@@ -567,6 +620,7 @@ def _tdcc_holding_level_num(level_raw: Any) -> int:
         pass
 
     return 0
+
 
 
 def _threshold_from_tdcc_level(level_num: int) -> list[int]:
