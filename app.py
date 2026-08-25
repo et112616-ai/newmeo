@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
@@ -335,6 +335,65 @@ def _add_chart_cache_headers(response):
     except Exception:
         pass
     return response
+
+@app.route("/test_disposition")
+def test_disposition():
+    token = request.args.get("token", "")
+    persist = request.args.get("persist", "0")
+
+    if token != TEST_TOKEN:
+        return jsonify({
+            "ok": False,
+            "error": "invalid token"
+        }), 401
+
+    # 這裡呼叫處置資料抓取程式
+    result = fetch_disposition_data()
+
+    return jsonify({
+        "ok": True,
+        "persist": persist,
+        "data": result
+    })
+
+@app.route("/test/etf/<etf_code>", methods=["GET"])
+def test_etf_holdings(etf_code):
+    try:
+        from datetime import date
+
+        from etf_holdings.service import ETFHoldingsService
+
+        service = ETFHoldingsService()
+
+        holdings = service.get_holdings(
+            etf_code=etf_code,
+            trade_date=date(2026, 8, 7),
+        )
+
+        return jsonify({
+            "ok": True,
+            "source": "yuanta",
+            "etf": etf_code.upper(),
+            "trade_date": "2026-08-07",
+            "count": len(holdings),
+            "data": [
+                {
+                    "stock_code": row.stock_code,
+                    "stock_name": row.stock_name,
+                    "shares": row.shares,
+                    "weight": row.weight,
+                }
+                for row in holdings
+            ],
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "source": "yuanta",
+            "etf": etf_code.upper(),
+            "error": str(e),
+        }), 500
 
 @app.route("/route_probe", methods=["GET"])
 def route_probe():
@@ -2709,6 +2768,91 @@ def market_prediction_shadow_quality_route():
             "message": "market prediction shadow quality failed",
             "error": repr(exc),
         }), 500
+
+
+@app.get("/market_prediction_shadow_detail")
+def market_prediction_shadow_detail_route():
+    """
+    匯出已結算影子預測的原始明細（不做彙總），供人工／外部分析用。
+    只回傳 prediction_ts / signal / actual_direction / actual_change_points
+    這幾個欄位，避免回應太肥。
+
+    用法：
+    /market_prediction_shadow_detail?token=xxx&start_date=2026-07-27&end_date=2026-08-22
+    """
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
+    end_date = str(request.args.get("end_date", "") or "").strip() or None
+    only_signals = str(
+        request.args.get("only_signals", "1") or "1"
+    ).strip() not in {"0", "false", "False"}
+
+    try:
+        from services.supabase_service import (
+            get_market_prediction_shadow_history,
+        )
+
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+        end_text = end_date or today.strftime("%Y-%m-%d")
+        start_text = start_date or (
+            today - timedelta(days=45)
+        ).strftime("%Y-%m-%d")
+
+        rows = get_market_prediction_shadow_history(
+            start_text,
+            end_text,
+            limit=10000,
+        )
+
+        settled = [
+            row
+            for row in rows
+            if str(row.get("status") or "") == "settled"
+        ]
+
+        if only_signals:
+            settled = [
+                row
+                for row in settled
+                if str(row.get("signal") or "") in {"up", "down"}
+            ]
+
+        detail = [
+            {
+                "prediction_ts": row.get("prediction_ts"),
+                "trade_date": row.get("trade_date"),
+                "signal": row.get("signal"),
+                "actual_direction": row.get("actual_direction"),
+                "actual_change_points": row.get("actual_change_points"),
+                "is_correct": row.get("is_correct"),
+            }
+            for row in settled
+        ]
+
+        return jsonify({
+            "ok": True,
+            "start_date": start_text,
+            "end_date": end_text,
+            "only_signals": only_signals,
+            "rows": len(detail),
+            "detail": detail,
+        }), 200
+
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_SHADOW_DETAIL failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction shadow detail failed",
+            "error": repr(exc),
+        }), 500
+
 
 
 @app.get("/sync_tdcc_large_holder")
