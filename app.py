@@ -2854,6 +2854,118 @@ def market_prediction_shadow_detail_route():
         }), 500
 
 
+@app.get("/market_prediction_training_label_distribution")
+def market_prediction_training_label_distribution_route():
+    """
+    統計「訓練期」原始資料的 target_direction（up/down/flat）分布，
+    用來對照 shadow 實測結果，判斷準確率低是訓練資料先天失衡，
+    還是市場最近才轉向。
+
+    這條路徑完全獨立於 shadow／訓練流程，只讀不寫，不會影響任何
+    正式模型或資料。
+
+    用法：
+    /market_prediction_training_label_distribution?token=xxx&start_date=2026-04-14&end_date=2026-07-13
+    """
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
+    end_date = str(request.args.get("end_date", "") or "").strip() or None
+
+    try:
+        from services.market_prediction_repository_v7 import (
+            load_market_prediction_rows_paginated,
+        )
+        from services.market_prediction_selective_service_v7 import (
+            _date_range,
+            _prepare_training_frame,
+        )
+
+        start, end = _date_range(start_date, end_date)
+
+        rows, repository_status = load_market_prediction_rows_paginated(
+            start,
+            end,
+            limit=50000,
+        )
+
+        if not repository_status.get("ok"):
+            return jsonify({
+                "ok": False,
+                "message": "Supabase 訓練資料分頁讀取失敗",
+                "repository_status": repository_status,
+            }), 500
+
+        frame = _prepare_training_frame(rows)
+
+        if frame is None or len(frame) == 0:
+            return jsonify({
+                "ok": False,
+                "message": "訓練資料為空",
+                "start_date": start,
+                "end_date": end,
+                "database_rows": len(rows),
+            }), 200
+
+        direction_counts = (
+            frame["target_direction"].value_counts().to_dict()
+        )
+        event_counts = (
+            frame["target_event"].value_counts().to_dict()
+        )
+
+        total = int(len(frame))
+        up_count = int(direction_counts.get(1, 0))
+        down_count = int(direction_counts.get(-1, 0))
+        flat_count = int(direction_counts.get(0, 0))
+
+        # 依交易日拆分，順便看每天的 up/down/flat 是否隨時間漂移。
+        by_day = []
+        if "trade_date" in frame.columns:
+            for trade_date, group in frame.groupby("trade_date"):
+                day_counts = group["target_direction"].value_counts().to_dict()
+                by_day.append({
+                    "trade_date": str(trade_date),
+                    "rows": int(len(group)),
+                    "up": int(day_counts.get(1, 0)),
+                    "down": int(day_counts.get(-1, 0)),
+                    "flat": int(day_counts.get(0, 0)),
+                })
+            by_day.sort(key=lambda x: x["trade_date"])
+
+        return jsonify({
+            "ok": True,
+            "start_date": start,
+            "end_date": end,
+            "database_rows": len(rows),
+            "training_rows": total,
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+            "up_ratio": round(up_count / total, 4) if total else None,
+            "down_ratio": round(down_count / total, 4) if total else None,
+            "flat_ratio": round(flat_count / total, 4) if total else None,
+            "event_counts": {
+                str(k): int(v) for k, v in event_counts.items()
+            },
+            "by_day": by_day,
+        }), 200
+
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_TRAINING_LABEL_DISTRIBUTION failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction training label distribution failed",
+            "error": repr(exc),
+        }), 500
+
+
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
