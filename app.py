@@ -2966,6 +2966,174 @@ def market_prediction_training_label_distribution_route():
         }), 500
 
 
+@app.get("/market_prediction_change_points_distribution")
+def market_prediction_change_points_distribution_route():
+    """
+    拉出指定期間「15分鐘漲跌點數」的原始連續分布（不是 up/down/flat
+    三桶），用來判斷零訊號期間是市場真的溫和、還是觸發邏輯有問題。
+
+    只讀，不動任何訓練/shadow 流程。
+
+    用法：
+    /market_prediction_change_points_distribution?token=xxx&start_date=2026-09-17&end_date=2026-09-30
+    """
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    start_date = str(request.args.get("start_date", "") or "").strip() or None
+    end_date = str(request.args.get("end_date", "") or "").strip() or None
+
+    try:
+        from services.market_prediction_repository_v7 import (
+            load_market_prediction_rows_paginated,
+        )
+        from services.market_prediction_selective_service_v7 import (
+            _date_range,
+            _prepare_training_frame,
+        )
+
+        start, end = _date_range(start_date, end_date)
+
+        rows, repository_status = load_market_prediction_rows_paginated(
+            start,
+            end,
+            limit=50000,
+        )
+
+        if not repository_status.get("ok"):
+            return jsonify({
+                "ok": False,
+                "message": "Supabase 資料分頁讀取失敗",
+                "repository_status": repository_status,
+            }), 500
+
+        frame = _prepare_training_frame(rows)
+
+        if frame is None or len(frame) == 0:
+            return jsonify({
+                "ok": False,
+                "message": "指定期間查無資料",
+                "start_date": start,
+                "end_date": end,
+                "database_rows": len(rows),
+            }), 200
+
+        # 防呆：我們不確定這個環境目前實際的欄位名稱，所以動態找，
+        # 而不是寫死一個可能不存在的欄位名稱去硬讀。
+        candidate_names = [
+            "change_15m",
+            "change_points",
+            "target_change_points",
+            "future_change_points",
+            "price_change_15m",
+            "change_15min",
+            "delta_points",
+        ]
+
+        numeric_cols = [
+            col
+            for col in frame.columns
+            if str(frame[col].dtype).startswith(("float", "int"))
+        ]
+
+        change_col = next(
+            (c for c in candidate_names if c in frame.columns),
+            None,
+        )
+
+        if change_col is None:
+            # 退而求其次：找欄名包含 change/diff/delta 的數值欄位。
+            change_col = next(
+                (
+                    c for c in numeric_cols
+                    if any(
+                        kw in c.lower()
+                        for kw in ["change", "diff", "delta"]
+                    )
+                    and c not in {"target_direction", "target_event"}
+                ),
+                None,
+            )
+
+        if change_col is None:
+            return jsonify({
+                "ok": False,
+                "message": (
+                    "找不到漲跌點數欄位，改用 available_columns 手動確認"
+                    "正確欄位名稱後再重打一次（可加 &column=實際欄位名）"
+                ),
+                "available_columns": list(frame.columns),
+                "numeric_columns": numeric_cols,
+            }), 200
+
+        override_col = str(request.args.get("column", "") or "").strip()
+        if override_col and override_col in frame.columns:
+            change_col = override_col
+
+        series = frame[change_col].dropna()
+        series = series[series.apply(lambda v: isinstance(v, (int, float)))]
+
+        if len(series) == 0:
+            return jsonify({
+                "ok": False,
+                "message": f"欄位 {change_col} 沒有可用的數值資料",
+                "available_columns": list(frame.columns),
+            }), 200
+
+        abs_series = series.abs()
+
+        buckets = [
+            ("0-25", 0, 25),
+            ("25-50", 25, 50),
+            ("50-75", 50, 75),
+            ("75-100", 75, 100),
+            ("100-150", 100, 150),
+            ("150-200", 150, 200),
+            ("200+", 200, float("inf")),
+        ]
+
+        bucket_counts = {}
+        for label, lo, hi in buckets:
+            count = int(((abs_series >= lo) & (abs_series < hi)).sum())
+            bucket_counts[label] = count
+
+        exceed_100_count = int((abs_series >= 100).sum())
+
+        return jsonify({
+            "ok": True,
+            "start_date": start,
+            "end_date": end,
+            "column_used": change_col,
+            "available_columns": list(frame.columns),
+            "total_rows": int(len(series)),
+            "mean_abs": round(float(abs_series.mean()), 2),
+            "median_abs": round(float(abs_series.median()), 2),
+            "std": round(float(series.std()), 2),
+            "min": round(float(series.min()), 2),
+            "max": round(float(series.max()), 2),
+            "p90_abs": round(float(abs_series.quantile(0.9)), 2),
+            "p95_abs": round(float(abs_series.quantile(0.95)), 2),
+            "p99_abs": round(float(abs_series.quantile(0.99)), 2),
+            "abs_bucket_counts": bucket_counts,
+            "rows_abs_gte_100": exceed_100_count,
+            "rows_abs_gte_100_ratio": round(
+                exceed_100_count / len(series), 4
+            ) if len(series) else None,
+        }), 200
+
+    except Exception as exc:
+        print(
+            "MARKET_PREDICTION_CHANGE_POINTS_DISTRIBUTION failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "market prediction change points distribution failed",
+            "error": repr(exc),
+        }), 500
+
 
 @app.get("/sync_tdcc_large_holder")
 def sync_tdcc_large_holder_route():
