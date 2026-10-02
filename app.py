@@ -2774,11 +2774,15 @@ def market_prediction_shadow_quality_route():
 def market_prediction_shadow_detail_route():
     """
     匯出已結算影子預測的原始明細（不做彙總），供人工／外部分析用。
-    只回傳 prediction_ts / signal / actual_direction / actual_change_points
-    這幾個欄位，避免回應太肥。
+    除了 prediction_ts / signal / actual_direction / actual_change_points，
+    也一併回傳 event_probability / up_probability / direction_confidence
+    及當下使用的門檻值，用來判斷「訊號不出來」是機率真的低、還是門檻
+    設太高——這幾個欄位 predict_market_shadow() 每次都會存，只是原本
+    這條路由沒有吐出來。
 
     用法：
     /market_prediction_shadow_detail?token=xxx&start_date=2026-07-27&end_date=2026-08-22
+    &only_signals=0（不過濾掉 observe，要看機率分布時務必加這個）
     """
     if not _check_internal_token():
         return jsonify({"ok": False, "message": "invalid token"}), 403
@@ -2827,9 +2831,25 @@ def market_prediction_shadow_detail_route():
                 "actual_direction": row.get("actual_direction"),
                 "actual_change_points": row.get("actual_change_points"),
                 "is_correct": row.get("is_correct"),
+                "event_probability": row.get("event_probability"),
+                "up_probability": row.get("up_probability"),
+                "direction_confidence": row.get("direction_confidence"),
+                "event_probability_threshold": row.get(
+                    "event_probability_threshold"
+                ),
+                "direction_confidence_threshold": row.get(
+                    "direction_confidence_threshold"
+                ),
+                "artifact_key": row.get("artifact_key"),
+                "model_version": row.get("model_version"),
             }
             for row in settled
         ]
+
+        # 防呆：如果底層 select 沒有帶到機率/門檻欄位，上面只會全是
+        # None，不會噴錯——這裡額外列出第一筆的原始 key，方便一眼
+        # 看出底層實際有哪些欄位可用。
+        sample_keys = sorted(settled[0].keys()) if settled else []
 
         return jsonify({
             "ok": True,
@@ -2837,6 +2857,7 @@ def market_prediction_shadow_detail_route():
             "end_date": end_text,
             "only_signals": only_signals,
             "rows": len(detail),
+            "available_source_keys": sample_keys,
             "detail": detail,
         }), 200
 
