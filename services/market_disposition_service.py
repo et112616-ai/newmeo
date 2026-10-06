@@ -20,6 +20,7 @@ market_disposition_service.py
     無法判讀者歸入「未列明」。
 """
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-MARKET_DISPOSITION_SERVICE_VERSION = "2026-08-21-v4-release-next-trading-day"
+MARKET_DISPOSITION_SERVICE_VERSION = "2026-10-06-v5-last-seen-ghost-release"
 
 TWSE_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
@@ -384,6 +385,189 @@ def _dedupe_latest_by_code(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(best_by_code.values())
 
 
+# ============================================================
+# 「最後一次看到」持久化（彌補官方 API 隔天就把資料拿掉的問題）
+# ============================================================
+#
+# TWSE／TPEX 的處置公告 API，一旦處置期間「正式結束」（end_date 那天
+# 過後），官方清單就會直接把該檔股票移除，不會多留一天。但我們的
+# 「解除日＝期間結束後下一個交易日」這個顯示邏輯，需要在解除日當天
+# 還能看到這筆資料才能顯示「今日解除」——而官方不會配合留到那天。
+#
+# 解法：每次抓到即時資料時，把當下看到的每一檔都記錄「最後一次看到」
+# 的完整資訊存進 Supabase。組「今日解除」清單時，除了今天官方清單
+# 裡還有的，也去查這張表：凡是「解除日剛好是今天」但官方清單已經
+# 不見的股票，用存起來的資料補回來顯示這一天。隔天 release_date 不再
+# 等於今天，自然就不會再被抓出來，不需要額外清理。
+
+MARKET_DISPOSITION_LAST_SEEN_TABLE = "market_disposition_last_seen"
+
+
+def _supabase_headers() -> dict[str, str]:
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_table_url(table: str) -> str:
+    base = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+
+    if not base:
+        return ""
+
+    return f"{base}/rest/v1/{table}"
+
+
+def _last_seen_payload(row: dict[str, Any], today: date) -> dict[str, Any] | None:
+    code = _clean_text(row.get("code"))
+    start_date = row.get("start_date")
+    end_date = row.get("end_date")
+    release_date = row.get("release_date")
+
+    if not code or not start_date or not end_date or not release_date:
+        return None
+
+    return {
+        "stock_id": code,
+        "market": row.get("market") or "",
+        "name": row.get("name") or "",
+        "period_text": row.get("period") or "",
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "release_date": release_date.isoformat(),
+        "minutes": row.get("minutes"),
+        "last_seen_date": today.isoformat(),
+    }
+
+
+def _upsert_last_seen_rows(rows: list[dict[str, Any]], today: date) -> None:
+    """
+    把今天官方清單裡看到的每一檔，存一份「最後一次看到」的快照。
+    單純覆蓋（on_conflict=stock_id），只保留最新一次看到的資訊。
+    純盡力而為：失敗不影響今天卡片本身的顯示。
+    """
+    url = _supabase_table_url(MARKET_DISPOSITION_LAST_SEEN_TABLE)
+
+    if not url:
+        return
+
+    payloads = [
+        p for p in (
+            _last_seen_payload(row, today) for row in rows
+        ) if p
+    ]
+
+    if not payloads:
+        return
+
+    headers = _supabase_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+
+    try:
+        res = requests.post(
+            url,
+            headers=headers,
+            params={"on_conflict": "stock_id"},
+            json=payloads,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            _debug(
+                "last_seen upsert failed",
+                "| status =", res.status_code,
+                "| body =", res.text[:300],
+            )
+
+    except Exception as e:
+        _debug("last_seen upsert exception", type(e).__name__, str(e))
+
+
+def _fetch_ghost_released_today(
+    today: date,
+    live_codes: set[str],
+) -> list[dict[str, Any]]:
+    """
+    找出「解除日剛好是今天、但官方清單裡已經不見了」的股票，
+    用上次看到的資料補回來顯示這最後一天。
+    """
+    url = _supabase_table_url(MARKET_DISPOSITION_LAST_SEEN_TABLE)
+
+    if not url:
+        return []
+
+    headers = _supabase_headers()
+
+    try:
+        res = requests.get(
+            url,
+            headers=headers,
+            params={
+                "select": (
+                    "stock_id,market,name,period_text,"
+                    "start_date,end_date,release_date,minutes"
+                ),
+                "release_date": f"eq.{today.isoformat()}",
+            },
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            _debug(
+                "last_seen ghost fetch failed",
+                "| status =", res.status_code,
+                "| body =", res.text[:300],
+            )
+            return []
+
+        records = res.json() or []
+
+    except Exception as e:
+        _debug("last_seen ghost fetch exception", type(e).__name__, str(e))
+        return []
+
+    ghosts: list[dict[str, Any]] = []
+
+    for record in records:
+        code = _clean_text(record.get("stock_id"))
+
+        if not code or code in live_codes:
+            continue
+
+        start_date = _parse_date(record.get("start_date"))
+        end_date = _parse_date(record.get("end_date"))
+        release_date = _parse_date(record.get("release_date"))
+
+        if not start_date or not end_date or not release_date:
+            continue
+
+        ghosts.append(
+            {
+                "market": record.get("market") or "",
+                "code": code,
+                "name": record.get("name") or "",
+                "period": record.get("period_text") or "",
+                "start_date": start_date,
+                "end_date": end_date,
+                "release_date": release_date,
+                "minutes": record.get("minutes"),
+            }
+        )
+
+    if ghosts:
+        _debug(
+            "last_seen ghost rows found",
+            "| today =", today.isoformat(),
+            "| codes =", [g["code"] for g in ghosts],
+        )
+
+    return ghosts
+
+
 def _next_trading_day(d: date) -> date:
     """
     往後找下一個「交易日」（只跳過六日，不含國定假日／補假）。
@@ -419,7 +603,12 @@ def get_market_disposition_snapshot(
     tpex_rows = _fetch_tpex()
     raw_rows = twse_rows + tpex_rows
 
-    active_rows: list[dict[str, Any]] = []
+    # 先把今天官方清單裡每一檔都算好 release_date，順便存一份
+    # 「最後一次看到」的快照——這樣即使明天官方清單把它拿掉，
+    # 我們還記得它的 end_date／release_date。
+    live_codes: set[str] = set()
+    rows_with_release: list[dict[str, Any]] = []
+
     for row in raw_rows:
         start_date = row.get("start_date")
         end_date = row.get("end_date")
@@ -427,22 +616,39 @@ def get_market_disposition_snapshot(
         if not start_date or not end_date:
             continue
 
+        row = dict(row)
+        row["release_date"] = _next_trading_day(end_date)
+        rows_with_release.append(row)
+        live_codes.add(row.get("code", ""))
+
+    _upsert_last_seen_rows(rows_with_release, today)
+
+    # 補上「解除日剛好是今天、但官方清單已經不見」的股票。
+    ghost_rows = _fetch_ghost_released_today(today, live_codes)
+
+    active_rows: list[dict[str, Any]] = []
+    for row in rows_with_release + ghost_rows:
+        start_date = row.get("start_date")
+        end_date = row.get("end_date")
+        release_date = row.get("release_date")
+
+        if not start_date or not end_date or not release_date:
+            continue
+
         # 公告的處置期間「最後一天」當天仍受限，真正解除是期間結束後
         # 的下一個交易日（例如期間 8/13~8/21〔五〕，下一個交易日
         # 8/24〔一〕才解除）。所以顯示範圍要延伸到 release_date。
-        release_date = _next_trading_day(end_date)
-
         if start_date <= today <= release_date:
             row = dict(row)
             row["period_display"] = _period_display(
                 start_date, end_date, row.get("period", "")
             )
-            row["release_date"] = release_date
             row["is_new_today"] = start_date == today
             row["is_released_today"] = release_date == today
             active_rows.append(row)
 
-    # 同一股票代號若重複出現（多筆處置公告），只保留最新一筆。
+    # 同一股票代號若重複出現（多筆處置公告，或官方清單＋補回的舊資料
+    # 重疊），只保留最新一筆。
     active_rows = _dedupe_latest_by_code(active_rows)
 
     active_rows.sort(key=_row_sort_key)
@@ -464,6 +670,7 @@ def get_market_disposition_snapshot(
         "version =", MARKET_DISPOSITION_SERVICE_VERSION,
         "| twse =", len(twse_rows),
         "| tpex =", len(tpex_rows),
+        "| ghosts =", len(ghost_rows),
         "| active =", len(active_rows),
     )
 
