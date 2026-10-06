@@ -356,6 +356,76 @@ def test_disposition():
         "data": result
     })
 
+@app.get("/sync_market_disposition")
+def sync_market_disposition_route():
+    """
+    主動重新抓一次大盤處置日報（TWSE/TPEX），讓每一檔股票的
+    start_date/end_date/release_date 被記錄進 market_disposition_last_seen
+    這張表，不用等到有人在 LINE 上查處置日報才被動觸發。
+
+    建議用 Make 排程每天固定打一次（例如收盤後），確保「解除日」
+    判斷不會因為某天沒人查而漏記錄某檔股票的資料。
+
+    用法：
+    /sync_market_disposition?token=xxx
+    """
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    try:
+        from services.market_disposition_service import (
+            get_market_disposition_snapshot,
+        )
+
+        t0 = time.perf_counter()
+        snapshot = get_market_disposition_snapshot(force_refresh=True)
+        seconds = round(time.perf_counter() - t0, 3)
+
+        new_count = sum(
+            1 for row in snapshot.all_rows if row.get("is_new_today")
+        )
+        released_count = sum(
+            1 for row in snapshot.all_rows if row.get("is_released_today")
+        )
+
+        print(
+            "DEBUG sync_market_disposition",
+            "| trade_date =", snapshot.trade_date,
+            "| total =", snapshot.total_count,
+            "| new_today =", new_count,
+            "| released_today =", released_count,
+            "| seconds =", seconds,
+            flush=True,
+        )
+
+        return jsonify({
+            "ok": bool(snapshot.available),
+            "message": snapshot.message,
+            "trade_date": snapshot.trade_date,
+            "total_count": snapshot.total_count,
+            "new_today_count": new_count,
+            "released_today_count": released_count,
+            "groups": [
+                {"label": g.label, "count": len(g.rows)}
+                for g in snapshot.groups
+            ],
+            "seconds": seconds,
+        }), 200
+
+    except Exception as exc:
+        print(
+            "SYNC_MARKET_DISPOSITION failed",
+            "| error =", repr(exc),
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "sync market disposition failed",
+            "error": repr(exc),
+        }), 500
+
+
 @app.route("/test/etf/<etf_code>", methods=["GET"])
 def test_etf_holdings(etf_code):
     try:
