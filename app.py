@@ -405,6 +405,8 @@ def sync_market_disposition_route():
             "total_count": snapshot.total_count,
             "new_today_count": new_count,
             "released_today_count": released_count,
+            "ghost_count": snapshot.ghost_count,
+            "last_seen_upsert": snapshot.last_seen_upsert,
             "groups": [
                 {"label": g.label, "count": len(g.rows)}
                 for g in snapshot.groups
@@ -422,6 +424,40 @@ def sync_market_disposition_route():
         return jsonify({
             "ok": False,
             "message": "sync market disposition failed",
+            "error": repr(exc),
+        }), 500
+
+
+@app.get("/debug_market_disposition")
+def debug_market_disposition_route():
+    """
+    診斷用（只讀）：看指定股票在官方 TWSE/TPEX 清單與 last_seen 資料表
+    裡目前各是什麼狀態。
+
+    用法：
+    /debug_market_disposition?token=xxx&codes=3167,8996,3016,3055,2221
+    """
+    if not _check_internal_token():
+        return jsonify({"ok": False, "message": "invalid token"}), 403
+
+    codes = [
+        c.strip()
+        for c in str(request.args.get("codes", "") or "").replace("，", ",").split(",")
+        if c.strip()
+    ]
+
+    try:
+        from services.market_disposition_service import (
+            debug_disposition_state,
+        )
+
+        return jsonify({"ok": True, **debug_disposition_state(codes)}), 200
+
+    except Exception as exc:
+        print(traceback.format_exc(), flush=True)
+        return jsonify({
+            "ok": False,
+            "message": "debug market disposition failed",
             "error": repr(exc),
         }), 500
 
