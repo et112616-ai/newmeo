@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-MARKET_DISPOSITION_SERVICE_VERSION = "2026-10-06-v5-last-seen-ghost-release"
+MARKET_DISPOSITION_SERVICE_VERSION = "2026-10-13-v6-ghost-read-before-write"
 
 TWSE_URL = "https://openapi.twse.com.tw/v1/announcement/punish"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information"
@@ -302,6 +302,8 @@ class MarketDispositionSnapshot:
     all_rows: list[dict[str, Any]] = field(default_factory=list)
     total_count: int = 0
     source: str = "TWSE / TPEX"
+    ghost_count: int = 0
+    last_seen_upsert: dict[str, Any] = field(default_factory=dict)
 
 
 def _group_key(minutes: int | None) -> str:
@@ -444,25 +446,60 @@ def _last_seen_payload(row: dict[str, Any], today: date) -> dict[str, Any] | Non
     }
 
 
-def _upsert_last_seen_rows(rows: list[dict[str, Any]], today: date) -> None:
+_LAST_UPSERT_STATUS: dict[str, Any] = {}
+
+
+def get_last_upsert_status() -> dict[str, Any]:
+    """最近一次寫入 last_seen 的結果（給同步路由／診斷用）。"""
+    return dict(_LAST_UPSERT_STATUS)
+
+
+def _upsert_last_seen_rows(rows: list[dict[str, Any]], today: date) -> dict[str, Any]:
     """
-    把今天官方清單裡看到的每一檔，存一份「最後一次看到」的快照。
-    單純覆蓋（on_conflict=stock_id），只保留最新一次看到的資訊。
-    純盡力而為：失敗不影響今天卡片本身的顯示。
+    把今天官方清單裡看到的股票，存一份「最後一次看到」的快照。
+
+    重點：
+    1. 同一個股票代號只送一筆（保留最新一筆）。PostgreSQL 的批次 upsert
+       只要同一批裡有重複主鍵，整批都會被拒絕。
+    2. 只存「尚未完全結束」（release_date >= 今天）的資料，避免官方清單
+       裡殘留的舊紀錄去覆蓋掉比較新的紀錄。
+    3. 回傳寫入結果，失敗時不再只留 log，同步路由可以直接看到。
     """
+    status: dict[str, Any] = {
+        "attempted": 0,
+        "deduped_from": 0,
+        "ok": False,
+        "http_status": None,
+        "error": "",
+    }
+
     url = _supabase_table_url(MARKET_DISPOSITION_LAST_SEEN_TABLE)
 
     if not url:
-        return
+        status["error"] = "SUPABASE_URL not set"
+        _LAST_UPSERT_STATUS.clear()
+        _LAST_UPSERT_STATUS.update(status)
+        return status
+
+    candidates = [
+        r for r in rows
+        if r.get("release_date") and r["release_date"] >= today
+    ]
+    status["deduped_from"] = len(candidates)
+    candidates = _dedupe_latest_by_code(candidates)
 
     payloads = [
         p for p in (
-            _last_seen_payload(row, today) for row in rows
+            _last_seen_payload(row, today) for row in candidates
         ) if p
     ]
+    status["attempted"] = len(payloads)
 
     if not payloads:
-        return
+        status["ok"] = True
+        _LAST_UPSERT_STATUS.clear()
+        _LAST_UPSERT_STATUS.update(status)
+        return status
 
     headers = _supabase_headers()
     headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
@@ -475,16 +512,25 @@ def _upsert_last_seen_rows(rows: list[dict[str, Any]], today: date) -> None:
             json=payloads,
             timeout=15,
         )
+        status["http_status"] = res.status_code
 
         if res.status_code >= 400:
+            status["error"] = res.text[:300]
             _debug(
                 "last_seen upsert failed",
                 "| status =", res.status_code,
                 "| body =", res.text[:300],
             )
+        else:
+            status["ok"] = True
 
     except Exception as e:
+        status["error"] = f"{type(e).__name__}: {e}"
         _debug("last_seen upsert exception", type(e).__name__, str(e))
+
+    _LAST_UPSERT_STATUS.clear()
+    _LAST_UPSERT_STATUS.update(status)
+    return status
 
 
 def _fetch_ghost_released_today(
@@ -603,10 +649,7 @@ def get_market_disposition_snapshot(
     tpex_rows = _fetch_tpex()
     raw_rows = twse_rows + tpex_rows
 
-    # 先把今天官方清單裡每一檔都算好 release_date，順便存一份
-    # 「最後一次看到」的快照——這樣即使明天官方清單把它拿掉，
-    # 我們還記得它的 end_date／release_date。
-    live_codes: set[str] = set()
+    # 先把今天官方清單裡每一檔都算好 release_date。
     rows_with_release: list[dict[str, Any]] = []
 
     for row in raw_rows:
@@ -619,12 +662,20 @@ def get_market_disposition_snapshot(
         row = dict(row)
         row["release_date"] = _next_trading_day(end_date)
         rows_with_release.append(row)
-        live_codes.add(row.get("code", ""))
 
-    _upsert_last_seen_rows(rows_with_release, today)
+    # 今天官方清單裡「真的有效（處置中或今日解除）」的股票代號。
+    # 只有這些才會擋住補回：官方清單只是出現同代號、但那筆不在有效期間內
+    # （例如殘留的舊紀錄或未來才開始的新公告），不應該讓我們放棄補回。
+    live_active_codes: set[str] = {
+        row.get("code", "")
+        for row in rows_with_release
+        if row["start_date"] <= today <= row["release_date"]
+    }
 
-    # 補上「解除日剛好是今天、但官方清單已經不見」的股票。
-    ghost_rows = _fetch_ghost_released_today(today, live_codes)
+    # 順序很重要：先讀昨天存的紀錄，再把今天看到的寫進去。
+    # 如果反過來，今天官方清單的資料會先把舊紀錄蓋掉，就補不回來了。
+    ghost_rows = _fetch_ghost_released_today(today, live_active_codes)
+    upsert_status = _upsert_last_seen_rows(rows_with_release, today)
 
     active_rows: list[dict[str, Any]] = []
     for row in rows_with_release + ghost_rows:
@@ -662,6 +713,8 @@ def get_market_disposition_snapshot(
         "source": "TWSE / TPEX",
         "twse_count": len(twse_rows),
         "tpex_count": len(tpex_rows),
+        "ghost_count": len(ghost_rows),
+        "last_seen_upsert": upsert_status,
     }
 
     _MARKET_DISPOSITION_CACHE[cache_key] = (now, data)
@@ -677,6 +730,134 @@ def get_market_disposition_snapshot(
     return _snapshot_from_dict(data)
 
 
+def _trim_item(item: dict[str, Any], limit: int = 80) -> dict[str, Any]:
+    return {
+        str(k): (str(v)[:limit] if v is not None else None)
+        for k, v in item.items()
+    }
+
+
+def _supabase_get(params: dict[str, str]) -> dict[str, Any]:
+    url = _supabase_table_url(MARKET_DISPOSITION_LAST_SEEN_TABLE)
+
+    if not url:
+        return {"ok": False, "error": "SUPABASE_URL not set", "rows": []}
+
+    try:
+        res = requests.get(
+            url,
+            headers=_supabase_headers(),
+            params=params,
+            timeout=15,
+        )
+
+        if res.status_code >= 400:
+            return {
+                "ok": False,
+                "http_status": res.status_code,
+                "error": res.text[:300],
+                "rows": [],
+            }
+
+        return {"ok": True, "rows": res.json() or []}
+
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "rows": []}
+
+
+def debug_disposition_state(codes: list[str]) -> dict[str, Any]:
+    """
+    診斷用（只讀）：
+    1. 官方 TWSE / TPEX 清單裡，指定股票目前有哪些原始資料
+    2. 官方清單裡有哪些股票代號重複出現（會讓批次寫入失敗的原因）
+    3. last_seen 資料表裡，指定股票存了什麼、今天解除的有哪些
+    """
+    today = _today_tpe()
+    wanted = {c.strip() for c in codes if c.strip()}
+
+    result: dict[str, Any] = {
+        "today": today.isoformat(),
+        "version": MARKET_DISPOSITION_SERVICE_VERSION,
+        "codes": sorted(wanted),
+    }
+
+    twse_items: list[Any] = []
+    tpex_items: list[Any] = []
+
+    try:
+        r = requests.get(TWSE_URL, headers=HEADERS, timeout=TIMEOUT)
+        twse_items = r.json() if r.ok else []
+        result["twse_http_status"] = r.status_code
+    except Exception as e:
+        result["twse_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        r = requests.get(TPEX_URL, headers=HEADERS, timeout=TIMEOUT)
+        tpex_items = r.json() if r.ok else []
+        result["tpex_http_status"] = r.status_code
+    except Exception as e:
+        result["tpex_error"] = f"{type(e).__name__}: {e}"
+
+    twse_items = twse_items if isinstance(twse_items, list) else []
+    tpex_items = tpex_items if isinstance(tpex_items, list) else []
+
+    result["twse_total_items"] = len(twse_items)
+    result["tpex_total_items"] = len(tpex_items)
+
+    def tpex_code(item: dict[str, Any]) -> str:
+        for key in (
+            "SecuritiesCompanyCode", "Code", "SecurityCode",
+            "證券代號", "代號",
+        ):
+            if item.get(key):
+                return _clean_text(item.get(key))
+        return ""
+
+    result["twse_entries"] = [
+        _trim_item(i) for i in twse_items
+        if _clean_text(i.get("Code")) in wanted
+    ]
+    result["tpex_entries"] = [
+        _trim_item(i) for i in tpex_items
+        if tpex_code(i) in wanted
+    ]
+
+    # 官方清單裡重複出現的股票代號（會讓整批寫入失敗）
+    seen: dict[str, int] = {}
+    for i in twse_items:
+        code = _clean_text(i.get("Code"))
+        if _is_stock_code(code):
+            seen[code] = seen.get(code, 0) + 1
+    for i in tpex_items:
+        code = tpex_code(i)
+        if _is_stock_code(code):
+            seen[code] = seen.get(code, 0) + 1
+    result["duplicate_codes_in_feed"] = sorted(
+        c for c, n in seen.items() if n > 1
+    )
+
+    # last_seen 資料表狀態
+    if wanted:
+        in_list = ",".join(sorted(wanted))
+        result["last_seen_for_codes"] = _supabase_get(
+            {"select": "*", "stock_id": f"in.({in_list})"}
+        )
+
+    result["last_seen_release_today"] = _supabase_get(
+        {
+            "select": "stock_id,name,start_date,end_date,release_date,last_seen_date",
+            "release_date": f"eq.{today.isoformat()}",
+        }
+    )
+    total = _supabase_get({"select": "stock_id", "limit": "1000"})
+    result["last_seen_total_rows"] = (
+        len(total["rows"]) if total.get("ok") else total
+    )
+    result["last_upsert_status"] = get_last_upsert_status()
+
+    return result
+
+
 def _snapshot_from_dict(data: dict[str, Any]) -> MarketDispositionSnapshot:
     rows = list(data.get("rows", []))
     groups = _build_groups(rows)
@@ -689,4 +870,6 @@ def _snapshot_from_dict(data: dict[str, Any]) -> MarketDispositionSnapshot:
         all_rows=rows,
         total_count=int(data.get("total_count", 0)),
         source=str(data.get("source", "TWSE / TPEX")),
+        ghost_count=int(data.get("ghost_count", 0)),
+        last_seen_upsert=dict(data.get("last_seen_upsert") or {}),
     )
